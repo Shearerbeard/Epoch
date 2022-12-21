@@ -10,6 +10,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod event_store;
+pub mod decider;
 
 #[derive(Debug, Clone)]
 pub struct EventEnvelope<Ctx>
