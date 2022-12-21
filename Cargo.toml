@@ -15,3 +15,6 @@ thiserror = "1.0"
 # Use 0.8.2 only here because of a weird deps bug with eventstore
 # 1.x uuids are not compatible with eventstore internal uuids
 uuid =  { version = "0.8.2", features = ["v4", "serde"] }
+
+[dev-dependencies]
+assert_matches = "1.5.0"

@@ -101,6 +101,7 @@ enum InMemoryStateRepositoryError {}
 mod tests {
     use std::collections::HashMap;
 
+    use assert_matches::assert_matches;
     use thiserror::Error;
 
     use self::user::UserFieldError;
@@ -116,7 +117,7 @@ mod tests {
 
         use super::ValueType;
 
-        #[derive(Clone)]
+        #[derive(Debug, Clone)]
         pub struct User {
             pub id: UserId,
             pub name: UserName,
@@ -126,7 +127,7 @@ mod tests {
 
         pub type UnvalidatedUserName = String;
 
-        #[derive(Clone)]
+        #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct UserName(String);
 
         impl TryFrom<String> for UserName {
@@ -202,9 +203,12 @@ mod tests {
             }
         }
 
-        fn evolve(state: UserDeciderState, event: UserEvent) -> UserDeciderState {
+        fn evolve(mut state: UserDeciderState, event: UserEvent) -> UserDeciderState {
             match event {
-                UserEvent::UserAdded(_) => todo!(),
+                UserEvent::UserAdded(user) => {
+                    state.users.insert(user.id.to_owned(), user.to_owned());
+                    state
+                },
                 UserEvent::UserNameUpdated(_, _) => todo!(),
             }
         }
@@ -221,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn test_in_memory() {
+    fn test_raw_decider() {
         let event_repository: InMemoryEventRepository<UserCommand, UserEvent> =
             InMemoryEventRepository::new();
         let state_repository: InMemoryStateRepository<UserCommand> = InMemoryStateRepository::new();
@@ -233,12 +237,22 @@ mod tests {
             .fold(UserDecider::init(), UserDecider::evolve);
 
         let cmd = UserCommand::AddUser("Mike".to_string() as user::UnvalidatedUserName);
-        let events = UserDecider::decide(cmd, state).expect("Decider Success");
+        let events = UserDecider::decide(cmd, state.clone()).expect("Decider Success");
 
-        if let Some(UserEvent::UserAdded(user::User{ name, .. })) = events.first() {
-            assert_eq!(name.value(), "Mike".to_string())
+        if let Some(UserEvent::UserAdded(user::User{ name, id })) = events.clone().first() {
+            let user_id = id.clone();
+            let user_name = name.clone();
+
+            assert_eq!(name.value(), "Mike".to_string());
+
+            let state = events.into_iter().fold(state.clone(), UserDecider::evolve);
+
+            assert_matches!(state.users.get(&id).expect("User exists"), user::User {
+                id,
+                name
+            } if (id == &user_id && name == &user_name));
         } else {
             panic!("Events not produced")
-        }
+        } 
     }
 }
