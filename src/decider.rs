@@ -23,7 +23,7 @@ trait LockingEventRepository {}
 
 trait StateRepository<C: Command, Err> {
     fn reify(&self) -> <C as Command>::State;
-    fn save(&mut self, state: <C as Command>::State) -> Result<<C as Command>::State, Err>;
+    fn save(&mut self, state: &<C as Command>::State) -> Result<<C as Command>::State, Err>;
 }
 
 trait LockingStateRepository {}
@@ -88,10 +88,10 @@ impl<C: Command> StateRepository<C, InMemoryEventRepositoryError> for InMemorySt
 
     fn save(
         &mut self,
-        state: <C as Command>::State,
+        state: &<C as Command>::State,
     ) -> Result<<C as Command>::State, InMemoryEventRepositoryError> {
         self.state = state.clone();
-        Ok(state)
+        Ok(state.to_owned())
     }
 }
 
@@ -117,7 +117,7 @@ mod tests {
 
         use super::ValueType;
 
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct User {
             pub id: UserId,
             pub name: UserName,
@@ -160,14 +160,14 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     struct UserDeciderState {
         users: HashMap<user::UserId, user::User>,
     }
 
     enum UserCommand {
         AddUser(user::UnvalidatedUserName),
-        UpdateUserName(user::UserId, user::UserName),
+        UpdateUserName(user::UserId, user::UnvalidatedUserName),
     }
 
     impl Command for UserCommand {
@@ -194,12 +194,14 @@ mod tests {
                     let name = user::UserName::try_from(user_name)
                         .map_err(|e| UserDeciderError::UserField(e))?;
 
-                    Ok(vec![UserEvent::UserAdded(user::User {
-                        id: 1,
-                        name
-                    })])
+                    Ok(vec![UserEvent::UserAdded(user::User { id: 1, name })])
                 }
-                UserCommand::UpdateUserName(_, _) => todo!(),
+                UserCommand::UpdateUserName(user_id, user_name) => {
+                    let name = user::UserName::try_from(user_name)
+                        .map_err(|e| UserDeciderError::UserField(e))?;
+
+                    Ok(vec![UserEvent::UserNameUpdated(user_id, name)])
+                },
             }
         }
 
@@ -208,8 +210,11 @@ mod tests {
                 UserEvent::UserAdded(user) => {
                     state.users.insert(user.id.to_owned(), user.to_owned());
                     state
-                },
-                UserEvent::UserNameUpdated(_, _) => todo!(),
+                }
+                UserEvent::UserNameUpdated(user_id, user_name) => {
+                    state.users.get_mut(&user_id).unwrap().name = user_name.to_owned();
+                    state
+                }
             }
         }
 
@@ -228,7 +233,7 @@ mod tests {
     fn test_raw_decider() {
         let event_repository: InMemoryEventRepository<UserCommand, UserEvent> =
             InMemoryEventRepository::new();
-        let state_repository: InMemoryStateRepository<UserCommand> = InMemoryStateRepository::new();
+        let mut state_repository: InMemoryStateRepository<UserCommand> = InMemoryStateRepository::new();
 
         let state = event_repository
             .load()
@@ -239,7 +244,7 @@ mod tests {
         let cmd = UserCommand::AddUser("Mike".to_string() as user::UnvalidatedUserName);
         let events = UserDecider::decide(cmd, state.clone()).expect("Decider Success");
 
-        if let Some(UserEvent::UserAdded(user::User{ name, id })) = events.clone().first() {
+        if let Some(UserEvent::UserAdded(user::User { name, id })) = events.clone().first() {
             let user_id = id.clone();
             let user_name = name.clone();
 
@@ -247,12 +252,15 @@ mod tests {
 
             let state = events.into_iter().fold(state.clone(), UserDecider::evolve);
 
+            let _ = state_repository.save(&state);
+            assert_eq!(state_repository.reify(), state.clone());
+
             assert_matches!(state.users.get(&id).expect("User exists"), user::User {
                 id,
                 name
             } if (id == &user_id && name == &user_name));
         } else {
             panic!("Events not produced")
-        } 
+        }
     }
 }
