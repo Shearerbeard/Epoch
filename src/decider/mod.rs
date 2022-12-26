@@ -1,101 +1,20 @@
-use std::marker::PhantomData;
-
 use async_trait::async_trait;
 
-trait Command {
-    type State: Clone;
+pub mod repository;
+
+pub trait Command {
+    type State: Clone + Send + Sync;
 }
-pub trait Event {}
+pub trait Event {
+    fn event_type(&self) -> String;
+}
 
 #[async_trait]
-trait Decider<S, Cmd: Command, E: Event, Err> {
+pub trait Decider<S, Cmd: Command, E: Event, Err> {
     fn decide(cmd: Cmd, state: S) -> Result<Vec<E>, Err>;
     fn evolve(state: S, event: E) -> S;
     fn init() -> S;
 }
-
-trait EventRepository<C: Command, E: Event, Err> {
-    fn load(&self) -> Result<Vec<E>, Err>;
-    fn append(&mut self, events: Vec<E>) -> Result<Vec<E>, Err>;
-}
-
-trait LockingEventRepository {}
-
-trait StateRepository<C: Command, Err> {
-    fn reify(&self) -> <C as Command>::State;
-    fn save(&mut self, state: &<C as Command>::State) -> Result<<C as Command>::State, Err>;
-}
-
-trait LockingStateRepository {}
-
-#[derive(Default)]
-struct InMemoryEventRepository<C: Command, E: Event + Clone> {
-    events: Vec<E>,
-    position: usize,
-    pd: PhantomData<C>,
-}
-
-impl<C: Command, E: Event + Clone> EventRepository<C, E, InMemoryEventRepositoryError>
-    for InMemoryEventRepository<C, E>
-{
-    fn load(&self) -> Result<Vec<E>, InMemoryEventRepositoryError> {
-        Ok(self.events.clone())
-    }
-
-    fn append(&mut self, events: Vec<E>) -> Result<Vec<E>, InMemoryEventRepositoryError> {
-        self.events.extend(events.clone());
-        self.position += 1;
-
-        Ok(events)
-    }
-}
-
-impl<C: Command, E: Event + Clone> InMemoryEventRepository<C, E> {
-    fn new() -> Self {
-        let events: Vec<E> = vec![];
-
-        Self {
-            events,
-            position: Default::default(),
-            pd: PhantomData::<C>::default(),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum InMemoryEventRepositoryError {}
-
-struct InMemoryStateRepository<C: Command> {
-    state: <C as Command>::State,
-}
-
-impl<C> InMemoryStateRepository<C>
-where
-    C: Command,
-    <C as Command>::State: Default,
-{
-    fn new() -> Self {
-        Self {
-            state: <C as Command>::State::default(),
-        }
-    }
-}
-
-impl<C: Command> StateRepository<C, InMemoryEventRepositoryError> for InMemoryStateRepository<C> {
-    fn reify(&self) -> <C as Command>::State {
-        self.state.clone()
-    }
-
-    fn save(
-        &mut self,
-        state: &<C as Command>::State,
-    ) -> Result<<C as Command>::State, InMemoryEventRepositoryError> {
-        self.state = state.clone();
-        Ok(state.to_owned())
-    }
-}
-
-enum InMemoryStateRepositoryError {}
 
 #[cfg(test)]
 mod tests {
@@ -104,9 +23,17 @@ mod tests {
     use assert_matches::assert_matches;
     use thiserror::Error;
 
+    use crate::decider::repository::StateRepository;
+
     use self::user::UserFieldError;
 
-    use super::*;
+    use super::{
+        repository::{
+            in_memory::{InMemoryEventRepository, InMemoryStateRepository},
+            EventRepository,
+        },
+        *,
+    };
 
     trait ValueType<T> {
         fn value(&self) -> T;
@@ -180,7 +107,14 @@ mod tests {
         UserNameUpdated(user::UserId, user::UserName),
     }
 
-    impl Event for UserEvent {}
+    impl Event for UserEvent {
+        fn event_type(&self) -> String {
+            match self {
+                UserEvent::UserAdded(_) => "UserAdded".to_string(),
+                UserEvent::UserNameUpdated(_, _) => "UserNameUpdated".to_string(),
+            }
+        }
+    }
 
     struct UserDecider {}
 
@@ -201,7 +135,7 @@ mod tests {
                         .map_err(|e| UserDeciderError::UserField(e))?;
 
                     Ok(vec![UserEvent::UserNameUpdated(user_id, name)])
-                },
+                }
             }
         }
 
@@ -229,14 +163,16 @@ mod tests {
         UserField(UserFieldError),
     }
 
-    #[test]
-    fn test_raw_decider() {
+    #[actix_rt::test]
+    async fn test_raw_decider() {
         let event_repository: InMemoryEventRepository<UserCommand, UserEvent> =
             InMemoryEventRepository::new();
-        let mut state_repository: InMemoryStateRepository<UserCommand> = InMemoryStateRepository::new();
+        let mut state_repository: InMemoryStateRepository<UserCommand> =
+            InMemoryStateRepository::new();
 
         let state = event_repository
             .load()
+            .await
             .expect("Empty Events Vector")
             .into_iter()
             .fold(UserDecider::init(), UserDecider::evolve);
@@ -252,8 +188,8 @@ mod tests {
 
             let state = events.into_iter().fold(state.clone(), UserDecider::evolve);
 
-            let _ = state_repository.save(&state);
-            assert_eq!(state_repository.reify(), state.clone());
+            let _ = state_repository.save(&state).await;
+            assert_eq!(state_repository.reify().await, state.clone());
 
             assert_matches!(state.users.get(&id).expect("User exists"), user::User {
                 id,
