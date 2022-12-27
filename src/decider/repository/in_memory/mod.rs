@@ -1,4 +1,8 @@
-use std::{fmt::Debug, sync::{Mutex, Arc}};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 
@@ -6,25 +10,26 @@ use crate::decider::{Command, Event};
 
 use super::{EventRepository, StateRepository};
 
+/// Events ///
 #[derive(Default)]
-pub struct InMemoryEventRepository<E>
+pub struct SimpleInMemoryEventRepository<E>
 where
     E: Event + Clone + Send + Sync,
 {
-    state: Arc<Mutex<InMemoryEventRepositoryState<E>>> ,
+    state: Arc<Mutex<InMemoryEventRepositoryState<E>>>,
 }
 
 #[async_trait]
-impl<E> EventRepository<E, InMemoryEventRepositoryError> for InMemoryEventRepository<E>
+impl<E> EventRepository<E, SimpleInMemoryError> for SimpleInMemoryEventRepository<E>
 where
     E: Event + Clone + Send + Sync,
 {
-    async fn load(&self) -> Result<Vec<E>, InMemoryEventRepositoryError> {
+    async fn load(&self) -> Result<Vec<E>, SimpleInMemoryError> {
         let lock = self.state.lock().unwrap();
         Ok(lock.events.clone())
     }
 
-    async fn append(&mut self, events: &Vec<E>) -> Result<Vec<E>, InMemoryEventRepositoryError> {
+    async fn append(&mut self, events: &Vec<E>) -> Result<Vec<E>, SimpleInMemoryError> {
         let mut lock = self.state.lock().unwrap();
         lock.events.extend(events.to_owned());
         lock.position = lock.events.len();
@@ -33,7 +38,7 @@ where
     }
 }
 
-impl<E> InMemoryEventRepository<E>
+impl<E> SimpleInMemoryEventRepository<E>
 where
     E: Event + Clone + Send + Sync,
 {
@@ -42,7 +47,7 @@ where
             state: Arc::new(Mutex::new(InMemoryEventRepositoryState {
                 events: vec![],
                 position: 0,
-            })) 
+            })),
         }
     }
 }
@@ -50,12 +55,20 @@ where
 #[derive(Debug, Default)]
 struct InMemoryEventRepositoryState<E> {
     events: Vec<E>,
-    position: usize
+    position: usize,
 }
 
 #[derive(Debug)]
-pub enum InMemoryEventRepositoryError {}
+pub enum SimpleInMemoryError {}
 
+pub struct StreamedVersionedInMemoryEventRepository<E>
+where
+    E: Event + Sync + Send,
+{
+    state: HashMap<String, Arc<Mutex<InMemoryEventRepositoryState<E>>>>,
+}
+
+/// State ///
 pub struct InMemoryStateRepository<C: Command> {
     state: <C as Command>::State,
 }
@@ -73,7 +86,7 @@ where
 }
 
 #[async_trait]
-impl<C> StateRepository<C, InMemoryEventRepositoryError> for InMemoryStateRepository<C>
+impl<C> StateRepository<C, SimpleInMemoryError> for InMemoryStateRepository<C>
 where
     C: Command + Send + Sync,
     <C as Command>::State: Default + Send + Sync + Debug,
@@ -85,7 +98,7 @@ where
     async fn save(
         &mut self,
         state: &<C as Command>::State,
-    ) -> Result<<C as Command>::State, InMemoryEventRepositoryError> {
+    ) -> Result<<C as Command>::State, SimpleInMemoryError> {
         self.state = state.clone();
         Ok(self.state.to_owned())
     }

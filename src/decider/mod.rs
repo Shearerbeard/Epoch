@@ -31,7 +31,7 @@ mod tests {
 
     use super::{
         repository::{
-            in_memory::{InMemoryEventRepository, InMemoryStateRepository},
+            in_memory::{SimpleInMemoryEventRepository, InMemoryStateRepository},
             EventRepository,
         },
         *,
@@ -39,7 +39,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_raw_decider() {
-        let event_repository: InMemoryEventRepository<UserEvent> = InMemoryEventRepository::new();
+        let event_repository: SimpleInMemoryEventRepository<UserEvent> = SimpleInMemoryEventRepository::new();
         let mut state_repository: InMemoryStateRepository<UserCommand> =
             InMemoryStateRepository::new();
 
