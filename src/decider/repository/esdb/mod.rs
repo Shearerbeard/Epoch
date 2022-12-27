@@ -31,7 +31,7 @@ impl<'a, E> ESDBEventRepository<E> {
         }
     }
 
-    fn get_stream(&self, stream_id: &Option<String>) -> String {
+    fn get_stream(&self, stream_id: Option<&String>) -> String {
         if let Some(id) = stream_id {
             format!("{}-{}", self.stream_name, id)
         } else {
@@ -56,14 +56,14 @@ where
     type StreamId = String;
     type Version = ExpectedRevision;
 
-    async fn load(&self, id: &Option<Self::StreamId>) -> Result<(Vec<E>, Self::Version), Error> {
+    async fn load(&self, id: Option<&Self::StreamId>) -> Result<(Vec<E>, Self::Version), Error> {
         self.load_from_version(&ExpectedRevision::Any, id).await
     }
 
     async fn load_from_version(
         &self,
         version: &Self::Version,
-        id: &Option<Self::StreamId>,
+        id: Option<&Self::StreamId>,
     ) -> Result<(Vec<E>, Self::Version), Error> {
         println!("Calling Stream {}", self.get_stream(id));
         let mut stream = self
@@ -130,7 +130,7 @@ where
         let res = self
             .client
             .append_to_stream(
-                self.get_stream(&Some(stream.to_owned())),
+                self.get_stream(Some(stream)),
                 &AppendToStreamOptions::default().expected_revision(*version),
                 perpared_events,
             )
@@ -186,7 +186,7 @@ mod tests {
         let mut event_repository = ESDBEventRepository::<UserEvent>::new(&client, BASE_STREAM);
 
         let res: (Vec<UserEvent>, ExpectedRevision) =
-            event_repository.load(&None).await.expect("loaded");
+            event_repository.load(None).await.expect("loaded");
         assert_matches!(res, (v, _) if v == vec![] as Vec<UserEvent>);
 
         let events1 = vec![
@@ -222,19 +222,19 @@ mod tests {
         // Crude but we need to wait for ESDB to catch up its "Categories" auto projection
         thread::sleep(time::Duration::from_secs(1));
 
-        let res = event_repository.load(&Some("1".to_string())).await;
+        let res = event_repository.load(Some(&id_1)).await;
         assert_matches!(res, Ok((v, ExpectedRevision::Exact(_))) if v == events1);
 
-        let res = event_repository.load(&Some("2".to_string())).await;
+        let res = event_repository.load(Some(&id_2)).await;
         assert_matches!(res, Ok((v, ExpectedRevision::Exact(_))) if v == events2);
 
-        let res = event_repository.load(&None).await;
+        let res = event_repository.load(None).await;
 
         let events_combined: Vec<UserEvent> =
             events1.into_iter().chain(events2.into_iter()).collect();
         assert_matches!(res, Ok((v, ExpectedRevision::Exact(_))) if v == events_combined);
 
-        let res = event_repository.load(&Some("1".to_string())).await;
+        let res = event_repository.load(Some(&id_1)).await;
         let version = res.unwrap().1;
 
         let new_events = vec![UserEvent::UserNameUpdated(
@@ -250,7 +250,7 @@ mod tests {
         let version = res.1;
 
         let (latest_events, _) = event_repository
-            .load_from_version(&version, &Some("1".to_string()))
+            .load_from_version(&version, Some(&id_1))
             .await
             .expect("load success");
 

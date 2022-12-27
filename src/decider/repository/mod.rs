@@ -45,11 +45,11 @@ where
     type StreamId;
     type Version: Eq;
 
-    async fn load(&self, id: &Option<Self::StreamId>) -> Result<(Vec<E>, Self::Version), Err>;
+    async fn load(&self, id: Option<&Self::StreamId>) -> Result<(Vec<E>, Self::Version), Err>;
     async fn load_from_version(
         &self,
         version: &Self::Version,
-        id: &Option<Self::StreamId>,
+        id: Option<&Self::StreamId>,
     ) -> Result<(Vec<E>, Self::Version), Err>;
     async fn append(
         &mut self,
