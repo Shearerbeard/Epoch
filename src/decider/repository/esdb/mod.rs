@@ -4,12 +4,15 @@ use eventstore::{
     StreamPosition,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use thiserror::Error;
 use uuid::Uuid;
 
 use crate::decider::{Command, Event};
 
+use self::error::Error;
+
 use super::LockingEventStoreWithStreams;
+
+pub mod error;
 
 struct ESDBEventRepository {
     client: Client,
@@ -35,7 +38,7 @@ impl<'a> ESDBEventRepository {
 }
 
 #[async_trait]
-impl<'a, C, E> LockingEventStoreWithStreams<'a, C, E, ESEBEventRepositoryError>
+impl<'a, C, E> LockingEventStoreWithStreams<'a, C, E, Error>
     for ESDBEventRepository
 where
     C: Command,
@@ -47,12 +50,12 @@ where
     async fn load(
         &self,
         id: Option<Self::StreamId>,
-    ) -> Result<(Vec<E>, Self::Version), ESEBEventRepositoryError> {
+    ) -> Result<(Vec<E>, Self::Version), Error> {
         let mut stream = self
             .client
             .read_stream(self.get_stream(id), &ReadStreamOptions::default())
             .await
-            .map_err(ESEBEventRepositoryError::ESDBGeneral)?;
+            .map_err(Error::ESDBGeneral)?;
 
         let mut evts: Vec<ResolvedEvent> = vec![];
 
@@ -63,7 +66,7 @@ where
                 Err(eventstore::Error::ResourceNotFound) => {
                     return Ok((vec![], ExpectedRevision::NoStream))
                 }
-                Err(e) => return Err(ESEBEventRepositoryError::ReadStream(e)),
+                Err(e) => return Err(Error::ReadStream(e)),
             }
         }
 
@@ -74,7 +77,7 @@ where
             let event_data = ev.get_original_event();
             let event = event_data
                 .as_json::<E>()
-                .map_err(ESEBEventRepositoryError::DeserializeEvent)?;
+                .map_err(Error::DeserializeEvent)?;
 
             pos = ExpectedRevision::Exact(event_data.revision);
             rv.push(event)
@@ -87,7 +90,7 @@ where
         &self,
         version: Self::Version,
         id: Option<Self::StreamId>,
-    ) -> Result<(Vec<E>, Self::Version), ESEBEventRepositoryError> {
+    ) -> Result<(Vec<E>, Self::Version), Error> {
         let options =
             ReadStreamOptions::default().position(Self::expected_revision_to_position(&version));
 
@@ -95,7 +98,7 @@ where
             .client
             .read_stream(self.get_stream(id), &options)
             .await
-            .map_err(ESEBEventRepositoryError::ESDBGeneral)?;
+            .map_err(Error::ESDBGeneral)?;
 
         let mut evts: Vec<ResolvedEvent> = vec![];
 
@@ -106,7 +109,7 @@ where
                 Err(eventstore::Error::ResourceNotFound) => {
                     return Ok((vec![], ExpectedRevision::NoStream))
                 }
-                Err(e) => return Err(ESEBEventRepositoryError::ReadStream(e)),
+                Err(e) => return Err(Error::ReadStream(e)),
             }
         }
 
@@ -117,7 +120,7 @@ where
             let event_data = ev.get_original_event();
             let event = event_data
                 .as_json::<E>()
-                .map_err(ESEBEventRepositoryError::DeserializeEvent)?;
+                .map_err(Error::DeserializeEvent)?;
 
             pos = ExpectedRevision::Exact(event_data.revision);
             rv.push(event)
@@ -131,7 +134,7 @@ where
         version: Self::Version,
         stream: Self::StreamId,
         events: Vec<E>,
-    ) -> Result<(Vec<E>, Self::Version), ESEBEventRepositoryError>
+    ) -> Result<(Vec<E>, Self::Version), Error>
     where
         'a: 'async_trait,
         E: 'async_trait,
@@ -141,7 +144,7 @@ where
         for e in &events {
             let ed = EventData::json(e.event_type(), e.clone())
                 .map(|ed| ed.id(Uuid::new_v4()))
-                .map_err(ESEBEventRepositoryError::SerializeEventDataPayload)?;
+                .map_err(Error::SerializeEventDataPayload)?;
 
             perpared_events.push(ed);
         }
@@ -154,24 +157,9 @@ where
                 perpared_events,
             )
             .await
-            .map_err(|e| ESEBEventRepositoryError::WriteStream(stream, e))?;
+            .map_err(|e| Error::WriteStream(stream, e))?;
 
         Ok((events, ExpectedRevision::Exact(res.next_expected_version)))
     }
 }
 
-#[derive(Debug, Error)]
-enum ESEBEventRepositoryError {
-    #[error("ESDB Error {0}")]
-    ESDBGeneral(eventstore::Error),
-    #[error("Error reading stream: {0}")]
-    ReadStream(eventstore::Error),
-    #[error("Could not deserialize event {0}")]
-    DeserializeEvent(serde_json::Error),
-    #[error("Could not parse event meta {0}")]
-    ParseMetadata(serde_json::Error),
-    #[error("Could not serialize event {0}")]
-    SerializeEventDataPayload(serde_json::Error),
-    #[error("Could not write to stream {0}: {1}")]
-    WriteStream(String, eventstore::Error),
-}
