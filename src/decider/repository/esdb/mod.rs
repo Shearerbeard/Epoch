@@ -8,7 +8,7 @@ use eventstore::{
 use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;
 
-use crate::decider::{Command, Event};
+use crate::decider::Event;
 
 use self::error::Error;
 
@@ -16,14 +16,14 @@ use super::LockingEventStoreWithStreams;
 
 pub mod error;
 
-struct ESDBEventRepository<E> {
+pub struct ESDBEventRepository<E> {
     client: Client,
     stream_name: String,
     _hidden: PhantomData<E>,
 }
 
 impl<'a, E> ESDBEventRepository<E> {
-    fn new(client: &Client, stream_name: &str) -> Self {
+    pub fn new(client: &Client, stream_name: &str) -> Self {
         Self {
             client: client.to_owned(),
             stream_name: stream_name.to_owned(),
@@ -87,6 +87,7 @@ where
             pos = ExpectedRevision::Exact(ev.get_original_event().revision);
 
             if let Some(event_data) = ev.event {
+                // Continue on deser failure - occasionally you'll get delete and other system types in the stream
                 if let Ok(event) = event_data.as_json::<E>().map_err(Error::DeserializeEvent) {
                     rv.push(event);
                 }
@@ -228,7 +229,7 @@ mod tests {
         ];
 
         let _ = event_repository
-            .append(ExpectedRevision::Any, "1".to_string(), events1)
+            .append(ExpectedRevision::Any, "1".to_string(), events1.clone())
             .await;
 
         let events2 = vec![
@@ -243,19 +244,22 @@ mod tests {
         ];
 
         let _ = event_repository
-            .append(ExpectedRevision::Any, "2".to_string(), events2)
+            .append(ExpectedRevision::Any, "2".to_string(), events2.clone())
             .await;
 
         // Crude but we need to wait for ESDB to catch up its "Categories" auto projection
         thread::sleep(time::Duration::from_secs(1));
 
-        let res = event_repository.load(None).await;
-        println!("Result $all: {:#?}", res);
-
         let res = event_repository.load(Some("1".to_string())).await;
-        println!("Result id = 1: {:#?}", res);
+        assert_matches!(res, Ok((v, ExpectedRevision::Exact(_))) if v == events1);
 
         let res = event_repository.load(Some("2".to_string())).await;
-        println!("Result id = 2: {:#?}", res);
+        assert_matches!(res, Ok((v, ExpectedRevision::Exact(_))) if v == events2);
+
+        let res = event_repository.load(None).await;
+
+        let events_combined: Vec<UserEvent> =
+            events1.into_iter().chain(events2.into_iter()).collect();
+        assert_matches!(res, Ok((v, ExpectedRevision::Exact(_))) if v == events_combined);
     }
 }
