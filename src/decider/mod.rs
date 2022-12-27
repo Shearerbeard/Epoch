@@ -11,8 +11,8 @@ pub trait Event {
 
 #[async_trait]
 pub trait Decider<S, Cmd: Command, E: Event, Err> {
-    fn decide(cmd: Cmd, state: S) -> Result<Vec<E>, Err>;
-    fn evolve(state: S, event: E) -> S;
+    fn decide(cmd: &Cmd, state: &S) -> Result<Vec<E>, Err>;
+    fn evolve(state: S, event: &E) -> S;
     fn init() -> S;
 }
 
@@ -47,11 +47,11 @@ mod tests {
             .load()
             .await
             .expect("Empty Events Vector")
-            .into_iter()
+            .iter()
             .fold(UserDecider::init(), UserDecider::evolve);
 
         let cmd = UserCommand::AddUser("Mike".to_string() as user::UnvalidatedUserName);
-        let events = UserDecider::decide(cmd, state.clone()).expect("Decider Success");
+        let events = UserDecider::decide(&cmd, &state).expect("Decider Success");
 
         if let Some(UserEvent::UserAdded(user::User { name, id })) = events.clone().first() {
             let user_id = id.clone();
@@ -59,7 +59,7 @@ mod tests {
 
             assert_eq!(name.value(), "Mike".to_string());
 
-            let state = events.into_iter().fold(state.clone(), UserDecider::evolve);
+            let state = events.iter().fold(state.clone(), UserDecider::evolve);
 
             let _ = state_repository.save(&state).await;
             assert_eq!(state_repository.reify().await, state.clone());

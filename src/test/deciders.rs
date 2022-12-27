@@ -1,10 +1,13 @@
 pub(crate) mod user {
     use std::collections::HashMap;
 
-    use serde::{Serialize, Deserialize};
+    use serde::{Deserialize, Serialize};
     use thiserror::Error;
 
-    use crate::{test::ValueType, decider::{Decider, Command, Event}};
+    use crate::{
+        decider::{Command, Decider, Event},
+        test::ValueType,
+    };
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub(crate) struct User {
@@ -31,13 +34,28 @@ pub(crate) mod user {
             } else {
                 Ok(Self(value.to_owned()))
             }
-        } 
+        }
     }
 
     impl TryFrom<&str> for UserName {
         type Error = UserFieldError;
 
         fn try_from(value: &str) -> Result<Self, Self::Error> {
+            let len = value.len();
+            if len < 1 {
+                Err(UserFieldError::EmptyName)
+            } else if len > 10 {
+                Err(UserFieldError::NameToLong(value.to_owned()))
+            } else {
+                Ok(Self(value.to_owned()))
+            }
+        }
+    }
+
+    impl TryFrom<&String> for UserName {
+        type Error = UserFieldError;
+
+        fn try_from(value: &String) -> Result<Self, Self::Error> {
             let len = value.len();
             if len < 1 {
                 Err(UserFieldError::EmptyName)
@@ -67,8 +85,8 @@ pub(crate) mod user {
 
     impl Decider<UserDeciderState, UserCommand, UserEvent, UserDeciderError> for UserDecider {
         fn decide(
-            cmd: UserCommand,
-            _state: UserDeciderState,
+            cmd: &UserCommand,
+            _state: &UserDeciderState,
         ) -> Result<Vec<UserEvent>, UserDeciderError> {
             match cmd {
                 UserCommand::AddUser(user_name) => {
@@ -81,12 +99,12 @@ pub(crate) mod user {
                     let name = UserName::try_from(user_name)
                         .map_err(|e| UserDeciderError::UserField(e))?;
 
-                    Ok(vec![UserEvent::UserNameUpdated(user_id, name)])
+                    Ok(vec![UserEvent::UserNameUpdated(user_id.to_owned(), name)])
                 }
             }
         }
 
-        fn evolve(mut state: UserDeciderState, event: UserEvent) -> UserDeciderState {
+        fn evolve(mut state: UserDeciderState, event: &UserEvent) -> UserDeciderState {
             match event {
                 UserEvent::UserAdded(user) => {
                     state.users.insert(user.id.to_owned(), user.to_owned());
@@ -131,7 +149,7 @@ pub(crate) mod user {
                 UserEvent::UserNameUpdated(_, _) => "UserNameUpdated".to_string(),
             }
         }
-    } 
+    }
 
     #[derive(Debug, Error)]
     pub(crate) enum UserDeciderError {
