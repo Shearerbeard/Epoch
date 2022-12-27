@@ -9,9 +9,8 @@ pub mod in_memory;
 
 // Event Repositories
 #[async_trait]
-pub trait EventRepository<C, E, Err>
+pub trait EventRepository<E, Err>
 where
-    C: Command,
     E: Event + Sync + Send,
 {
     async fn load(&self) -> Result<Vec<E>, Err>;
@@ -19,9 +18,8 @@ where
 }
 
 #[async_trait]
-pub trait LockingEventRepository<C, E, Err>
+pub trait LockingEventRepository<E, Err>
 where
-    C: Command,
     E: Event + Sync + Send,
 {
     type Version: Eq;
@@ -39,9 +37,8 @@ where
 // https://github.com/dtolnay/async-trait/issues/8
 // https://play.rust-lang.org/?version=stable&mode=debug&edition=2018&gist=e977da3ddc0c21639b3116e123a94b6f
 #[async_trait]
-pub trait LockingEventStoreWithStreams<'a, C, E, Err>
+pub trait LockingEventStoreWithStreams<'a, E, Err>
 where
-    C: Command,
     E: Event + Sync + Send,
 {
     type StreamId;

@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, fmt::Debug};
+use std::{fmt::Debug, marker::PhantomData};
 
 use async_trait::async_trait;
 
@@ -7,15 +7,18 @@ use crate::decider::{Command, Event};
 use super::{EventRepository, StateRepository};
 
 #[derive(Default)]
-pub struct InMemoryEventRepository<C: Command, E: Event + Clone + Send + Sync> {
+pub struct InMemoryEventRepository<E>
+where
+    E: Event + Clone + Send + Sync,
+{
     events: Vec<E>,
     position: usize,
-    pd: PhantomData<C>,
 }
 
 #[async_trait]
-impl<C: Command + Send + Sync, E: Event + Clone + Send + Sync>
-    EventRepository<C, E, InMemoryEventRepositoryError> for InMemoryEventRepository<C, E>
+impl<E> EventRepository<E, InMemoryEventRepositoryError> for InMemoryEventRepository<E>
+where
+    E: Event + Clone + Send + Sync,
 {
     async fn load(&self) -> Result<Vec<E>, InMemoryEventRepositoryError> {
         Ok(self.events.clone())
@@ -29,14 +32,16 @@ impl<C: Command + Send + Sync, E: Event + Clone + Send + Sync>
     }
 }
 
-impl<C: Command, E: Event + Clone + Send + Sync> InMemoryEventRepository<C, E> {
+impl<E> InMemoryEventRepository<E>
+where
+    E: Event + Clone + Send + Sync,
+{
     pub fn new() -> Self {
         let events: Vec<E> = vec![];
 
         Self {
             events,
             position: Default::default(),
-            pd: PhantomData::<C>::default(),
         }
     }
 }
@@ -61,11 +66,10 @@ where
 }
 
 #[async_trait]
-impl<C> StateRepository<C, InMemoryEventRepositoryError>
-    for InMemoryStateRepository<C>
-    where
-        C: Command + Send + Sync,
-        <C as Command>::State: Default + Send + Sync + Debug
+impl<C> StateRepository<C, InMemoryEventRepositoryError> for InMemoryStateRepository<C>
+where
+    C: Command + Send + Sync,
+    <C as Command>::State: Default + Send + Sync + Debug,
 {
     async fn reify(&self) -> <C as Command>::State {
         self.state.clone()

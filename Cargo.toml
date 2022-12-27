@@ -12,7 +12,6 @@ esdb = []
 
 [dependencies]
 async-trait = "0.1.53"
-chrono = "0.4.19"
 eventstore = "2.1.1"
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.81"
@@ -24,3 +23,4 @@ uuid =  { version = "0.8.2", features = ["v4", "serde"] }
 [dev-dependencies]
 actix-rt = "2.7.0"
 assert_matches = "1.5.0"
+dotenv = "0.15.0"

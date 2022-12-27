@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use async_trait::async_trait;
 use eventstore::{
     AppendToStreamOptions, Client, EventData, ExpectedRevision, ReadStreamOptions, ResolvedEvent,
@@ -14,12 +16,21 @@ use super::LockingEventStoreWithStreams;
 
 pub mod error;
 
-struct ESDBEventRepository {
+struct ESDBEventRepository<E> {
     client: Client,
     stream_name: String,
+    _hidden: PhantomData<E>,
 }
 
-impl<'a> ESDBEventRepository {
+impl<'a, E> ESDBEventRepository<E> {
+    fn new(client: &Client, stream_name: &str) -> Self {
+        Self {
+            client: client.to_owned(),
+            stream_name: stream_name.to_owned(),
+            _hidden: PhantomData::default(),
+        }
+    }
+
     fn get_stream(&self, stream_id: Option<String>) -> String {
         if let Some(id) = stream_id {
             format!("{}/{}", self.stream_name, id)
@@ -38,19 +49,14 @@ impl<'a> ESDBEventRepository {
 }
 
 #[async_trait]
-impl<'a, C, E> LockingEventStoreWithStreams<'a, C, E, Error>
-    for ESDBEventRepository
+impl<'a, E> LockingEventStoreWithStreams<'a, E, Error> for ESDBEventRepository<E>
 where
-    C: Command,
     E: Event + Sync + Send + Serialize + DeserializeOwned + Clone,
 {
     type StreamId = String;
     type Version = ExpectedRevision;
 
-    async fn load(
-        &self,
-        id: Option<Self::StreamId>,
-    ) -> Result<(Vec<E>, Self::Version), Error> {
+    async fn load(&self, id: Option<Self::StreamId>) -> Result<(Vec<E>, Self::Version), Error> {
         let mut stream = self
             .client
             .read_stream(self.get_stream(id), &ReadStreamOptions::default())
@@ -75,9 +81,7 @@ where
 
         for ev in evts {
             let event_data = ev.get_original_event();
-            let event = event_data
-                .as_json::<E>()
-                .map_err(Error::DeserializeEvent)?;
+            let event = event_data.as_json::<E>().map_err(Error::DeserializeEvent)?;
 
             pos = ExpectedRevision::Exact(event_data.revision);
             rv.push(event)
@@ -118,9 +122,7 @@ where
 
         for ev in evts {
             let event_data = ev.get_original_event();
-            let event = event_data
-                .as_json::<E>()
-                .map_err(Error::DeserializeEvent)?;
+            let event = event_data.as_json::<E>().map_err(Error::DeserializeEvent)?;
 
             pos = ExpectedRevision::Exact(event_data.revision);
             rv.push(event)
@@ -163,3 +165,44 @@ where
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use assert_matches::assert_matches;
+
+    use crate::test::deciders::user::{User, UserEvent, UserId, UserName, UserCommand};
+
+    use super::*;
+
+    const BASE_STREAM: &str = "decider.repository.esdb";
+
+    fn store_from_environment() -> eventstore::Client {
+        let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
+        let settings = dotenv::var("ESDB_CONNECTION_STRING")
+            .expect("ESDB to be set in env")
+            .parse()
+            .expect("ESDB connection string to parse");
+
+        eventstore::Client::new(settings).expect("Eventstore client")
+    }
+
+    #[actix_rt::test]
+    async fn test_storage() {
+        let client = store_from_environment();
+        let event_repository = ESDBEventRepository::<UserEvent>::new(&client, BASE_STREAM);
+
+        let events = vec![
+            UserEvent::UserAdded(User {
+                id: 1,
+                name: UserName::try_from("Mike").expect("Name is valid"),
+            }),
+            UserEvent::UserNameUpdated(
+                1 as UserId,
+                UserName::try_from("Mike2").expect("Name is valid"),
+            ),
+        ];
+
+        let res: (Vec<UserEvent>, ExpectedRevision) = event_repository.load(None).await.expect("loaded");
+
+        println!("Result: {:?}", res);
+    }
+}
