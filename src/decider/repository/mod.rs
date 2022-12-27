@@ -14,7 +14,7 @@ where
     E: Event + Sync + Send,
 {
     async fn load(&self) -> Result<Vec<E>, Err>;
-    async fn append(&mut self, events: Vec<E>) -> Result<Vec<E>, Err>;
+    async fn append(&mut self, events: &Vec<E>) -> Result<Vec<E>, Err>;
 }
 
 #[async_trait]
@@ -24,11 +24,12 @@ where
 {
     type Version: Eq;
 
-    async fn load(&self) -> Result<(Vec<E>, Self::Version), Err>;
+    async fn load(&self) -> Result<(Vec<E>, &Self::Version), Err>;
+    async fn load_from_version(&self) -> Result<(Vec<E>, Option<&Self::Version>), Err>;
     async fn append(
         &mut self,
-        version: Self::Version,
-        events: Vec<E>,
+        version: &Self::Version,
+        events: &Vec<E>,
     ) -> Result<(Vec<E>, Self::Version), Err>;
 }
 
@@ -76,7 +77,7 @@ pub trait VersionedStateRepository<C: Command, Err> {
     async fn reify(&self) -> Result<(<C as Command>::State, Self::Version), Err>;
     async fn save(
         &mut self,
-        version: Self::Version,
+        version: &Self::Version,
         state: &<C as Command>::State,
     ) -> Result<<C as Command>::State, Err>;
 }

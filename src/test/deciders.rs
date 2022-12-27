@@ -68,7 +68,7 @@ pub(crate) mod user {
     impl Decider<UserDeciderState, UserCommand, UserEvent, UserDeciderError> for UserDecider {
         fn decide(
             cmd: UserCommand,
-            state: UserDeciderState,
+            _state: UserDeciderState,
         ) -> Result<Vec<UserEvent>, UserDeciderError> {
             match cmd {
                 UserCommand::AddUser(user_name) => {

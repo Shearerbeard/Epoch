@@ -1,4 +1,4 @@
-use std::{fmt::Debug, marker::PhantomData};
+use std::fmt::Debug;
 
 use async_trait::async_trait;
 
@@ -24,11 +24,11 @@ where
         Ok(self.events.clone())
     }
 
-    async fn append(&mut self, events: Vec<E>) -> Result<Vec<E>, InMemoryEventRepositoryError> {
+    async fn append(&mut self, events: &Vec<E>) -> Result<Vec<E>, InMemoryEventRepositoryError> {
         self.events.extend(events.clone());
         self.position += 1;
 
-        Ok(events)
+        Ok(events.to_owned())
     }
 }
 
