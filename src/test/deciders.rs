@@ -118,7 +118,7 @@ pub(crate) mod user {
         type State = UserDeciderState;
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub(crate) enum UserEvent {
         UserAdded(User),
         UserNameUpdated(UserId, UserName),

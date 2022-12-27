@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{fmt::Debug, marker::PhantomData};
 
 use async_trait::async_trait;
 use eventstore::{
@@ -33,9 +33,9 @@ impl<'a, E> ESDBEventRepository<E> {
 
     fn get_stream(&self, stream_id: Option<String>) -> String {
         if let Some(id) = stream_id {
-            format!("{}/{}", self.stream_name, id)
+            format!("{}-{}", self.stream_name, id)
         } else {
-            self.stream_name.clone()
+            format!("$ce-{}", self.stream_name)
         }
     }
 
@@ -51,15 +51,19 @@ impl<'a, E> ESDBEventRepository<E> {
 #[async_trait]
 impl<'a, E> LockingEventStoreWithStreams<'a, E, Error> for ESDBEventRepository<E>
 where
-    E: Event + Sync + Send + Serialize + DeserializeOwned + Clone,
+    E: Event + Sync + Send + Serialize + DeserializeOwned + Clone + Debug,
 {
     type StreamId = String;
     type Version = ExpectedRevision;
 
     async fn load(&self, id: Option<Self::StreamId>) -> Result<(Vec<E>, Self::Version), Error> {
+        println!("Calling Stream {}", self.get_stream(id.clone()));
         let mut stream = self
             .client
-            .read_stream(self.get_stream(id), &ReadStreamOptions::default())
+            .read_stream(
+                self.get_stream(id),
+                &ReadStreamOptions::default().resolve_link_tos(),
+            )
             .await
             .map_err(Error::ESDBGeneral)?;
 
@@ -80,11 +84,13 @@ where
         let mut pos = ExpectedRevision::StreamExists;
 
         for ev in evts {
-            let event_data = ev.get_original_event();
-            let event = event_data.as_json::<E>().map_err(Error::DeserializeEvent)?;
+            pos = ExpectedRevision::Exact(ev.get_original_event().revision);
 
-            pos = ExpectedRevision::Exact(event_data.revision);
-            rv.push(event)
+            if let Some(event_data) = ev.event {
+                if let Ok(event) = event_data.as_json::<E>().map_err(Error::DeserializeEvent) {
+                    rv.push(event);
+                }
+            }
         }
 
         Ok((rv, pos))
@@ -167,30 +173,50 @@ where
 
 #[cfg(test)]
 mod tests {
-    use assert_matches::assert_matches;
+    use core::time;
+    use std::thread;
 
-    use crate::test::deciders::user::{User, UserEvent, UserId, UserName, UserCommand};
+    use assert_matches::assert_matches;
+    use eventstore::DeleteStreamOptions;
+
+    use crate::test::deciders::user::{User, UserEvent, UserId, UserName};
 
     use super::*;
 
-    const BASE_STREAM: &str = "decider.repository.esdb";
+    const BASE_STREAM: &str = "test";
 
-    fn store_from_environment() -> eventstore::Client {
+    async fn store_from_environment(ids: Vec<usize>) -> eventstore::Client {
         let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
         let settings = dotenv::var("ESDB_CONNECTION_STRING")
             .expect("ESDB to be set in env")
             .parse()
             .expect("ESDB connection string to parse");
 
-        eventstore::Client::new(settings).expect("Eventstore client")
+        let client = eventstore::Client::new(settings).expect("Eventstore client");
+
+        for id in ids {
+            let _ = client
+                .delete_stream(
+                    format!("{}-{}", BASE_STREAM, id),
+                    &DeleteStreamOptions::default(),
+                )
+                .await;
+        }
+
+        client
     }
 
     #[actix_rt::test]
     async fn test_storage() {
-        let client = store_from_environment();
-        let event_repository = ESDBEventRepository::<UserEvent>::new(&client, BASE_STREAM);
+        let client = store_from_environment(vec![1, 2]).await;
 
-        let events = vec![
+        let mut event_repository = ESDBEventRepository::<UserEvent>::new(&client, BASE_STREAM);
+
+        let res: (Vec<UserEvent>, ExpectedRevision) =
+            event_repository.load(None).await.expect("loaded");
+        assert_matches!(res, (v, _) if v == vec![] as Vec<UserEvent>);
+
+        let events1 = vec![
             UserEvent::UserAdded(User {
                 id: 1,
                 name: UserName::try_from("Mike").expect("Name is valid"),
@@ -201,8 +227,35 @@ mod tests {
             ),
         ];
 
-        let res: (Vec<UserEvent>, ExpectedRevision) = event_repository.load(None).await.expect("loaded");
+        let _ = event_repository
+            .append(ExpectedRevision::Any, "1".to_string(), events1)
+            .await;
 
-        println!("Result: {:?}", res);
+        let events2 = vec![
+            UserEvent::UserAdded(User {
+                id: 2,
+                name: UserName::try_from("Stella").expect("Name is valid"),
+            }),
+            UserEvent::UserNameUpdated(
+                1 as UserId,
+                UserName::try_from("Stella2").expect("Name is valid"),
+            ),
+        ];
+
+        let _ = event_repository
+            .append(ExpectedRevision::Any, "2".to_string(), events2)
+            .await;
+
+        // Crude but we need to wait for ESDB to catch up its "Categories" auto projection
+        thread::sleep(time::Duration::from_secs(1));
+
+        let res = event_repository.load(None).await;
+        println!("Result $all: {:#?}", res);
+
+        let res = event_repository.load(Some("1".to_string())).await;
+        println!("Result id = 1: {:#?}", res);
+
+        let res = event_repository.load(Some("2".to_string())).await;
+        println!("Result id = 2: {:#?}", res);
     }
 }
