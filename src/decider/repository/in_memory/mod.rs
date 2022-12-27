@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::{Mutex, Arc}};
 
 use async_trait::async_trait;
 
@@ -11,8 +11,7 @@ pub struct InMemoryEventRepository<E>
 where
     E: Event + Clone + Send + Sync,
 {
-    events: Vec<E>,
-    position: usize,
+    state: Arc<Mutex<InMemoryEventRepositoryState<E>>> ,
 }
 
 #[async_trait]
@@ -21,14 +20,16 @@ where
     E: Event + Clone + Send + Sync,
 {
     async fn load(&self) -> Result<Vec<E>, InMemoryEventRepositoryError> {
-        Ok(self.events.clone())
+        let lock = self.state.lock().unwrap();
+        Ok(lock.events.clone())
     }
 
     async fn append(&mut self, events: &Vec<E>) -> Result<Vec<E>, InMemoryEventRepositoryError> {
-        self.events.extend(events.clone());
-        self.position += 1;
+        let mut lock = self.state.lock().unwrap();
+        lock.events.extend(events.to_owned());
+        lock.position = lock.events.len();
 
-        Ok(events.to_owned())
+        Ok(events.clone())
     }
 }
 
@@ -37,13 +38,19 @@ where
     E: Event + Clone + Send + Sync,
 {
     pub fn new() -> Self {
-        let events: Vec<E> = vec![];
-
         Self {
-            events,
-            position: Default::default(),
+            state: Arc::new(Mutex::new(InMemoryEventRepositoryState {
+                events: vec![],
+                position: 0,
+            })) 
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct InMemoryEventRepositoryState<E> {
+    events: Vec<E>,
+    position: usize
 }
 
 #[derive(Debug)]
