@@ -17,7 +17,7 @@ where
 #[async_trait]
 pub trait VersionedEventRepository<E, Err>
 where
-    E: Event + Sync + Send,
+    E: Event + Sync + Send + Debug,
 {
     type Version: Eq;
 
@@ -38,7 +38,7 @@ where
 #[async_trait]
 pub trait VersionedEventRepositoryWithStreams<'a, E, Err>
 where
-    E: Event + Sync + Send,
+    E: Event + Sync + Send + Debug,
     Err: Debug
 {
     type StreamId;
