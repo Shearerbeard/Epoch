@@ -1,6 +1,9 @@
+use std::fmt::Debug;
+
 use async_trait::async_trait;
 
 use crate::decider::Event;
+use super::RepositoryVersion;
 
 #[async_trait]
 pub trait EventRepository<E, Err>
@@ -36,22 +39,22 @@ where
 pub trait VersionedEventRepositoryWithStreams<'a, E, Err>
 where
     E: Event + Sync + Send,
+    Err: Debug
 {
     type StreamId;
-    type Version: Eq;
 
-    async fn load(&self, id: Option<&Self::StreamId>) -> Result<(Vec<E>, Self::Version), Err>;
+    async fn load(&self, id: Option<&Self::StreamId>) -> Result<(Vec<E>, RepositoryVersion), Err>;
     async fn load_from_version(
         &self,
-        version: &Self::Version,
+        version: &RepositoryVersion,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, Self::Version), Err>;
+    ) -> Result<(Vec<E>, RepositoryVersion), Err>;
     async fn append(
         &mut self,
-        version: &Self::Version,
+        version: &RepositoryVersion,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, Self::Version), Err>
+    ) -> Result<(Vec<E>, RepositoryVersion), Err>
     where
         'a: 'async_trait,
         E: 'async_trait;

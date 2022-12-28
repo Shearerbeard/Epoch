@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::{
-    repository::{RepositoryVersion, event::VersionedEventRepositoryWithStreams},
     decider::Event,
+    repository::{event::VersionedEventRepositoryWithStreams, RepositoryVersion},
 };
 
 use super::InMemoryEventRepositoryState;
@@ -51,22 +51,20 @@ where
 }
 
 #[async_trait]
-impl<'a, E> VersionedEventRepositoryWithStreams<'a, E, Error>
-    for InMemoryEventRepository<E>
+impl<'a, E> VersionedEventRepositoryWithStreams<'a, E, Error> for InMemoryEventRepository<E>
 where
     E: Event + Sync + Send + Clone,
 {
     type StreamId = String;
-    type Version = RepositoryVersion;
 
-    async fn load(&self, id: Option<&Self::StreamId>) -> Result<(Vec<E>, Self::Version), Error> {
+    async fn load(&self, id: Option<&Self::StreamId>) -> Result<(Vec<E>, RepositoryVersion), Error> {
         self.load_from_version(&RepositoryVersion::Any, id).await
     }
     async fn load_from_version(
         &self,
-        version: &Self::Version,
+        version: &RepositoryVersion,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, Self::Version), Error> {
+    ) -> Result<(Vec<E>, RepositoryVersion), Error> {
         let stream_key = self.get_stream(id);
         println!("Calling Stream {}", &stream_key);
 
@@ -78,7 +76,7 @@ where
 
             return Ok((
                 stream_state.events[start..end].to_vec(),
-                Self::Version::Exact(stream_state.position),
+                RepositoryVersion::Exact(stream_state.position),
             ));
         } else {
             return Ok((vec![], RepositoryVersion::NoStream));
@@ -86,10 +84,10 @@ where
     }
     async fn append(
         &mut self,
-        version: &Self::Version,
+        version: &RepositoryVersion,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, Self::Version), Error>
+    ) -> Result<(Vec<E>, RepositoryVersion), Error>
     where
         'a: 'async_trait,
         E: 'async_trait,

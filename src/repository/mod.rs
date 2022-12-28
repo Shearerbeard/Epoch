@@ -9,5 +9,6 @@ pub mod in_memory;
 pub enum RepositoryVersion {
     Any,
     Exact(usize),
-    NoStream
+    NoStream,
+    StreamExists
 }

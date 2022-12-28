@@ -12,7 +12,7 @@ use crate::decider::Event;
 
 use self::error::Error;
 
-use super::event::VersionedEventRepositoryWithStreams;
+use super::{event::VersionedEventRepositoryWithStreams, RepositoryVersion};
 
 pub mod error;
 
@@ -39,11 +39,20 @@ impl<'a, E> ESDBEventRepository<E> {
         }
     }
 
-    fn expected_revision_to_position(er: &ExpectedRevision) -> StreamPosition<u64> {
-        if let ExpectedRevision::Exact(u) = er {
-            StreamPosition::Position(u.to_owned())
+    fn version_to_esdb_position(version: &RepositoryVersion) -> StreamPosition<u64> {
+        if let RepositoryVersion::Exact(u) = version {
+            StreamPosition::Position(u.to_owned().try_into().unwrap())
         } else {
             StreamPosition::Start
+        }
+    }
+
+    fn version_to_expected_revision(version: &RepositoryVersion) -> ExpectedRevision {
+        match version {
+            RepositoryVersion::Exact(u) => {
+                ExpectedRevision::Exact(u.to_owned().try_into().unwrap())
+            }
+            _ => ExpectedRevision::Any,
         }
     }
 }
@@ -54,17 +63,19 @@ where
     E: Event + Sync + Send + Serialize + DeserializeOwned + Clone + Debug,
 {
     type StreamId = String;
-    type Version = ExpectedRevision;
 
-    async fn load(&self, id: Option<&Self::StreamId>) -> Result<(Vec<E>, Self::Version), Error> {
-        self.load_from_version(&ExpectedRevision::Any, id).await
+    async fn load(
+        &self,
+        id: Option<&Self::StreamId>,
+    ) -> Result<(Vec<E>, RepositoryVersion), Error> {
+        self.load_from_version(&RepositoryVersion::Any, id).await
     }
 
     async fn load_from_version(
         &self,
-        version: &Self::Version,
+        version: &RepositoryVersion,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, Self::Version), Error> {
+    ) -> Result<(Vec<E>, RepositoryVersion), Error> {
         println!("Calling Stream {}", self.get_stream(id));
         let mut stream = self
             .client
@@ -72,7 +83,7 @@ where
                 self.get_stream(id),
                 &ReadStreamOptions::default()
                     .resolve_link_tos()
-                    .position(Self::expected_revision_to_position(&version)),
+                    .position(Self::version_to_esdb_position(&version)),
             )
             .await
             .map_err(Error::ESDBGeneral)?;
@@ -84,17 +95,17 @@ where
                 Ok(Some(event)) => evts.push(event),
                 Ok(None) => break,
                 Err(eventstore::Error::ResourceNotFound) => {
-                    return Ok((vec![], ExpectedRevision::NoStream))
+                    return Ok((vec![], RepositoryVersion::NoStream))
                 }
                 Err(e) => return Err(Error::ReadStream(e)),
             }
         }
 
         let mut rv = vec![];
-        let mut pos = ExpectedRevision::StreamExists;
+        let mut pos = RepositoryVersion::StreamExists;
 
         for ev in evts {
-            pos = ExpectedRevision::Exact(ev.get_original_event().revision);
+            pos = RepositoryVersion::Exact(ev.get_original_event().revision.try_into().unwrap());
 
             if let Some(event_data) = ev.event {
                 // Continue on deser failure - occasionally you'll get delete and other system types in the stream
@@ -109,10 +120,10 @@ where
 
     async fn append(
         &mut self,
-        version: &Self::Version,
+        version: &RepositoryVersion,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, Self::Version), Error>
+    ) -> Result<(Vec<E>, RepositoryVersion), Error>
     where
         'a: 'async_trait,
         E: 'async_trait,
@@ -131,7 +142,8 @@ where
             .client
             .append_to_stream(
                 self.get_stream(Some(stream)),
-                &AppendToStreamOptions::default().expected_revision(*version),
+                &AppendToStreamOptions::default()
+                    .expected_revision(Self::version_to_expected_revision(version)),
                 perpared_events,
             )
             .await
@@ -139,20 +151,19 @@ where
 
         Ok((
             events.to_owned(),
-            ExpectedRevision::Exact(res.next_expected_version),
+            RepositoryVersion::Exact(res.next_expected_version.try_into().unwrap()),
         ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use core::time;
-    use std::thread;
-
-    use assert_matches::assert_matches;
     use eventstore::DeleteStreamOptions;
 
-    use crate::test_helpers::deciders::user::{User, UserEvent, UserId, UserName};
+    use crate::test_helpers::{
+        deciders::user::UserEvent,
+        repository::test_versioned_event_repository_with_streams,
+    };
 
     use super::*;
 
@@ -180,83 +191,10 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_storage() {
+    async fn repository_spec_test() {
         let client = store_from_environment(vec![1, 2]).await;
 
-        let id_1 = "1".to_string();
-        let id_2 = "2".to_string();
-
-        let mut event_repository = ESDBEventRepository::<UserEvent>::new(&client, BASE_STREAM);
-
-        let res: (Vec<UserEvent>, ExpectedRevision) =
-            event_repository.load(None).await.expect("loaded");
-        assert_matches!(res, (v, _) if v == vec![] as Vec<UserEvent>);
-
-        let events1 = vec![
-            UserEvent::UserAdded(User {
-                id: 1,
-                name: UserName::try_from("Mike").expect("Name is valid"),
-            }),
-            UserEvent::UserNameUpdated(
-                1 as UserId,
-                UserName::try_from("Mike2").expect("Name is valid"),
-            ),
-        ];
-
-        let _ = event_repository
-            .append(&ExpectedRevision::Any, &id_1, &events1)
-            .await;
-
-        let events2 = vec![
-            UserEvent::UserAdded(User {
-                id: 2,
-                name: UserName::try_from("Stella").expect("Name is valid"),
-            }),
-            UserEvent::UserNameUpdated(
-                1 as UserId,
-                UserName::try_from("Stella2").expect("Name is valid"),
-            ),
-        ];
-
-        let _ = event_repository
-            .append(&ExpectedRevision::Any, &id_2, &events2)
-            .await;
-
-        // Crude but we need to wait for ESDB to catch up its "Categories" auto projection
-        thread::sleep(time::Duration::from_secs(1));
-
-        let res = event_repository.load(Some(&id_1)).await;
-        assert_matches!(res, Ok((v, ExpectedRevision::Exact(_))) if v == events1);
-
-        let res = event_repository.load(Some(&id_2)).await;
-        assert_matches!(res, Ok((v, ExpectedRevision::Exact(_))) if v == events2);
-
-        let res = event_repository.load(None).await;
-
-        let events_combined: Vec<UserEvent> =
-            events1.into_iter().chain(events2.into_iter()).collect();
-        assert_matches!(res, Ok((v, ExpectedRevision::Exact(_))) if v == events_combined);
-
-        let res = event_repository.load(Some(&id_1)).await;
-        let version = res.unwrap().1;
-
-        let new_events = vec![UserEvent::UserNameUpdated(
-            1,
-            UserName::try_from("Mike").expect("Name is valid"),
-        )];
-
-        let res = event_repository
-            .append(&version, &id_1, &new_events)
-            .await
-            .expect("Success");
-
-        let version = res.1;
-
-        let (latest_events, _) = event_repository
-            .load_from_version(&version, Some(&id_1))
-            .await
-            .expect("load success");
-
-        assert_eq!(latest_events.first().unwrap(), new_events.first().unwrap());
+        let event_repository = ESDBEventRepository::<UserEvent>::new(&client, BASE_STREAM);
+        let _ = test_versioned_event_repository_with_streams(event_repository).await;
     }
 }
