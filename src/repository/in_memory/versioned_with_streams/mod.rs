@@ -5,9 +5,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::repository::{RepositoryVersion, event::VersionedEventRepositoryWithStreams};
-
-use crate::decider::Event;
+use crate::{
+    repository::{RepositoryVersion, event::VersionedEventRepositoryWithStreams},
+    decider::Event,
+};
 
 use super::InMemoryEventRepositoryState;
 use error::Error;

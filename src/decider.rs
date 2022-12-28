@@ -20,17 +20,16 @@ mod tests {
     use assert_matches::assert_matches;
 
     use crate::{
-        repository::state::StateRepository,
+        repository::{
+            event::EventRepository,
+            in_memory::simple::{InMemoryEventRepository, InMemoryStateRepository},
+            state::StateRepository,
+        },
         test_helpers::{
             deciders::user::{self, UserCommand, UserDecider, UserEvent},
             ValueType,
         },
     };
-
-    use crate::repository::{
-            event::EventRepository,
-            in_memory::simple::{InMemoryEventRepository, InMemoryStateRepository},
-        };
 
     use super::*;
 

@@ -137,7 +137,10 @@ where
             .await
             .map_err(|e| Error::WriteStream(stream.to_owned(), e))?;
 
-        Ok((events.to_owned(), ExpectedRevision::Exact(res.next_expected_version)))
+        Ok((
+            events.to_owned(),
+            ExpectedRevision::Exact(res.next_expected_version),
+        ))
     }
 }
 
