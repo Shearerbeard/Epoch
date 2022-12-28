@@ -69,8 +69,8 @@ pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug>
 
     let res = event_repository.load(None).await;
 
-    // let events_combined: Vec<UserEvent> = events1.into_iter().chain(events2.into_iter()).collect();
-    // assert_matches!(res, Ok((v, RepositoryVersion::Exact(_))) if v == events_combined);
+    let events_combined: Vec<UserEvent> = events1.into_iter().chain(events2.into_iter()).collect();
+    assert_matches!(res, Ok((v, RepositoryVersion::Exact(_))) if v == events_combined);
 
     let res = event_repository.load(Some(&id_1)).await;
     let version = res.unwrap().1;

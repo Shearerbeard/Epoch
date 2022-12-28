@@ -2,7 +2,8 @@ use async_trait::async_trait;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex}, fmt::Debug,
+    fmt::Debug,
+    sync::{Arc, Mutex},
 };
 
 use crate::{
@@ -32,6 +33,10 @@ where
             stream_name: stream_name.to_owned(),
             state: HashMap::default(),
         }
+    }
+
+    fn get_base_stream_key(&self) -> String {
+        self.stream_name.to_owned()
     }
 
     fn get_stream_key(&self, stream_id: Option<&String>) -> String {
@@ -87,7 +92,7 @@ where
 
             let start = Self::index_from_version(version);
             let end = stream_state.position + 1;
-            
+
             return Ok((
                 stream_state.events[start..end].to_vec(),
                 RepositoryVersion::Exact(stream_state.position),
@@ -107,6 +112,7 @@ where
         E: 'async_trait,
     {
         let stream_key = self.get_stream_key(Some(stream));
+
         println!("Calling Stream {}", &stream_key);
 
         let mut stream = self.get_stream_or_new(&stream_key).lock().unwrap();
@@ -116,14 +122,17 @@ where
             let position = stream.events.len() - 1;
             stream.position = position.clone();
 
-            drop(stream);
+            drop(stream); // Drop mutable reference so we can pull another and write to sub_stream
 
-            let stream = self.get_stream_or_new(&stream_key).lock().unwrap();
+            let mut sub_stream = self
+                .get_stream_or_new(&self.get_base_stream_key())
+                .lock()
+                .unwrap();
+            sub_stream.events.extend(events.clone());
+            let sub_position = sub_stream.events.len() - 1;
+            sub_stream.position = sub_position;
 
-            Ok((
-                events.to_owned(),
-                RepositoryVersion::Exact(position),
-            ))
+            Ok((events.to_owned(), RepositoryVersion::Exact(position)))
         } else {
             Err(Error::VersionConflict)
         }
