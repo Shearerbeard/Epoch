@@ -12,7 +12,7 @@ use crate::decider::Event;
 
 use self::error::Error;
 
-use super::VersionedEventRepositoryWithStreams;
+use super::event::VersionedEventRepositoryWithStreams;
 
 pub mod error;
 

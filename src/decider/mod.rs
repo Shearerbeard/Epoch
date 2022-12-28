@@ -22,7 +22,7 @@ mod tests {
     use assert_matches::assert_matches;
 
     use crate::{
-        decider::repository::StateRepository,
+        decider::repository::state::StateRepository,
         test::{
             deciders::user::{self, UserCommand, UserDecider, UserEvent},
             ValueType,
@@ -31,15 +31,14 @@ mod tests {
 
     use super::{
         repository::{
-            in_memory::{SimpleInMemoryEventRepository, InMemoryStateRepository},
-            EventRepository,
+            in_memory::{simple::{InMemoryEventRepository, InMemoryStateRepository}}, event::EventRepository,
         },
         *,
     };
 
     #[actix_rt::test]
     async fn test_raw_decider() {
-        let event_repository: SimpleInMemoryEventRepository<UserEvent> = SimpleInMemoryEventRepository::new();
+        let event_repository: InMemoryEventRepository<UserEvent> = InMemoryEventRepository::new();
         let mut state_repository: InMemoryStateRepository<UserCommand> =
             InMemoryStateRepository::new();
 
