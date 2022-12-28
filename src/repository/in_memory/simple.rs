@@ -5,10 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 
-use crate::decider::{
-    repository::{event::EventRepository, state::StateRepository},
-    Command, Event,
-};
+use crate::repository::{event::EventRepository, state::StateRepository};
+use crate::decider::{Command, Event,};
 
 use super::InMemoryEventRepositoryState;
 

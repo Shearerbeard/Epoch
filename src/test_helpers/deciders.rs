@@ -6,7 +6,7 @@ pub(crate) mod user {
 
     use crate::{
         decider::{Command, Decider, Event},
-        test::ValueType,
+        test_helpers::ValueType,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

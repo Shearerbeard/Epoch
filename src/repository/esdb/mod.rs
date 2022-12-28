@@ -149,7 +149,7 @@ mod tests {
     use assert_matches::assert_matches;
     use eventstore::DeleteStreamOptions;
 
-    use crate::test::deciders::user::{User, UserEvent, UserId, UserName};
+    use crate::test_helpers::deciders::user::{User, UserEvent, UserId, UserName};
 
     use super::*;
 

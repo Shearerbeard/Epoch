@@ -1,7 +1,5 @@
 use async_trait::async_trait;
 
-pub mod repository;
-
 pub trait Command {
     type State: Clone + Send + Sync;
 }
@@ -22,19 +20,19 @@ mod tests {
     use assert_matches::assert_matches;
 
     use crate::{
-        decider::repository::state::StateRepository,
-        test::{
+        repository::state::StateRepository,
+        test_helpers::{
             deciders::user::{self, UserCommand, UserDecider, UserEvent},
             ValueType,
         },
     };
 
-    use super::{
-        repository::{
-            in_memory::{simple::{InMemoryEventRepository, InMemoryStateRepository}}, event::EventRepository,
-        },
-        *,
-    };
+    use crate::repository::{
+            event::EventRepository,
+            in_memory::simple::{InMemoryEventRepository, InMemoryStateRepository},
+        };
+
+    use super::*;
 
     #[actix_rt::test]
     async fn test_raw_decider() {
