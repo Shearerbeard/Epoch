@@ -85,7 +85,6 @@ where
         id: Option<&Self::StreamId>,
     ) -> Result<(Vec<E>, RepositoryVersion), Error> {
         let stream_key = self.get_stream_key(id);
-        println!("Calling Stream {}", &stream_key);
 
         if let Some(m) = self.state.get(&stream_key) {
             let stream_state = m.lock().unwrap();
@@ -112,8 +111,6 @@ where
         E: 'async_trait,
     {
         let stream_key = self.get_stream_key(Some(stream));
-
-        println!("Calling Stream {}", &stream_key);
 
         let mut stream = self.get_stream_or_new(&stream_key).lock().unwrap();
 

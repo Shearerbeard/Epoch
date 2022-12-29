@@ -19,4 +19,3 @@ pub trait VersionedStateRepository<C: Command, Err> {
         state: &<C as Command>::State,
     ) -> Result<<C as Command>::State, Err>;
 }
-

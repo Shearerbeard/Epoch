@@ -4,8 +4,8 @@ use std::{fmt::Debug, thread};
 use assert_matches::assert_matches;
 
 use crate::{
-    repository::{event::VersionedEventRepositoryWithStreams, RepositoryVersion},
-    test_helpers::deciders::user::{User, UserId, UserName},
+    repository::{event::VersionedEventRepositoryWithStreams, RepositoryVersion, state::VersionedStateRepository},
+    test_helpers::deciders::user::{User, UserId, UserName}, decider::Command,
 };
 
 use super::deciders::user::UserEvent;
@@ -93,4 +93,10 @@ pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug>
         .expect("load success");
 
     assert_eq!(latest_events.first().unwrap(), new_events.first().unwrap());
+}
+
+pub(crate) async fn test_versioned_state_repository<C: Command, Err: Debug>(
+    mut state_repository: impl VersionedStateRepository<C, Err>
+) {
+    todo!()
 }

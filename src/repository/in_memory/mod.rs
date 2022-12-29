@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 pub mod simple;
+pub mod state;
 pub mod versioned_with_streams;
 
 #[derive(Debug, Default)]

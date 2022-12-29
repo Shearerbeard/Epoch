@@ -6,7 +6,7 @@ use eventstore::{
     StreamPosition,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use uuid::Uuid;
+use uuid_0_8_2::Uuid;
 
 use crate::decider::Event;
 
@@ -76,7 +76,6 @@ where
         version: &RepositoryVersion,
         id: Option<&Self::StreamId>,
     ) -> Result<(Vec<E>, RepositoryVersion), Error> {
-        println!("Calling Stream {}", self.get_stream(id));
         let mut stream = self
             .client
             .read_stream(
@@ -161,8 +160,7 @@ mod tests {
     use eventstore::DeleteStreamOptions;
 
     use crate::test_helpers::{
-        deciders::user::UserEvent,
-        repository::test_versioned_event_repository_with_streams,
+        deciders::user::UserEvent, repository::test_versioned_event_repository_with_streams,
     };
 
     use super::*;
