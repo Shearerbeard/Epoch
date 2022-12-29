@@ -1,4 +1,7 @@
-use std::{sync::{Arc, Mutex}, fmt::Debug};
+use std::{
+    fmt::Debug,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 
@@ -11,20 +14,19 @@ use crate::{
 pub struct InMemoryStateRepository<C>
 where
     C: Command + Debug,
-    <C as Command>::State: Debug
+    <C as Command>::State: Debug,
 {
     state: Arc<Mutex<VersionedState<C>>>,
 }
 
-impl <C> InMemoryStateRepository<C>
+impl<C> InMemoryStateRepository<C>
 where
     C: Command + Debug,
-    <C as Command>::State: Debug
+    <C as Command>::State: Debug,
 {
-
-    fn new(state: <C as Command>::State) ->  Self {
+    fn new(state: <C as Command>::State) -> Self {
         Self {
-            state: Arc::new(Mutex::new(VersionedState::new(state))) 
+            state: Arc::new(Mutex::new(VersionedState::new(state))),
         }
     }
 
@@ -36,13 +38,16 @@ where
         }
     }
 
-    fn version_check(current: &RepositoryVersion, incoming: &RepositoryVersion) -> Result<(), Error> {
+    fn version_check(
+        current: &RepositoryVersion,
+        incoming: &RepositoryVersion,
+    ) -> Result<(), Error> {
         if let &RepositoryVersion::StreamExists = current {
             return if let &RepositoryVersion::Exact(_) = incoming {
-                Ok(())   
+                Ok(())
             } else {
                 Err(Error::ExactStreamVersionMustBeKnown)
-            }
+            };
         }
 
         if Self::version_to_usize(current)? < Self::version_to_usize(incoming)? {
@@ -50,14 +55,14 @@ where
         } else {
             Err(Error::VersionOutOfDate)
         }
-    } 
+    }
 }
 
 #[async_trait]
 impl<C> VersionedStateRepository<C, Error> for InMemoryStateRepository<C>
 where
     C: Command + Debug,
-    <C as Command>::State: Debug
+    <C as Command>::State: Debug,
 {
     type Version = RepositoryVersion;
 
@@ -72,13 +77,15 @@ where
         version: &Self::Version,
         state: &<C as Command>::State,
     ) -> Result<<C as Command>::State, Error> {
-        let handle = self.state.lock().unwrap();
+        let handle_lock = self.state.lock();
+        let mut handle = handle_lock.unwrap();
 
         let _ = Self::version_check(&handle.version, version)?;
 
-        let mut handle = self.state.lock().unwrap();
-        handle.data = state.to_owned();
+        handle.data = state.clone();
         handle.version = version.to_owned();
+
+        drop(handle);
 
         Ok(state.to_owned())
     }
@@ -88,7 +95,7 @@ where
 struct VersionedState<C>
 where
     C: Command + Debug,
-    <C as Command>::State: Debug
+    <C as Command>::State: Debug,
 {
     data: <C as Command>::State,
     version: RepositoryVersion,
@@ -97,24 +104,34 @@ where
 impl<C> VersionedState<C>
 where
     C: Command + Debug,
-    <C as Command>::State: Debug
+    <C as Command>::State: Debug,
 {
     fn new(data: <C as Command>::State) -> Self {
-        Self { data, version: RepositoryVersion::StreamExists }
+        Self {
+            data,
+            version: RepositoryVersion::StreamExists,
+        }
     }
 }
 
+
+#[derive(Debug, Clone)]
 pub enum Error {
     ExactStreamVersionMustBeKnown,
-    VersionOutOfDate
+    VersionOutOfDate,
 }
 
-#[cfg(test)] 
+#[cfg(test)]
 mod tests {
+    use crate::test_helpers::{deciders::user::{UserCommand, UserDeciderState}, repository::test_versioned_state_repository};
+
     use super::*;
 
     #[actix_rt::test]
     async fn repository_spec_test() {
-        // let state_repository = InMemoryStateRepository::new()
+        let state_repository: InMemoryStateRepository<UserCommand> =
+            InMemoryStateRepository::new(UserDeciderState::default());
+
+        test_versioned_state_repository(state_repository).await;
     }
 }

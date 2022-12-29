@@ -1,14 +1,18 @@
 use core::time;
-use std::{fmt::Debug, thread};
+use std::{collections::HashMap, fmt::Debug, thread};
 
 use assert_matches::assert_matches;
 
 use crate::{
-    repository::{event::VersionedEventRepositoryWithStreams, RepositoryVersion, state::VersionedStateRepository},
-    test_helpers::deciders::user::{User, UserId, UserName}, decider::Command,
+    decider::Command,
+    repository::{
+        event::VersionedEventRepositoryWithStreams, state::VersionedStateRepository,
+        RepositoryVersion,
+    },
+    test_helpers::deciders::user::{User, UserId, UserName},
 };
 
-use super::deciders::user::UserEvent;
+use super::deciders::user::{UserCommand, UserDeciderState, UserEvent};
 
 pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug>(
     mut event_repository: impl VersionedEventRepositoryWithStreams<
@@ -95,8 +99,26 @@ pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug>
     assert_eq!(latest_events.first().unwrap(), new_events.first().unwrap());
 }
 
-pub(crate) async fn test_versioned_state_repository<C: Command, Err: Debug>(
-    mut state_repository: impl VersionedStateRepository<C, Err>
+pub(crate) async fn test_versioned_state_repository<Err: Debug>(
+    mut state_repository: impl VersionedStateRepository<UserCommand, Err, Version = RepositoryVersion>,
 ) {
-    todo!()
+    let new_state = UserDeciderState {
+        users: HashMap::from([(
+            1,
+            User {
+                id: 1,
+                name: UserName::try_from("Mike").expect("valid"),
+            },
+        )]),
+    };
+
+    let version = RepositoryVersion::Exact(0);
+    println!("Saving: state={:?}, version={:?}", &new_state, &version);
+    let _ = state_repository.save(&version, &new_state).await.expect("Success");
+    println!("State saved");
+
+    assert_eq!(state_repository.reify().await.expect("Success"), (new_state.to_owned(), version));
+
+    let res = state_repository.save(&version, &new_state).await;
+    assert_matches!(res, Err(_));
 }

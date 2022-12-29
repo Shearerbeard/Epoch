@@ -127,6 +127,7 @@ pub(crate) mod user {
         pub(crate) users: HashMap<UserId, User>,
     }
 
+    #[derive(Debug)]
     pub(crate) enum UserCommand {
         AddUser(UnvalidatedUserName),
         UpdateUserName(UserId, UnvalidatedUserName),
