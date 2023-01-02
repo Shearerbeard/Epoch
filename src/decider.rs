@@ -14,6 +14,21 @@ pub trait Decider<S, Cmd: Command, E: Event, Err> {
     fn init() -> S;
 }
 
+#[async_trait]
+pub trait DeciderWithContext<S, Ctx, Cmd: Command, E: Event, Err> {
+    fn decide(ctx: Ctx, cmd: &Cmd, state: &S) -> Result<Vec<E>, Err>;
+    fn evolve(state: S, event: &E) -> S;
+    fn init() -> S;
+}
+
+pub trait CommandState<C: Command> {
+    fn from(value: <C as Command>::State) -> Self;
+}
+
+pub trait DeciderVariant<S, Cmd: Command, E: Event, Err> {
+    fn decide(cs: impl CommandState<Cmd>) -> Result<Vec<E>, Err>;
+}
+
 #[cfg(test)]
 mod tests {
 
