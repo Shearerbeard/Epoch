@@ -16,6 +16,7 @@ use super::{event::VersionedEventRepositoryWithStreams, RepositoryVersion};
 
 pub mod error;
 
+#[derive(Clone)]
 pub struct ESDBEventRepository<E> {
     client: Client,
     stream_name: String,
