@@ -4,7 +4,6 @@ use std::{collections::HashMap, fmt::Debug, thread};
 use assert_matches::assert_matches;
 
 use crate::{
-    decider::Command,
     repository::{
         event::VersionedEventRepositoryWithStreams, state::VersionedStateRepository,
         RepositoryVersion,
@@ -114,10 +113,16 @@ pub(crate) async fn test_versioned_state_repository<Err: Debug>(
 
     let version = RepositoryVersion::Exact(0);
     println!("Saving: state={:?}, version={:?}", &new_state, &version);
-    let _ = state_repository.save(&version, &new_state).await.expect("Success");
+    let _ = state_repository
+        .save(&version, &new_state)
+        .await
+        .expect("Success");
     println!("State saved");
 
-    assert_eq!(state_repository.reify().await.expect("Success"), (new_state.to_owned(), version));
+    assert_eq!(
+        state_repository.reify().await.expect("Success"),
+        (new_state.to_owned(), version)
+    );
 
     let res = state_repository.save(&version, &new_state).await;
     assert_matches!(res, Err(_));

@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-
 pub trait Command {
     type State: Clone + Send + Sync;
 }
@@ -8,7 +6,7 @@ pub trait Event {
 }
 
 pub trait Decider<State, Cmd: Command, Evt: Event, Err> {
-    fn decide(cmd: &Cmd, state: &State) -> Result<Vec<Evt>, Err>;
+    fn decide(state: &State, cmd: &Cmd) -> Result<Vec<Evt>, Err>;
     fn evolve(state: State, event: &Evt) -> State;
     fn init() -> State;
 }
@@ -18,7 +16,7 @@ where
     Evt: Event,
     Cmd: Command,
 {
-    fn decide(ctx: Ctx, cmd: &Cmd, state: &State) -> Result<Vec<Evt>, Err>;
+    fn decide(ctx: &Ctx, state: &State, cmd: &Cmd) -> Result<Vec<Evt>, Err>;
     fn evolve(state: State, event: &Evt) -> State;
     fn init() -> State;
 }
@@ -68,7 +66,7 @@ mod tests {
             .fold(UserDecider::init(), UserDecider::evolve);
 
         let cmd = UserCommand::AddUser("Mike".to_string() as user::UnvalidatedUserName);
-        let events = UserDecider::decide(&cmd, &state).expect("Decider Success");
+        let events = UserDecider::decide(&state, &cmd).expect("Decider Success");
 
         if let Some(UserEvent::UserAdded(user::User { name, id })) = events.clone().first() {
             let user_id = id.clone();
