@@ -39,9 +39,9 @@ where
 pub trait VersionedEventRepositoryWithStreams<'a, E, Err>
 where
     E: Event + Sync + Send + Debug,
-    Err: Debug
+    Err: Debug + Send + Sync
 {
-    type StreamId;
+    type StreamId: Send + Sync;
 
     async fn load(&self, id: Option<&Self::StreamId>) -> Result<(Vec<E>, RepositoryVersion), Err>;
     async fn load_from_version(

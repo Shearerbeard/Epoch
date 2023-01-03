@@ -14,7 +14,7 @@ use crate::{
 
 use super::deciders::user::{UserCommand, UserDeciderState, UserEvent};
 
-pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug>(
+pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug + Send + Sync>(
     mut event_repository: impl VersionedEventRepositoryWithStreams<
         'a,
         UserEvent,

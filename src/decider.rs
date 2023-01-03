@@ -7,18 +7,24 @@ pub trait Event {
     fn event_type(&self) -> String;
 }
 
-#[async_trait]
-pub trait Decider<S, Cmd: Command, E: Event, Err> {
-    fn decide(cmd: &Cmd, state: &S) -> Result<Vec<E>, Err>;
-    fn evolve(state: S, event: &E) -> S;
-    fn init() -> S;
+pub trait Decider<State, Cmd: Command, Evt: Event, Err> {
+    fn decide(cmd: &Cmd, state: &State) -> Result<Vec<Evt>, Err>;
+    fn evolve(state: State, event: &Evt) -> State;
+    fn init() -> State;
 }
 
-#[async_trait]
-pub trait DeciderWithContext<S, Ctx, Cmd: Command, E: Event, Err> {
-    fn decide(ctx: Ctx, cmd: &Cmd, state: &S) -> Result<Vec<E>, Err>;
-    fn evolve(state: S, event: &E) -> S;
-    fn init() -> S;
+pub trait DeciderWithContext<State, Ctx, Cmd, Evt, Err>
+where
+    Evt: Event,
+    Cmd: Command,
+{
+    fn decide(ctx: Ctx, cmd: &Cmd, state: &State) -> Result<Vec<Evt>, Err>;
+    fn evolve(state: State, event: &Evt) -> State;
+    fn init() -> State;
+}
+
+pub trait Evolver<State, Evt: Event> {
+    fn evolve(state: State, event: &Evt) -> State;
 }
 
 pub trait CommandState<C: Command> {
