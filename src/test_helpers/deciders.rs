@@ -5,7 +5,7 @@ pub(crate) mod user {
     use thiserror::Error;
 
     use crate::{
-        decider::{Command, Decider, Event},
+        decider::{Decider, Event},
         test_helpers::ValueType,
     };
 
@@ -139,10 +139,6 @@ pub(crate) mod user {
     pub(crate) enum UserCommand {
         AddUser(UnvalidatedUserName),
         UpdateUserName(UserId, UnvalidatedUserName),
-    }
-
-    impl Command for UserCommand {
-        type State = UserDeciderState;
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

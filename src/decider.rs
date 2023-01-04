@@ -1,6 +1,3 @@
-pub trait Command {
-    type State: Clone + Send + Sync;
-}
 pub trait Event {
     fn event_type(&self) -> String;
 }
@@ -32,8 +29,10 @@ pub trait DeciderWithContext {
     fn init() -> Self::State;
 }
 
-pub trait Evolver<State, Evt: Event> {
-    fn evolve(state: State, event: &Evt) -> State;
+pub trait Evolver {
+    type State;
+    type Evt: Event;
+    fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
 }
 
 #[cfg(test)]

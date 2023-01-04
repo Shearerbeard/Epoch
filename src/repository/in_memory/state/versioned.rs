@@ -5,10 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 
-use crate::{
-    decider::Command,
-    repository::{state::VersionedStateRepository, RepositoryVersion},
-};
+use crate::repository::{state::VersionedStateRepository, RepositoryVersion};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryStateRepository<State>
