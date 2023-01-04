@@ -11,7 +11,7 @@ use crate::{
     test_helpers::deciders::user::{User, UserId, UserName},
 };
 
-use super::deciders::user::{UserCommand, UserDeciderState, UserEvent};
+use super::deciders::user::{UserDeciderState, UserEvent};
 
 pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug + Send + Sync>(
     mut event_repository: impl VersionedEventRepositoryWithStreams<
@@ -99,7 +99,11 @@ pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug 
 }
 
 pub(crate) async fn test_versioned_state_repository<Err: Debug>(
-    mut state_repository: impl VersionedStateRepository<UserCommand, Err, Version = RepositoryVersion>,
+    mut state_repository: impl VersionedStateRepository<
+        UserDeciderState,
+        Err,
+        Version = RepositoryVersion,
+    >,
 ) {
     let new_state = UserDeciderState {
         users: HashMap::from([(

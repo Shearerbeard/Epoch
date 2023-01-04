@@ -83,7 +83,15 @@ pub(crate) mod user {
 
     pub(crate) struct UserDecider {}
 
-    impl Decider<UserDeciderState, UserCommand, UserEvent, UserDeciderError> for UserDecider {
+    impl Decider for UserDecider {
+        type State = UserDeciderState;
+
+        type Cmd = UserCommand;
+
+        type Evt = UserEvent;
+
+        type Err = UserDeciderError;
+
         fn decide(
             _state: &UserDeciderState,
             cmd: &UserCommand,

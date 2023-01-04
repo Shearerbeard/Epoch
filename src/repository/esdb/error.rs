@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum Error{
+pub enum Error {
     #[error("ESDB Error {0}")]
     ESDBGeneral(eventstore::Error),
     #[error("Error reading stream: {0}")]

@@ -5,32 +5,35 @@ pub trait Event {
     fn event_type(&self) -> String;
 }
 
-pub trait Decider<State, Cmd: Command, Evt: Event, Err> {
-    fn decide(state: &State, cmd: &Cmd) -> Result<Vec<Evt>, Err>;
-    fn evolve(state: State, event: &Evt) -> State;
-    fn init() -> State;
+pub trait Decider {
+    type State;
+    type Cmd: Send + Sync;
+    type Evt: Event;
+    type Err;
+
+    fn decide(state: &Self::State, cmd: &Self::Cmd) -> Result<Vec<Self::Evt>, Self::Err>;
+    fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
+    fn init() -> Self::State;
 }
 
-pub trait DeciderWithContext<State, Ctx, Cmd, Evt, Err>
-where
-    Evt: Event,
-    Cmd: Command,
-{
-    fn decide(ctx: &Ctx, state: &State, cmd: &Cmd) -> Result<Vec<Evt>, Err>;
-    fn evolve(state: State, event: &Evt) -> State;
-    fn init() -> State;
+pub trait DeciderWithContext {
+    type Ctx;
+    type State;
+    type Cmd: Send + Sync;
+    type Evt: Event;
+    type Err;
+
+    fn decide(
+        ctx: &Self::Ctx,
+        state: &Self::State,
+        cmd: &Self::Cmd,
+    ) -> Result<Vec<Self::Evt>, Self::Err>;
+    fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
+    fn init() -> Self::State;
 }
 
 pub trait Evolver<State, Evt: Event> {
     fn evolve(state: State, event: &Evt) -> State;
-}
-
-pub trait CommandState<C: Command> {
-    fn from(value: <C as Command>::State) -> Self;
-}
-
-pub trait DeciderVariant<S, Cmd: Command, E: Event, Err> {
-    fn decide(cs: impl CommandState<Cmd>) -> Result<Vec<E>, Err>;
 }
 
 #[cfg(test)]
@@ -45,7 +48,7 @@ mod tests {
             state::StateRepository,
         },
         test_helpers::{
-            deciders::user::{self, UserCommand, UserDecider, UserEvent},
+            deciders::user::{self, UserCommand, UserDecider, UserDeciderState, UserEvent},
             ValueType,
         },
     };
@@ -55,7 +58,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_raw_decider() {
         let event_repository: InMemoryEventRepository<UserEvent> = InMemoryEventRepository::new();
-        let mut state_repository: InMemoryStateRepository<UserCommand> =
+        let mut state_repository: InMemoryStateRepository<UserDeciderState> =
             InMemoryStateRepository::new();
 
         let state = event_repository

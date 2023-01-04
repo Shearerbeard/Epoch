@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 
 use crate::{
-    decider::{Command, Event},
+    decider::Event,
     repository::{event::EventRepository, state::StateRepository},
 };
 
@@ -59,33 +59,31 @@ impl<E> InMemoryEventRepositoryState<E> {
     }
 }
 
-pub struct InMemoryStateRepository<C: Command> {
-    state: <C as Command>::State,
+pub struct InMemoryStateRepository<State> {
+    state: State,
 }
 
-impl<C> InMemoryStateRepository<C>
+impl<State> InMemoryStateRepository<State>
 where
-    C: Command + Send + Sync,
-    <C as Command>::State: Default + Send + Sync + Debug,
+    State: Default + Send + Sync + Debug + Clone,
 {
     pub fn new() -> Self {
         Self {
-            state: <C as Command>::State::default(),
+            state: State::default(),
         }
     }
 }
 
 #[async_trait]
-impl<C> StateRepository<C, ()> for InMemoryStateRepository<C>
+impl<State> StateRepository<State, ()> for InMemoryStateRepository<State>
 where
-    C: Command + Send + Sync,
-    <C as Command>::State: Default + Send + Sync + Debug,
+    State: Default + Send + Sync + Debug + Clone,
 {
-    async fn reify(&self) -> <C as Command>::State {
+    async fn reify(&self) -> State {
         self.state.clone()
     }
 
-    async fn save(&mut self, state: &<C as Command>::State) -> Result<<C as Command>::State, ()> {
+    async fn save(&mut self, state: &State) -> Result<State, ()> {
         self.state = state.clone();
         Ok(self.state.to_owned())
     }

@@ -2,8 +2,8 @@ use std::fmt::Debug;
 
 use async_trait::async_trait;
 
-use crate::decider::Event;
 use super::RepositoryVersion;
+use crate::decider::Event;
 
 #[async_trait]
 pub trait EventRepository<E, Err>
@@ -39,7 +39,7 @@ where
 pub trait VersionedEventRepositoryWithStreams<'a, E, Err>
 where
     E: Event + Sync + Send + Debug,
-    Err: Debug + Send + Sync
+    Err: Debug + Send + Sync,
 {
     type StreamId: Send + Sync;
 

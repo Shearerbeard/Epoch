@@ -11,20 +11,18 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct InMemoryStateRepository<C>
+pub struct InMemoryStateRepository<State>
 where
-    C: Command + Debug,
-    <C as Command>::State: Debug,
+    State: Debug,
 {
-    state: Arc<Mutex<VersionedState<C>>>,
+    state: Arc<Mutex<VersionedState<State>>>,
 }
 
-impl<C> InMemoryStateRepository<C>
+impl<State> InMemoryStateRepository<State>
 where
-    C: Command + Debug,
-    <C as Command>::State: Debug,
+    State: Debug,
 {
-    fn new(state: <C as Command>::State) -> Self {
+    fn new(state: State) -> Self {
         Self {
             state: Arc::new(Mutex::new(VersionedState::new(state))),
         }
@@ -59,24 +57,19 @@ where
 }
 
 #[async_trait]
-impl<C> VersionedStateRepository<C, Error> for InMemoryStateRepository<C>
+impl<State> VersionedStateRepository<State, Error> for InMemoryStateRepository<State>
 where
-    C: Command + Debug,
-    <C as Command>::State: Debug,
+    State: Debug + Clone + Send + Sync,
 {
     type Version = RepositoryVersion;
 
-    async fn reify(&self) -> Result<(<C as Command>::State, Self::Version), Error> {
+    async fn reify(&self) -> Result<(State, Self::Version), Error> {
         let handle = self.state.lock().unwrap();
 
         Ok((handle.data.to_owned(), handle.version))
     }
 
-    async fn save(
-        &mut self,
-        version: &Self::Version,
-        state: &<C as Command>::State,
-    ) -> Result<<C as Command>::State, Error> {
+    async fn save(&mut self, version: &Self::Version, state: &State) -> Result<State, Error> {
         let handle_lock = self.state.lock();
         let mut handle = handle_lock.unwrap();
 
@@ -92,28 +85,25 @@ where
 }
 
 #[derive(Debug, Clone)]
-struct VersionedState<C>
+struct VersionedState<State>
 where
-    C: Command + Debug,
-    <C as Command>::State: Debug,
+    State: Debug,
 {
-    data: <C as Command>::State,
+    data: State,
     version: RepositoryVersion,
 }
 
-impl<C> VersionedState<C>
+impl<State> VersionedState<State>
 where
-    C: Command + Debug,
-    <C as Command>::State: Debug,
+    State: Debug,
 {
-    fn new(data: <C as Command>::State) -> Self {
+    fn new(data: State) -> Self {
         Self {
             data,
             version: RepositoryVersion::StreamExists,
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub enum Error {
@@ -123,13 +113,15 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_helpers::{deciders::user::{UserCommand, UserDeciderState}, repository::test_versioned_state_repository};
+    use crate::test_helpers::{
+        deciders::user::UserDeciderState, repository::test_versioned_state_repository,
+    };
 
     use super::*;
 
     #[actix_rt::test]
     async fn repository_spec_test() {
-        let state_repository: InMemoryStateRepository<UserCommand> =
+        let state_repository: InMemoryStateRepository<UserDeciderState> =
             InMemoryStateRepository::new(UserDeciderState::default());
 
         test_versioned_state_repository(state_repository).await;
