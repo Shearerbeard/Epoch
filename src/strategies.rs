@@ -59,7 +59,7 @@ pub trait LoadDecideAppend
 where
     <Self::Decide as Evolver>::State: Send + Sync + Debug + Default,
     <Self::Decide as DeciderWithContext>::Ctx: Send + Sync + Debug + Clone,
-    <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug + Clone,
+    <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
     <Self::Decide as Evolver>::Evt: Send + Sync + Debug,
     <Self::Decide as DeciderWithContext>::Err: Send + Sync + Debug,
 {
