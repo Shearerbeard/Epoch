@@ -2,22 +2,16 @@ pub trait Event {
     fn event_type(&self) -> String;
 }
 
-pub trait Decider {
-    type State;
+pub trait Decider: Evolver {
     type Cmd: Send + Sync;
-    type Evt: Event;
     type Err;
 
     fn decide(state: &Self::State, cmd: &Self::Cmd) -> Result<Vec<Self::Evt>, Self::Err>;
-    fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
-    fn init() -> Self::State;
 }
 
-pub trait DeciderWithContext {
+pub trait DeciderWithContext: Evolver {
     type Ctx;
-    type State;
     type Cmd: Send + Sync;
-    type Evt: Event;
     type Err;
 
     fn decide(
@@ -25,14 +19,13 @@ pub trait DeciderWithContext {
         state: &Self::State,
         cmd: &Self::Cmd,
     ) -> Result<Vec<Self::Evt>, Self::Err>;
-    fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
-    fn init() -> Self::State;
 }
 
 pub trait Evolver {
     type State;
     type Evt: Event;
     fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
+    fn init() -> Self::State;
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ pub(crate) mod user {
     use thiserror::Error;
 
     use crate::{
-        decider::{Decider, Event},
+        decider::{Decider, Event, Evolver},
         test_helpers::ValueType,
     };
 
@@ -84,11 +84,7 @@ pub(crate) mod user {
     pub(crate) struct UserDecider {}
 
     impl Decider for UserDecider {
-        type State = UserDeciderState;
-
         type Cmd = UserCommand;
-
-        type Evt = UserEvent;
 
         type Err = UserDeciderError;
 
@@ -111,6 +107,12 @@ pub(crate) mod user {
                 }
             }
         }
+    }
+
+    impl Evolver for UserDecider {
+        type State = UserDeciderState;
+
+        type Evt = UserEvent;
 
         fn evolve(mut state: UserDeciderState, event: &UserEvent) -> UserDeciderState {
             match event {
