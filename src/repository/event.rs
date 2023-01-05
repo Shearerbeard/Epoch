@@ -68,7 +68,9 @@ where
 
 #[derive(Debug, Error)]
 pub enum VersionedRepositoryError<RepoErr> {
+    #[error("Version conflict {0:?}")]
     VersionConflict(VersionDiff),
+    #[error("Repository Error {0}")]
     RepoErr(RepoErr),
 }
 
