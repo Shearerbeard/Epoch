@@ -8,7 +8,10 @@ use std::{
 
 use crate::{
     decider::Event,
-    repository::{event::VersionedEventRepositoryWithStreams, RepositoryVersion},
+    repository::{
+        event::{VersionDiff, VersionedEventRepositoryWithStreams, VersionedRepositoryError},
+        RepositoryVersion,
+    },
 };
 
 use super::InMemoryEventRepositoryState;
@@ -64,6 +67,10 @@ where
             _ => 0,
         }
     }
+
+    fn version_from_index(index: &usize) -> RepositoryVersion {
+        RepositoryVersion::Exact(*index)
+    }
 }
 
 #[async_trait]
@@ -76,14 +83,14 @@ where
     async fn load(
         &self,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), Error> {
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
         self.load_from_version(&RepositoryVersion::Any, id).await
     }
     async fn load_from_version(
         &self,
         version: &RepositoryVersion,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), Error> {
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
         let stream_key = self.get_stream_key(id);
 
         if let Some(m) = self.state.get(&stream_key) {
@@ -105,7 +112,7 @@ where
         version: &RepositoryVersion,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, RepositoryVersion), Error>
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>>
     where
         'a: 'async_trait,
         E: 'async_trait,
@@ -131,7 +138,21 @@ where
 
             Ok((events.to_owned(), RepositoryVersion::Exact(position)))
         } else {
-            Err(Error::VersionConflict)
+            Err(Error::VersionConflict(VersionDiff::new(
+                *version,
+                Self::version_from_index(&stream.position),
+            ))
+            .into())
+        }
+    }
+}
+
+impl Into<VersionedRepositoryError<Error>> for Error {
+    fn into(self) -> VersionedRepositoryError<Error> {
+        if let Error::VersionConflict(diff) = self {
+            VersionedRepositoryError::VersionConflict(diff)
+        } else {
+            VersionedRepositoryError::RepoErr(self)
         }
     }
 }

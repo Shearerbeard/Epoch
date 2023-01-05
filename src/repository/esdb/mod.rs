@@ -2,8 +2,8 @@ use std::{fmt::Debug, marker::PhantomData};
 
 use async_trait::async_trait;
 use eventstore::{
-    AppendToStreamOptions, Client, EventData, ExpectedRevision, ReadStreamOptions, ResolvedEvent,
-    StreamPosition,
+    AppendToStreamOptions, Client, CurrentRevision, EventData, ExpectedRevision, ReadStreamOptions,
+    ResolvedEvent, StreamPosition,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use uuid_0_8_2::Uuid;
@@ -12,7 +12,10 @@ use crate::decider::Event;
 
 use self::error::Error;
 
-use super::{event::VersionedEventRepositoryWithStreams, RepositoryVersion};
+use super::{
+    event::{VersionDiff, VersionedEventRepositoryWithStreams, VersionedRepositoryError},
+    RepositoryVersion,
+};
 
 pub mod error;
 
@@ -56,6 +59,13 @@ impl<'a, E> ESDBEventRepository<E> {
             _ => ExpectedRevision::Any,
         }
     }
+
+    fn current_revision_to_version(revision: &CurrentRevision) -> RepositoryVersion {
+        match revision {
+            CurrentRevision::Current(val) => RepositoryVersion::Exact(*val as usize),
+            CurrentRevision::NoStream => RepositoryVersion::NoStream,
+        }
+    }
 }
 
 #[async_trait]
@@ -68,7 +78,7 @@ where
     async fn load(
         &self,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), Error> {
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
         self.load_from_version(&RepositoryVersion::Any, id).await
     }
 
@@ -76,7 +86,7 @@ where
         &self,
         version: &RepositoryVersion,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), Error> {
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
         let mut stream = self
             .client
             .read_stream(
@@ -86,7 +96,8 @@ where
                     .position(Self::version_to_esdb_position(&version)),
             )
             .await
-            .map_err(Error::ESDBGeneral)?;
+            .map_err(Error::ESDBGeneral)
+            .map_err(VersionedRepositoryError::RepoErr)?;
 
         let mut evts: Vec<ResolvedEvent> = vec![];
 
@@ -97,7 +108,7 @@ where
                 Err(eventstore::Error::ResourceNotFound) => {
                     return Ok((vec![], RepositoryVersion::NoStream))
                 }
-                Err(e) => return Err(Error::ReadStream(e)),
+                Err(e) => return Err(VersionedRepositoryError::RepoErr(Error::ReadStream(e))),
             }
         }
 
@@ -123,7 +134,7 @@ where
         version: &RepositoryVersion,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, RepositoryVersion), Error>
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>>
     where
         'a: 'async_trait,
         E: 'async_trait,
@@ -133,7 +144,8 @@ where
         for e in events {
             let ed = EventData::json(e.event_type(), e)
                 .map(|ed| ed.id(Uuid::new_v4()))
-                .map_err(Error::SerializeEventDataPayload)?;
+                .map_err(Error::SerializeEventDataPayload)
+                .map_err(VersionedRepositoryError::RepoErr)?;
 
             perpared_events.push(ed);
         }
@@ -147,7 +159,16 @@ where
                 perpared_events,
             )
             .await
-            .map_err(|e| Error::WriteStream(stream.to_owned(), e))?;
+            .map_err(|e| {
+                if let eventstore::Error::WrongExpectedVersion { current, .. } = e {
+                    VersionedRepositoryError::VersionConflict(VersionDiff::new(
+                        *version,
+                        Self::current_revision_to_version(&current),
+                    ))
+                } else {
+                    VersionedRepositoryError::RepoErr(Error::WriteStream(stream.to_owned(), e))
+                }
+            })?;
 
         Ok((
             events.to_owned(),
@@ -155,6 +176,12 @@ where
         ))
     }
 }
+
+// impl Into<VersionedRepositoryError<Error>> for Error {
+//     fn into(self) -> VersionedRepositoryError<Error> {
+//         todo!()
+//     }
+// }
 
 #[cfg(test)]
 mod tests {

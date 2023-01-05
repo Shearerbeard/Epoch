@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 use async_trait::async_trait;
+use thiserror::Error;
 
 use super::RepositoryVersion;
 use crate::decider::Event;
@@ -43,19 +44,50 @@ where
 {
     type StreamId: Send + Sync;
 
-    async fn load(&self, id: Option<&Self::StreamId>) -> Result<(Vec<E>, RepositoryVersion), Err>;
+    async fn load(
+        &self,
+        id: Option<&Self::StreamId>,
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Err>>;
+
     async fn load_from_version(
         &self,
         version: &RepositoryVersion,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), Err>;
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Err>>;
+
     async fn append(
         &mut self,
         version: &RepositoryVersion,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, RepositoryVersion), Err>
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Err>>
     where
         'a: 'async_trait,
         E: 'async_trait;
+}
+
+#[derive(Debug, Error)]
+pub enum VersionedRepositoryError<RepoErr> {
+    VersionConflict(VersionDiff),
+    RepoErr(RepoErr),
+}
+
+#[derive(Debug)]
+pub struct VersionDiff {
+    expected: RepositoryVersion,
+    actual: RepositoryVersion,
+}
+
+impl VersionDiff {
+    pub fn new(expected: RepositoryVersion, actual: RepositoryVersion) -> Self {
+        Self { expected, actual }
+    }
+
+    pub fn expected(&self) -> RepositoryVersion {
+        self.expected.to_owned()
+    }
+
+    pub fn actual(&self) -> RepositoryVersion {
+        self.actual.to_owned()
+    }
 }
