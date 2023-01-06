@@ -23,4 +23,5 @@ uuid_0_8_2 =  { package = "uuid", version = "0.8.2", features = ["v4", "serde"],
 [dev-dependencies]
 actix-rt = "2.7.0"
 assert_matches = "1.5.0"
+autoincrement = "1"
 dotenv = "0.15.0"

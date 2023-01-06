@@ -61,7 +61,7 @@ mod tests {
             .fold(UserDecider::init(), UserDecider::evolve);
 
         let cmd = UserCommand::AddUser("Mike".to_string() as user::UnvalidatedUserName);
-        let events = UserDecider::decide(&state, &cmd).expect("Decider Success");
+        let events = <UserDecider as Decider>::decide(&state, &cmd).expect("Decider Success");
 
         if let Some(UserEvent::UserAdded(user::User { name, id })) = events.clone().first() {
             let user_id = id.clone();

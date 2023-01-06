@@ -105,15 +105,13 @@ pub(crate) async fn test_versioned_state_repository<Err: Debug>(
         Version = RepositoryVersion,
     >,
 ) {
-    let new_state = UserDeciderState {
-        users: HashMap::from([(
-            1,
-            User {
-                id: 1,
-                name: UserName::try_from("Mike").expect("valid"),
-            },
-        )]),
-    };
+    let new_state = UserDeciderState::new(HashMap::from([(
+        1,
+        User {
+            id: 1,
+            name: UserName::try_from("Mike").expect("valid"),
+        },
+    )]));
 
     let version = RepositoryVersion::Exact(0);
     println!("Saving: state={:?}, version={:?}", &new_state, &version);

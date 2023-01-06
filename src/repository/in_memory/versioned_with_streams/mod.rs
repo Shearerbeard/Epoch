@@ -19,6 +19,7 @@ use error::Error;
 
 pub mod error;
 
+#[derive(Clone)]
 pub struct InMemoryEventRepository<E>
 where
     E: Event + Sync + Send + Debug,

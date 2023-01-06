@@ -1,11 +1,13 @@
 pub(crate) mod user {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, cell::RefCell, sync::{Arc, Mutex},};
 
+    use autoincrement::{AsyncIncremental, AutoIncrement, AsyncIncrement};
     use serde::{Deserialize, Serialize};
     use thiserror::Error;
 
     use crate::{
-        decider::{Decider, Event, Evolver},
+        decider::{Decider, DeciderWithContext, Event, Evolver},
+        strategies::{LoadDecideAppend, StateFromEventRepository},
         test_helpers::ValueType,
     };
 
@@ -81,7 +83,7 @@ pub(crate) mod user {
         NameToLong(String),
     }
 
-    pub(crate) struct UserDecider {}
+    pub(crate) struct UserDecider;
 
     impl Decider for UserDecider {
         type Cmd = UserCommand;
@@ -128,13 +130,94 @@ pub(crate) mod user {
         }
 
         fn init() -> UserDeciderState {
-            Default::default()
+            UserDeciderState {
+                users: Default::default(),
+            }
         }
     }
 
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    impl DeciderWithContext for UserDecider {
+        type Ctx = UserDeciderCtx;
+
+        type Cmd = UserCommand;
+
+        type Err = UserDeciderError;
+
+        fn decide(
+            ctx: &UserDeciderCtx,
+            _state: &UserDeciderState,
+            cmd: &UserCommand,
+        ) -> Result<Vec<UserEvent>, UserDeciderError> {
+            match cmd {
+                UserCommand::AddUser(user_name) => {
+                    let seq = ctx.id_sequence.lock().unwrap();
+                    let IdGen(id) = seq.pull();
+
+                    let name = UserName::try_from(user_name)
+                        .map_err(|e| UserDeciderError::UserField(e))?;
+
+                    Ok(vec![UserEvent::UserAdded(User { id, name })])
+                }
+                UserCommand::UpdateUserName(user_id, user_name) => {
+                    let name = UserName::try_from(user_name)
+                        .map_err(|e| UserDeciderError::UserField(e))?;
+
+                    Ok(vec![UserEvent::UserNameUpdated(user_id.to_owned(), name)])
+                }
+            }
+        }
+    }
+
+    impl LoadDecideAppend for UserDecider {
+        type Decide = Self;
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct UserDeciderState {
         pub(crate) users: HashMap<UserId, User>,
+    }
+
+    impl  UserDeciderState {
+        pub fn new(users: HashMap<UserId, User>) -> Self {
+            Self::default().set_users(users)
+        }
+
+        pub fn set_users(&self, users: HashMap<UserId, User>) -> Self {
+            Self {
+                users,
+                ..*self
+            }
+        }
+    }
+
+    impl Default for UserDeciderState {
+        fn default() -> Self {
+            Self {
+                users: HashMap::new().to_owned(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub(crate) struct UserDeciderCtx {
+        id_sequence: Arc<Mutex<AsyncIncrement<IdGen>>>
+    }
+
+    impl UserDeciderCtx {
+        pub fn new() -> Self {
+            Self {
+                id_sequence: Arc::new(Mutex::new(IdGen::init()))
+            }
+        }
+
+        pub fn current(&self) -> usize {
+            let IdGen(id) = self.id_sequence.lock().unwrap().current();
+            id
+        }
+    }
+
+    impl StateFromEventRepository for UserDeciderState {
+        type Ev = UserDecider;
     }
 
     #[derive(Debug)]
@@ -163,4 +246,7 @@ pub(crate) mod user {
         #[error("Invalid user field {0:?}")]
         UserField(UserFieldError),
     }
+
+    #[derive(AsyncIncremental, PartialEq, Eq, Clone, Debug)]
+    pub struct IdGen(usize);
 }
