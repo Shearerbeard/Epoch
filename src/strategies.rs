@@ -146,90 +146,144 @@ pub enum LoadDecideAppendError<DecideErr: Send + Sync, RepoErr> {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, cell::Cell};
+    use std::{collections::HashMap, hash::Hash};
+
+    use assert_matches::assert_matches;
 
     use crate::{
         repository::in_memory::versioned_with_streams::InMemoryEventRepository,
-        test_helpers::deciders::user::{
-            IdGen, UserCommand, UserDecider, UserDeciderCtx, UserDeciderState, UserEvent,
+        test_helpers::{
+            deciders::user::{
+                User, UserCommand, UserDecider, UserDeciderCtx, UserDeciderError, UserDeciderState,
+                UserEvent, UserFieldError, UserName,
+            },
+            ValueType,
         },
     };
 
     use super::*;
 
     #[actix_rt::test]
-    async fn test_occ() {
+    async fn load_decide_append_basic_function() {
         let ctx = UserDeciderCtx::new();
 
         let mut event_repository = InMemoryEventRepository::<UserEvent>::new("test");
 
         let cmd1 = UserCommand::AddUser("Mike".to_string());
 
-        let evts =
-            UserDecider::execute(&mut event_repository, &1.to_string(), &ctx, &cmd1, None).await;
+        let first_id = ctx.current();
+        let evts = UserDecider::execute(
+            &mut event_repository,
+            &first_id.to_string(),
+            &ctx,
+            &cmd1,
+            None,
+        )
+        .await
+        .expect("command_succeeds");
 
-        println!("New Events: {:?}", evts);
-        println!(
-            "State Stream -1: {:?}",
-            UserDeciderState::load_by_id(&event_repository, &1.to_string()).await
+        assert_matches!(
+            evts.first().expect("one event"),
+            UserEvent::UserAdded(User { id, name }) if (&first_id == id) && (name.value() == "Mike".to_string())
         );
+
+        let state = UserDeciderState::load_by_id(&event_repository, &first_id.to_string())
+            .await
+            .expect("state is loaded");
+
+        assert_matches!(
+            state,
+            UserDeciderState { users } if users == HashMap::from([(first_id.clone(),  User { id: first_id, name: UserName::try_from("Mike".to_string()).unwrap() })])
+        );
+
+        let second_id = ctx.current();
 
         let cmd2 = UserCommand::AddUser("Dmitiry".to_string());
-        let evts =
-            UserDecider::execute(&mut event_repository, &2.to_string(), &ctx, &cmd2, None).await;
+        let evts = UserDecider::execute(
+            &mut event_repository,
+            &second_id.to_string(),
+            &ctx,
+            &cmd2,
+            None,
+        )
+        .await
+        .expect("command_succeeds");
 
-        println!("New Events: {:?}", evts);
-        println!(
-            "State Stream -2: {:?}",
-            UserDeciderState::load_by_id(&event_repository, &2.to_string()).await
+        assert_matches!(
+            evts.first().expect("one event"),
+            UserEvent::UserAdded(User { id, name }) if (&second_id == id) && (name.value() == "Dmitiry".to_string())
         );
 
-        println!(
-            "State All: {:?}",
-            UserDeciderState::load(&event_repository).await
+        let state = UserDeciderState::load_by_id(&event_repository, &second_id.to_string())
+            .await
+            .expect("state is loaded");
+
+        assert_matches!(
+            state,
+            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User { id: second_id.clone(), name: UserName::try_from("Dmitiry".to_string()).unwrap() })])
         );
 
+        let cmd3 = UserCommand::UpdateUserName(second_id.clone(), "Dmitiry2".to_string());
+        let evts = UserDecider::execute(
+            &mut event_repository,
+            &second_id.to_string(),
+            &ctx,
+            &cmd3,
+            None,
+        )
+        .await
+        .expect("command_succeeds");
 
+        assert_matches!(
+            evts.first().expect("one event"),
+            UserEvent::UserNameUpdated(id, name) if (id == &second_id) && (name == &UserName::try_from("Dmitiry2".to_string()).unwrap())
+        );
 
-        let cmd3 = UserCommand::UpdateUserName(1, "MikeUpdated1".to_string());
-        let cmd4 = UserCommand::UpdateUserName(1, "MikeUpdated4".to_string());
-        let cmd5 = UserCommand::UpdateUserName(1, "MikeUpdated5".to_string());
-        let cmd6 = UserCommand::UpdateUserName(1, "MikeUpdated6".to_string());
-        let cmd7 = UserCommand::UpdateUserName(1, "MikeUpdated7".to_string());
-        let cmd8 = UserCommand::UpdateUserName(1, "MikeUpdated8".to_string());
-        let cmd9 = UserCommand::UpdateUserName(1, "MikeUpdated9".to_string());
-        let cmd10 = UserCommand::UpdateUserName(1, "MikeUpdated10".to_string());
+        let state = UserDeciderState::load_by_id(&event_repository, &second_id.to_string())
+            .await
+            .expect("state is loaded");
 
-        let mut event_repository2 = event_repository.clone();
-        let mut ctx2 = ctx.clone();
+        assert_matches!(
+            state,
+            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User { id: second_id, name: UserName::try_from("Dmitiry2".to_string()).unwrap() })])
+        );
 
-        let handle = actix_rt::spawn(async move {
-            let mut thread_repo = event_repository.clone();
-            let mut thread_ctx = ctx.clone();
+        let cmd4 =
+            UserCommand::UpdateUserName(second_id.clone(), "DmitiryWayToLongToSucceed".to_string());
 
-            let id = 2.to_string();
+        let res = UserDecider::execute(
+            &mut event_repository,
+            &second_id.to_string(),
+            &ctx,
+            &cmd4,
+            None,
+        )
+        .await;
 
-            for cmd in vec![cmd3, cmd4, cmd5, cmd6] {
-                println!("Calling in Spawn Thread: {:?}", cmd);
-                let _ = UserDecider::execute(&mut thread_repo, &id, &thread_ctx, &cmd, None).await;
-            }
-        });
+        assert_matches!(
+            res,
+            Err(LoadDecideAppendError::DecideErr(UserDeciderError::UserField(UserFieldError::NameToLong(n)))) if n == "DmitiryWayToLongToSucceed".to_string()
+        );
 
-        let id = 2.to_string();
-        for cmd in vec![cmd7, cmd8, cmd9, cmd10] {
-            println!("Calling in Main Thread: {:?}", cmd);
-            let _ = UserDecider::execute(&mut event_repository2, &id, &ctx2, &cmd, None).await;
-        }
+        let state = UserDeciderState::load_by_id(&event_repository, &second_id.to_string())
+            .await
+            .expect("state is loaded");
 
-        // let paralell_cmds = (
-        //     UserDecider::execute(&mut event_repository, &2.to_string(), &ctx, &cmd3, None),
-        //     UserDecider::execute(&mut event_repository, &2.to_string(), &ctx, &cmd4, None),
-        //     UserDecider::execute(&mut event_repository, &2.to_string(), &ctx, &cmd5, None),
-        //     UserDecider::execute(&mut event_repository, &2.to_string(), &ctx, &cmd6, None),
-        //     UserDecider::execute(&mut event_repository, &2.to_string(), &ctx, &cmd7, None),
-        //     UserDecider::execute(&mut event_repository, &2.to_string(), &ctx, &cmd8, None),
-        //     UserDecider::execute(&mut event_repository, &2.to_string(), &ctx, &cmd9, None),
-        //     UserDecider::execute(&mut event_repository, &2.to_string(), &ctx, &cmd10, None),
-        // );
+        assert_matches!(
+            state,
+            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User { id: second_id, name: UserName::try_from("Dmitiry2".to_string()).unwrap() })])
+        );
+
+        let state = UserDeciderState::load(&event_repository)
+            .await
+            .expect("state is loaded");
+
+        assert_matches!(
+            state,
+            UserDeciderState { users } if users == HashMap::from([
+                (first_id.clone(), User { id: first_id, name: UserName::try_from("Mike".to_string()).unwrap() }),
+                (second_id.clone(),  User { id: second_id, name: UserName::try_from("Dmitiry2".to_string()).unwrap() })
+                ])
+        );
     }
 }
