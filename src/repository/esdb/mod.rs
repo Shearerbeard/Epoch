@@ -342,11 +342,6 @@ mod tests {
 
         thread::sleep(time::Duration::from_secs(1));
 
-        let res = UserDeciderState::load(&event_repository)
-            .await
-            .expect("Success!!");
-        println!("Users result {:?}", res);
-
         let state = UserDeciderState::load_by_id(&event_repository, &first_id.to_string())
             .await
             .expect("state is loaded");

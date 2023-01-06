@@ -118,10 +118,11 @@ where
             {
                 Ok((appended_evts, _)) => return Ok(appended_evts),
                 Err(VersionedRepositoryError::RepoErr(e)) => {
+                    println!("Max Retries for {:?}!!", &cmd);
                     return Err(LoadDecideAppendError::RepositoryErr(e));
                 }
                 Err(VersionedRepositoryError::VersionConflict(_)) => {
-                    println!("RETRY #{}!!", &r);
+                    println!("RETRY #{} for {:?}!!", &r, &cmd);
                     thread::sleep(time::Duration::new(0, 100000000 * r));
                     let (mut catchup_evts, new_version) = event_repository
                         .load_from_version(&version, stream)
