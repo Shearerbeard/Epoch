@@ -1,4 +1,5 @@
-use std::fmt::Debug;
+use core::time;
+use std::{fmt::Debug, thread};
 
 use crate::{
     decider::{DeciderWithContext, Evolver},
@@ -103,7 +104,7 @@ where
 
         let mut state = <Self::Decide as Evolver>::init();
 
-        for _ in 1..retrys.unwrap_or(4) {
+        for r in 1..retrys.unwrap_or(20) {
             state = decider_evts
                 .iter()
                 .fold(state, <Self::Decide as Evolver>::evolve);
@@ -120,7 +121,8 @@ where
                     return Err(LoadDecideAppendError::RepositoryErr(e));
                 }
                 Err(VersionedRepositoryError::VersionConflict(_)) => {
-                    println!("RETRY IT!!");
+                    println!("RETRY #{}!!", &r);
+                    thread::sleep(time::Duration::new(0, 100000000 * r));
                     let (mut catchup_evts, new_version) = event_repository
                         .load_from_version(&version, stream)
                         .await
@@ -146,7 +148,7 @@ pub enum LoadDecideAppendError<DecideErr: Send + Sync, RepoErr> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, hash::Hash};
+    use std::collections::HashMap;
 
     use assert_matches::assert_matches;
 
@@ -184,7 +186,7 @@ mod tests {
 
         assert_matches!(
             evts.first().expect("one event"),
-            UserEvent::UserAdded(User { id, name }) if (&first_id == id) && (name.value() == "Mike".to_string())
+            UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike".to_string())
         );
 
         let state = UserDeciderState::load_by_id(&event_repository, &first_id.to_string())
@@ -193,7 +195,7 @@ mod tests {
 
         assert_matches!(
             state,
-            UserDeciderState { users } if users == HashMap::from([(first_id.clone(),  User { id: first_id, name: UserName::try_from("Mike".to_string()).unwrap() })])
+            UserDeciderState { users } if users == HashMap::from([(first_id.clone(),  User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
         );
 
         let second_id = ctx.current();
@@ -211,7 +213,7 @@ mod tests {
 
         assert_matches!(
             evts.first().expect("one event"),
-            UserEvent::UserAdded(User { id, name }) if (&second_id == id) && (name.value() == "Dmitiry".to_string())
+            UserEvent::UserAdded(User { id, name, .. }) if (&second_id == id) && (name.value() == "Dmitiry".to_string())
         );
 
         let state = UserDeciderState::load_by_id(&event_repository, &second_id.to_string())
@@ -220,7 +222,7 @@ mod tests {
 
         assert_matches!(
             state,
-            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User { id: second_id.clone(), name: UserName::try_from("Dmitiry".to_string()).unwrap() })])
+            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry".to_string()).unwrap()))])
         );
 
         let cmd3 = UserCommand::UpdateUserName(second_id.clone(), "Dmitiry2".to_string());
@@ -245,7 +247,7 @@ mod tests {
 
         assert_matches!(
             state,
-            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User { id: second_id, name: UserName::try_from("Dmitiry2".to_string()).unwrap() })])
+            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))])
         );
 
         let cmd4 =
@@ -271,7 +273,7 @@ mod tests {
 
         assert_matches!(
             state,
-            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User { id: second_id, name: UserName::try_from("Dmitiry2".to_string()).unwrap() })])
+            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))])
         );
 
         let state = UserDeciderState::load(&event_repository)
@@ -281,8 +283,8 @@ mod tests {
         assert_matches!(
             state,
             UserDeciderState { users } if users == HashMap::from([
-                (first_id.clone(), User { id: first_id, name: UserName::try_from("Mike".to_string()).unwrap() }),
-                (second_id.clone(),  User { id: second_id, name: UserName::try_from("Dmitiry2".to_string()).unwrap() })
+                (first_id.clone(), User::new(first_id, UserName::try_from("Mike".to_string()).unwrap())),
+                (second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))
                 ])
         );
     }

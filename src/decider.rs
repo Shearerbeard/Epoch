@@ -63,7 +63,7 @@ mod tests {
         let cmd = UserCommand::AddUser("Mike".to_string() as user::UnvalidatedUserName);
         let events = <UserDecider as Decider>::decide(&state, &cmd).expect("Decider Success");
 
-        if let Some(UserEvent::UserAdded(user::User { name, id })) = events.clone().first() {
+        if let Some(UserEvent::UserAdded(user::User { name, id, .. })) = events.clone().first() {
             let user_id = id.clone();
             let user_name = name.clone();
 
@@ -76,7 +76,8 @@ mod tests {
 
             assert_matches!(state.users.get(&id).expect("User exists"), user::User {
                 id,
-                name
+                name,
+                ..
             } if (id == &user_id && name == &user_name));
         } else {
             panic!("Events not produced")

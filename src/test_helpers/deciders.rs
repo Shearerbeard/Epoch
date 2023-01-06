@@ -1,7 +1,10 @@
 pub(crate) mod user {
-    use std::{collections::HashMap, cell::RefCell, sync::{Arc, Mutex},};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::{Arc, Mutex},
+    };
 
-    use autoincrement::{AsyncIncremental, AutoIncrement, AsyncIncrement};
+    use autoincrement::{AsyncIncrement, AsyncIncremental};
     use serde::{Deserialize, Serialize};
     use thiserror::Error;
 
@@ -15,11 +18,27 @@ pub(crate) mod user {
     pub(crate) struct User {
         pub id: UserId,
         pub name: UserName,
+        pub guitars: HashSet<Guitar>,
+    }
+
+    impl User {
+        pub fn new(id: UserId, name: UserName) -> Self {
+            Self {
+                id,
+                name,
+                guitars: HashSet::new(),
+            }
+        }
     }
 
     pub(crate) type UserId = usize;
 
     pub(crate) type UnvalidatedUserName = String;
+
+    #[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
+    pub(crate) struct Guitar {
+        pub brand: String,
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub(crate) struct UserName(String);
@@ -91,7 +110,7 @@ pub(crate) mod user {
         type Err = UserDeciderError;
 
         fn decide(
-            _state: &UserDeciderState,
+            state: &UserDeciderState,
             cmd: &UserCommand,
         ) -> Result<Vec<UserEvent>, UserDeciderError> {
             match cmd {
@@ -99,13 +118,32 @@ pub(crate) mod user {
                     let name = UserName::try_from(user_name)
                         .map_err(|e| UserDeciderError::UserField(e))?;
 
-                    Ok(vec![UserEvent::UserAdded(User { id: 1, name })])
+                    Ok(vec![UserEvent::UserAdded(User {
+                        id: 1,
+                        name,
+                        guitars: HashSet::new(),
+                    })])
                 }
                 UserCommand::UpdateUserName(user_id, user_name) => {
                     let name = UserName::try_from(user_name)
                         .map_err(|e| UserDeciderError::UserField(e))?;
 
                     Ok(vec![UserEvent::UserNameUpdated(user_id.to_owned(), name)])
+                }
+                UserCommand::AddGuitar(user_id, guitar) => {
+                    println!("ADD GUITAR STATE: {:?}", &state);
+                    let user = state
+                        .users
+                        .get(&user_id)
+                        .ok_or(UserDeciderError::NotFound(*user_id))?;
+                    if user.guitars.contains(&guitar) {
+                        Err(UserDeciderError::AlreadyHasGuitar(guitar.to_owned()))
+                    } else {
+                        Ok(vec![UserEvent::UserGuitarAdded(
+                            *user_id,
+                            guitar.to_owned(),
+                        )])
+                    }
                 }
             }
         }
@@ -124,6 +162,15 @@ pub(crate) mod user {
                 }
                 UserEvent::UserNameUpdated(user_id, user_name) => {
                     state.users.get_mut(&user_id).unwrap().name = user_name.to_owned();
+                    state
+                }
+                UserEvent::UserGuitarAdded(user_id, guitar) => {
+                    state
+                        .users
+                        .get_mut(&user_id)
+                        .unwrap()
+                        .guitars
+                        .insert(guitar.to_owned());
                     state
                 }
             }
@@ -145,7 +192,7 @@ pub(crate) mod user {
 
         fn decide(
             ctx: &UserDeciderCtx,
-            _state: &UserDeciderState,
+            state: &UserDeciderState,
             cmd: &UserCommand,
         ) -> Result<Vec<UserEvent>, UserDeciderError> {
             match cmd {
@@ -156,13 +203,31 @@ pub(crate) mod user {
                     let name = UserName::try_from(user_name)
                         .map_err(|e| UserDeciderError::UserField(e))?;
 
-                    Ok(vec![UserEvent::UserAdded(User { id, name })])
+                    Ok(vec![UserEvent::UserAdded(User {
+                        id,
+                        name,
+                        guitars: HashSet::new(),
+                    })])
                 }
                 UserCommand::UpdateUserName(user_id, user_name) => {
                     let name = UserName::try_from(user_name)
                         .map_err(|e| UserDeciderError::UserField(e))?;
 
                     Ok(vec![UserEvent::UserNameUpdated(user_id.to_owned(), name)])
+                }
+                UserCommand::AddGuitar(user_id, guitar) => {
+                    let user = state
+                        .users
+                        .get(&user_id)
+                        .ok_or(UserDeciderError::NotFound(*user_id))?;
+                    if user.guitars.contains(&guitar) {
+                        Err(UserDeciderError::AlreadyHasGuitar(guitar.to_owned()))
+                    } else {
+                        Ok(vec![UserEvent::UserGuitarAdded(
+                            *user_id,
+                            guitar.to_owned(),
+                        )])
+                    }
                 }
             }
         }
@@ -177,16 +242,13 @@ pub(crate) mod user {
         pub(crate) users: HashMap<UserId, User>,
     }
 
-    impl  UserDeciderState {
+    impl UserDeciderState {
         pub fn new(users: HashMap<UserId, User>) -> Self {
             Self::default().set_users(users)
         }
 
         pub fn set_users(&self, users: HashMap<UserId, User>) -> Self {
-            Self {
-                users,
-                ..*self
-            }
+            Self { users, ..*self }
         }
     }
 
@@ -200,13 +262,13 @@ pub(crate) mod user {
 
     #[derive(Clone, Debug)]
     pub(crate) struct UserDeciderCtx {
-        id_sequence: Arc<Mutex<AsyncIncrement<IdGen>>>
+        id_sequence: Arc<Mutex<AsyncIncrement<IdGen>>>,
     }
 
     impl UserDeciderCtx {
         pub fn new() -> Self {
             Self {
-                id_sequence: Arc::new(Mutex::new(IdGen::init()))
+                id_sequence: Arc::new(Mutex::new(IdGen::init())),
             }
         }
 
@@ -224,12 +286,14 @@ pub(crate) mod user {
     pub(crate) enum UserCommand {
         AddUser(UnvalidatedUserName),
         UpdateUserName(UserId, UnvalidatedUserName),
+        AddGuitar(UserId, Guitar),
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub(crate) enum UserEvent {
         UserAdded(User),
         UserNameUpdated(UserId, UserName),
+        UserGuitarAdded(UserId, Guitar),
     }
 
     impl Event for UserEvent {
@@ -237,6 +301,7 @@ pub(crate) mod user {
             match self {
                 UserEvent::UserAdded(_) => "UserAdded".to_string(),
                 UserEvent::UserNameUpdated(_, _) => "UserNameUpdated".to_string(),
+                UserEvent::UserGuitarAdded(_, _) => "UserGuitarAdded".to_string(),
             }
         }
     }
@@ -245,6 +310,10 @@ pub(crate) mod user {
     pub(crate) enum UserDeciderError {
         #[error("Invalid user field {0:?}")]
         UserField(UserFieldError),
+        #[error("User id {0} not found")]
+        NotFound(UserId),
+        #[error("Already has guitar {0:?}")]
+        AlreadyHasGuitar(Guitar),
     }
 
     #[derive(AsyncIncremental, PartialEq, Eq, Clone, Debug)]

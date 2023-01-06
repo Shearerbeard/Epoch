@@ -30,10 +30,10 @@ pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug 
     assert_matches!(res, (v, _) if v == vec![] as Vec<UserEvent>);
 
     let events1 = vec![
-        UserEvent::UserAdded(User {
-            id: 1,
-            name: UserName::try_from("Mike").expect("Name is valid"),
-        }),
+        UserEvent::UserAdded(User::new(
+            1,
+            UserName::try_from("Mike").expect("Name is valid"),
+        )),
         UserEvent::UserNameUpdated(
             1 as UserId,
             UserName::try_from("Mike2").expect("Name is valid"),
@@ -46,10 +46,10 @@ pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug 
         .expect("Successful append");
 
     let events2 = vec![
-        UserEvent::UserAdded(User {
-            id: 2,
-            name: UserName::try_from("Stella").expect("Name is valid"),
-        }),
+        UserEvent::UserAdded(User::new(
+            2,
+            UserName::try_from("Stella").expect("Name is valid"),
+        )),
         UserEvent::UserNameUpdated(
             1 as UserId,
             UserName::try_from("Stella2").expect("Name is valid"),
@@ -107,10 +107,7 @@ pub(crate) async fn test_versioned_state_repository<Err: Debug>(
 ) {
     let new_state = UserDeciderState::new(HashMap::from([(
         1,
-        User {
-            id: 1,
-            name: UserName::try_from("Mike").expect("valid"),
-        },
+        User::new(1, UserName::try_from("Mike").expect("valid")),
     )]));
 
     let version = RepositoryVersion::Exact(0);
