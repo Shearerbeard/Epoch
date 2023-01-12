@@ -19,7 +19,7 @@ impl<State> InMemoryStateRepository<State>
 where
     State: Debug,
 {
-    fn new(state: State) -> Self {
+    pub fn new(state: State) -> Self {
         Self {
             state: Arc::new(Mutex::new(VersionedState::new(state))),
         }
