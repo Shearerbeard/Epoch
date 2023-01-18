@@ -6,7 +6,7 @@ use crate::{
     repository::{self, event::VersionedRepositoryError, RepositoryVersion},
 };
 use async_trait::async_trait;
-use repository::event::{SteamIdFromEvent, VersionedEventRepositoryWithStreams};
+use repository::event::{StreamIdFromEvent, VersionedEventRepositoryWithStreams};
 
 #[async_trait]
 pub trait StateFromEventRepository
@@ -96,7 +96,7 @@ where
         StreamId: Send
             + Sync
             + Clone
-            + SteamIdFromEvent<<<Self as LoadDecideAppend>::Decide as Evolver>::Evt>,
+            + StreamIdFromEvent<<<Self as LoadDecideAppend>::Decide as Evolver>::Evt>,
     {
         let (mut decider_evts, mut version) = match stream_id {
             StreamState::New => (vec![], RepositoryVersion::NoStream),

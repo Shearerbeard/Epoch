@@ -10,7 +10,7 @@ pub(crate) mod user {
 
     use crate::{
         decider::{Decider, DeciderWithContext, Event, Evolver},
-        repository::event::SteamIdFromEvent,
+        repository::event::StreamIdFromEvent,
         strategies::{LoadDecideAppend, StateFromEventRepository},
         test_helpers::ValueType,
     };
@@ -318,7 +318,7 @@ pub(crate) mod user {
         }
     }
 
-    impl SteamIdFromEvent<UserEvent> for String {
+    impl StreamIdFromEvent<UserEvent> for String {
         fn event_entity_id_into(id: <UserEvent as Event>::EntityId) -> Self {
             id.to_string()
         }

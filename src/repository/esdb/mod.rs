@@ -179,6 +179,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use const_random::const_random;
     use core::time;
     use futures::{
         future::{self, BoxFuture},
@@ -206,7 +207,7 @@ mod tests {
 
     use super::*;
 
-    const BASE_STREAM: &str = "test";
+    const BASE_STREAM: u32 = const_random!(u32);
 
     async fn store_from_environment(base_stream: &str, ids: Vec<usize>) -> eventstore::Client {
         let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
@@ -231,8 +232,9 @@ mod tests {
 
     async fn add_guitar(base_stream: String, user_id: UserId, guitar: Guitar) {
         let ctx = UserDeciderCtx::new();
-        let client = store_from_environment(&base_stream, vec![]).await;
-        let mut event_repository = ESDBEventRepository::<UserEvent>::new(&client, &base_stream);
+        let client = store_from_environment(&base_stream.to_string(), vec![]).await;
+        let mut event_repository =
+            ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
 
         println!("Adding Guitar {:?} for user {}", &guitar.brand, &user_id);
 
@@ -256,8 +258,9 @@ mod tests {
     #[actix_rt::test]
     async fn repository_spec_test() {
         let base_stream = BASE_STREAM;
-        let client = store_from_environment(&base_stream, vec![1, 2]).await;
-        let event_repository = ESDBEventRepository::<UserEvent>::new(&client, base_stream);
+        let client = store_from_environment(&base_stream.to_string(), vec![1, 2]).await;
+        let event_repository =
+            ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
 
         let _ = test_versioned_event_repository_with_streams(event_repository).await;
     }
@@ -265,8 +268,9 @@ mod tests {
     #[actix_rt::test]
     async fn test_occ() {
         let base_stream = format!("{}_with_occ", BASE_STREAM);
-        let client = store_from_environment(&base_stream, vec![1]).await;
-        let mut event_repository = ESDBEventRepository::<UserEvent>::new(&client, &base_stream);
+        let client = store_from_environment(&base_stream.to_string(), vec![1]).await;
+        let mut event_repository =
+            ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
         let ctx = UserDeciderCtx::new();
 
         let cmd1 = UserCommand::AddUser("Mike".to_string());

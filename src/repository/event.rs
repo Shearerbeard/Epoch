@@ -74,7 +74,7 @@ pub enum VersionedRepositoryError<RepoErr> {
     RepoErr(RepoErr),
 }
 
-pub trait SteamIdFromEvent<Evt: Event>: Sized {
+pub trait StreamIdFromEvent<Evt: Event>: Sized {
     fn from(e: Evt) -> Self {
         Self::event_entity_id_into(e.get_id())
     }
