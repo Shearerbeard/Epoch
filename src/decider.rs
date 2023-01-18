@@ -1,5 +1,8 @@
 pub trait Event {
+    type EntityId;
+
     fn event_type(&self) -> String;
+    fn get_id(&self) -> Self::EntityId;
 }
 
 pub trait Decider: Evolver {

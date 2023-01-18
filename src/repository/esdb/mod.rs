@@ -177,12 +177,6 @@ where
     }
 }
 
-// impl Into<VersionedRepositoryError<Error>> for Error {
-//     fn into(self) -> VersionedRepositoryError<Error> {
-//         todo!()
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
     use core::time;
@@ -199,7 +193,7 @@ mod tests {
     use eventstore::DeleteStreamOptions;
 
     use crate::{
-        strategies::{LoadDecideAppend, StateFromEventRepository},
+        strategies::{LoadDecideAppend, StateFromEventRepository, StreamState},
         test_helpers::{
             deciders::user::{
                 Guitar, User, UserCommand, UserDecider, UserDeciderCtx, UserDeciderState,
@@ -246,7 +240,7 @@ mod tests {
 
         let res = UserDecider::execute(
             &mut event_repository,
-            &user_id.to_string(),
+            &StreamState::Existing(user_id.to_string()),
             &ctx,
             &cmd,
             None,
@@ -277,16 +271,12 @@ mod tests {
 
         let cmd1 = UserCommand::AddUser("Mike".to_string());
 
-        let first_id = ctx.current();
-        let evts = UserDecider::execute(
-            &mut event_repository,
-            &first_id.to_string(),
-            &ctx,
-            &cmd1,
-            None,
-        )
-        .await
-        .expect("command_succeeds");
+        let evts =
+            UserDecider::execute(&mut event_repository, &StreamState::New, &ctx, &cmd1, None)
+                .await
+                .expect("command_succeeds");
+
+        let first_id = evts.first().unwrap().get_id();
 
         assert_matches!(
             evts.first().expect("one event"),

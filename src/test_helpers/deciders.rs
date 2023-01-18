@@ -10,6 +10,7 @@ pub(crate) mod user {
 
     use crate::{
         decider::{Decider, DeciderWithContext, Event, Evolver},
+        repository::event::SteamIdFromEvent,
         strategies::{LoadDecideAppend, StateFromEventRepository},
         test_helpers::ValueType,
     };
@@ -297,12 +298,29 @@ pub(crate) mod user {
     }
 
     impl Event for UserEvent {
+        type EntityId = UserId;
+
         fn event_type(&self) -> String {
             match self {
                 UserEvent::UserAdded(_) => "UserAdded".to_string(),
                 UserEvent::UserNameUpdated(_, _) => "UserNameUpdated".to_string(),
                 UserEvent::UserGuitarAdded(_, _) => "UserGuitarAdded".to_string(),
             }
+        }
+
+        fn get_id(&self) -> Self::EntityId {
+            match self {
+                UserEvent::UserAdded(User { id, .. }) => id,
+                UserEvent::UserNameUpdated(id, _) => id,
+                UserEvent::UserGuitarAdded(id, _) => id,
+            }
+            .to_owned()
+        }
+    }
+
+    impl SteamIdFromEvent<UserEvent> for String {
+        fn event_entity_id_into(id: <UserEvent as Event>::EntityId) -> Self {
+            id.to_string()
         }
     }
 

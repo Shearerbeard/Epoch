@@ -74,6 +74,14 @@ pub enum VersionedRepositoryError<RepoErr> {
     RepoErr(RepoErr),
 }
 
+pub trait SteamIdFromEvent<Evt: Event>: Sized {
+    fn from(e: Evt) -> Self {
+        Self::event_entity_id_into(e.get_id())
+    }
+
+    fn event_entity_id_into(id: <Evt as Event>::EntityId) -> Self;
+}
+
 #[derive(Debug)]
 pub struct VersionDiff {
     expected: RepositoryVersion,

@@ -2,11 +2,11 @@ use core::time;
 use std::{fmt::Debug, thread};
 
 use crate::{
-    decider::{DeciderWithContext, Evolver},
-    repository::{self, event::VersionedRepositoryError},
+    decider::{DeciderWithContext, Event, Evolver},
+    repository::{self, event::VersionedRepositoryError, RepositoryVersion},
 };
 use async_trait::async_trait;
-use repository::event::VersionedEventRepositoryWithStreams;
+use repository::event::{SteamIdFromEvent, VersionedEventRepositoryWithStreams};
 
 #[async_trait]
 pub trait StateFromEventRepository
@@ -61,7 +61,7 @@ where
     <Self::Decide as Evolver>::State: Send + Sync + Debug,
     <Self::Decide as DeciderWithContext>::Ctx: Send + Sync + Debug,
     <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
-    <Self::Decide as Evolver>::Evt: Send + Sync + Debug,
+    <Self::Decide as Evolver>::Evt: Clone + Send + Sync + Debug,
     <Self::Decide as DeciderWithContext>::Err: Send + Sync + Debug,
 {
     type Decide: DeciderWithContext + Send + Sync;
@@ -83,7 +83,7 @@ where
             StreamId = StreamId,
         > + Send
                   + Sync),
-        stream_id: &StreamId,
+        stream_id: &StreamState<StreamId>,
         ctx: &<<Self as LoadDecideAppend>::Decide as DeciderWithContext>::Ctx,
         cmd: &<<Self as LoadDecideAppend>::Decide as DeciderWithContext>::Cmd,
         retrys: Option<u32>,
@@ -93,14 +93,23 @@ where
     >
     where
         RepoErr: Debug + Send + Sync,
-        StreamId: Send + Sync,
+        StreamId: Send
+            + Sync
+            + Clone
+            + SteamIdFromEvent<<<Self as LoadDecideAppend>::Decide as Evolver>::Evt>,
     {
-        let stream = Some(stream_id);
+        let (mut decider_evts, mut version) = match stream_id {
+            StreamState::New => (vec![], RepositoryVersion::NoStream),
+            StreamState::Existing(sid) => event_repository
+                .load(Some(sid))
+                .await
+                .map_err(Self::to_lda_error)?,
+        };
 
-        let (mut decider_evts, mut version) = event_repository
-            .load(stream)
-            .await
-            .map_err(Self::to_lda_error)?;
+        // let (mut decider_evts, mut version) = event_repository
+        //     .load(stream)
+        //     .await
+        //     .map_err(Self::to_lda_error)?;
 
         let mut state = <Self::Decide as Evolver>::init();
 
@@ -112,10 +121,17 @@ where
             let new_evts = <Self::Decide as DeciderWithContext>::decide(&ctx, &state, &cmd)
                 .map_err(LoadDecideAppendError::DecideErr)?;
 
-            match event_repository
-                .append(&version, stream_id, &new_evts)
-                .await
-            {
+            let stream = match stream_id {
+                StreamState::New => match new_evts.first() {
+                    None => {
+                        return Ok(vec![]);
+                    }
+                    Some(evt) => StreamId::from(evt.clone()),
+                },
+                StreamState::Existing(sid) => sid.clone(),
+            };
+
+            match event_repository.append(&version, &stream, &new_evts).await {
                 Ok((appended_evts, _)) => return Ok(appended_evts),
                 Err(VersionedRepositoryError::RepoErr(e)) => {
                     println!("Max Retries for {:?}!!", &cmd);
@@ -125,7 +141,7 @@ where
                     println!("RETRY #{} for {:?}!!", &r, &cmd);
                     thread::sleep(time::Duration::new(0, 100000000 * r));
                     let (mut catchup_evts, new_version) = event_repository
-                        .load_from_version(&version, stream)
+                        .load_from_version(&version, Some(&stream))
                         .await
                         .map_err(Self::to_lda_error)?;
 
@@ -137,6 +153,11 @@ where
 
         Err(LoadDecideAppendError::OccMaxRetries)
     }
+}
+
+pub enum StreamState<T> {
+    New,
+    Existing(T),
 }
 
 #[derive(Debug)]
@@ -174,16 +195,12 @@ mod tests {
 
         let cmd1 = UserCommand::AddUser("Mike".to_string());
 
-        let first_id = ctx.current();
-        let evts = UserDecider::execute(
-            &mut event_repository,
-            &first_id.to_string(),
-            &ctx,
-            &cmd1,
-            None,
-        )
-        .await
-        .expect("command_succeeds");
+        let evts =
+            UserDecider::execute(&mut event_repository, &StreamState::New, &ctx, &cmd1, None)
+                .await
+                .expect("command_succeeds");
+
+        let first_id = evts.first().unwrap().get_id();
 
         assert_matches!(
             evts.first().expect("one event"),
@@ -199,18 +216,13 @@ mod tests {
             UserDeciderState { users } if users == HashMap::from([(first_id.clone(),  User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
         );
 
-        let second_id = ctx.current();
-
         let cmd2 = UserCommand::AddUser("Dmitiry".to_string());
-        let evts = UserDecider::execute(
-            &mut event_repository,
-            &second_id.to_string(),
-            &ctx,
-            &cmd2,
-            None,
-        )
-        .await
-        .expect("command_succeeds");
+        let evts =
+            UserDecider::execute(&mut event_repository, &StreamState::New, &ctx, &cmd2, None)
+                .await
+                .expect("command_succeeds");
+
+        let second_id = evts.first().unwrap().get_id();
 
         assert_matches!(
             evts.first().expect("one event"),
@@ -229,7 +241,7 @@ mod tests {
         let cmd3 = UserCommand::UpdateUserName(second_id.clone(), "Dmitiry2".to_string());
         let evts = UserDecider::execute(
             &mut event_repository,
-            &second_id.to_string(),
+            &StreamState::Existing(second_id.to_string()),
             &ctx,
             &cmd3,
             None,
@@ -256,7 +268,7 @@ mod tests {
 
         let res = UserDecider::execute(
             &mut event_repository,
-            &second_id.to_string(),
+            &StreamState::Existing(second_id.to_string()),
             &ctx,
             &cmd4,
             None,
