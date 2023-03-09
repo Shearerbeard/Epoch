@@ -2,14 +2,14 @@ use core::time;
 use std::{fmt::Debug, thread};
 
 use crate::{
-    decider::{DeciderWithContext, Event, Evolver},
+    decider::{DeciderWithContext, Evolver},
     repository::{self, event::VersionedRepositoryError, RepositoryVersion},
 };
 use async_trait::async_trait;
 use repository::event::{StreamIdFromEvent, VersionedEventRepositoryWithStreams};
 
 #[async_trait]
-pub trait StateFromEventRepository
+pub(crate) trait StateFromEventRepository
 where
     <Self::Ev as Evolver>::Evt: Send + Sync + Debug,
     <Self::Ev as Evolver>::State: Send + Sync + Debug,
@@ -106,11 +106,6 @@ where
                 .map_err(Self::to_lda_error)?,
         };
 
-        // let (mut decider_evts, mut version) = event_repository
-        //     .load(stream)
-        //     .await
-        //     .map_err(Self::to_lda_error)?;
-
         let mut state = <Self::Decide as Evolver>::init();
 
         for r in 1..retrys.unwrap_or(20) {
@@ -175,6 +170,7 @@ mod tests {
     use assert_matches::assert_matches;
 
     use crate::{
+        decider::Event,
         repository::in_memory::versioned_with_streams::InMemoryEventRepository,
         test_helpers::{
             deciders::user::{

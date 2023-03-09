@@ -193,16 +193,15 @@ mod tests {
     use assert_matches::assert_matches;
     use eventstore::DeleteStreamOptions;
 
-    use crate::{
-        strategies::{LoadDecideAppend, StateFromEventRepository, StreamState},
-        test_helpers::{
-            deciders::user::{
-                Guitar, User, UserCommand, UserDecider, UserDeciderCtx, UserDeciderState,
-                UserEvent, UserId, UserName,
-            },
-            repository::test_versioned_event_repository_with_streams,
-            ValueType,
+    use crate::strategies::{LoadDecideAppend, StateFromEventRepository, StreamState};
+
+    use crate::test_helpers::{
+        deciders::user::{
+            Guitar, User, UserCommand, UserDecider, UserDeciderCtx, UserDeciderState, UserEvent,
+            UserId, UserName,
         },
+        repository::test_versioned_event_repository_with_streams,
+        ValueType,
     };
 
     use super::*;
