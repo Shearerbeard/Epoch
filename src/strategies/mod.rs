@@ -168,9 +168,9 @@ where
     type Decide: DeciderWithContext + Send + Sync;
 
     async fn response(
-        ctx: &<<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Ctx,
-        state: &<<Self as DecideEvolveWithCommandResponse>::Decide as Evolver>::State,
         cmd: <<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Cmd,
+        state: &<<Self as DecideEvolveWithCommandResponse>::Decide as Evolver>::State,
+        ctx: &<<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Ctx,
     ) -> Result<
         CommandResponse<<Self as DecideEvolveWithCommandResponse>::Decide>,
         <<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Err,
@@ -181,7 +181,6 @@ where
             .fold(state.clone(), <Self::Decide as Evolver>::evolve);
 
         Ok(CommandResponse(cmd, evts, state))
-        // todo!()
     }
 }
 
