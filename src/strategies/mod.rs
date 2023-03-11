@@ -2,7 +2,7 @@ use core::time;
 use std::{fmt::Debug, thread};
 
 use crate::{
-    decider::{DeciderWithContext, Evolver},
+    decider::{Decider, DeciderWithContext, Evolver},
     repository::{self, event::VersionedRepositoryError, RepositoryVersion},
 };
 use async_trait::async_trait;
@@ -147,6 +147,41 @@ where
         }
 
         Err(LoadDecideAppendError::OccMaxRetries)
+    }
+}
+
+pub struct CommandResponse<D: DeciderWithContext>(
+    <D as DeciderWithContext>::Cmd,
+    Vec<<D as Evolver>::Evt>,
+    <D as Evolver>::State,
+);
+
+#[async_trait]
+pub trait DecideEvolveWithCommandResponse
+where
+    <Self::Decide as Evolver>::State: Send + Sync + Debug + Clone,
+    <Self::Decide as DeciderWithContext>::Ctx: Send + Sync + Debug,
+    <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
+    <Self::Decide as Evolver>::Evt: Clone + Send + Sync + Debug,
+    <Self::Decide as DeciderWithContext>::Err: Send + Sync + Debug,
+{
+    type Decide: DeciderWithContext + Send + Sync;
+
+    async fn response(
+        ctx: &<<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Ctx,
+        state: &<<Self as DecideEvolveWithCommandResponse>::Decide as Evolver>::State,
+        cmd: <<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Cmd,
+    ) -> Result<
+        CommandResponse<<Self as DecideEvolveWithCommandResponse>::Decide>,
+        <<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Err,
+    > {
+        let evts = <Self::Decide as DeciderWithContext>::decide(ctx, &state.clone(), &cmd)?;
+        let state = evts
+            .iter()
+            .fold(state.clone(), <Self::Decide as Evolver>::evolve);
+
+        Ok(CommandResponse(cmd, evts, state))
+        // todo!()
     }
 }
 
