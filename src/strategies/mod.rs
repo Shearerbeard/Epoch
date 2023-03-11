@@ -175,10 +175,10 @@ where
         CommandResponse<<Self as DecideEvolveWithCommandResponse>::Decide>,
         <<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Err,
     > {
-        let evts = <Self::Decide as DeciderWithContext>::decide(ctx, &state.clone(), &cmd)?;
+        let evts = <Self::Decide as DeciderWithContext>::decide(ctx, state, &cmd)?;
         let state = evts
             .iter()
-            .fold(state.clone(), <Self::Decide as Evolver>::evolve);
+            .fold(state.to_owned(), <Self::Decide as Evolver>::evolve);
 
         Ok(CommandResponse(cmd, evts, state))
     }
