@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use repository::event::{StreamIdFromEvent, VersionedEventRepositoryWithStreams};
 
 #[async_trait]
-pub(crate) trait StateFromEventRepository
+pub trait StateFromEventRepository
 where
     <Self::Ev as Evolver>::Evt: Send + Sync + Debug,
     <Self::Ev as Evolver>::State: Send + Sync + Debug,
