@@ -28,7 +28,7 @@ where
     state: HashMap<String, Arc<Mutex<InMemoryEventRepositoryState<E>>>>,
 }
 
-impl<'a, E> InMemoryEventRepository<E>
+impl<E> InMemoryEventRepository<E>
 where
     E: Event + Sync + Send + Debug,
 {
@@ -47,12 +47,12 @@ where
         if let Some(id) = stream_id {
             format!("{}/{}", self.stream_name, id)
         } else {
-            format!("{}", self.stream_name)
+            self.stream_name.to_string()
         }
     }
 
     fn get_stream_or_new(&mut self, key: &str) -> &Arc<Mutex<InMemoryEventRepositoryState<E>>> {
-        if let None = self.state.get(key) {
+        if self.state.get(key).is_none() {
             self.state.insert(
                 key.to_owned(),
                 Arc::new(Mutex::new(InMemoryEventRepositoryState::new())),
@@ -125,7 +125,7 @@ where
         if stream.position == Self::index_from_version(version) {
             stream.events.extend(events.clone());
             let position = stream.events.len() - 1;
-            stream.position = position.clone();
+            stream.position = position;
 
             drop(stream); // Drop mutable reference so we can pull another and write to sub_stream
 
@@ -148,13 +148,11 @@ where
     }
 }
 
-impl Into<VersionedRepositoryError<Error>> for Error {
-    fn into(self) -> VersionedRepositoryError<Error> {
-        if let Error::VersionConflict(diff) = self {
-            VersionedRepositoryError::VersionConflict(diff)
-        } else {
-            VersionedRepositoryError::RepoErr(self)
-        }
+impl From<Error> for VersionedRepositoryError<Error> {
+    fn from(value: Error) -> Self {
+        let Error::VersionConflict(diff) = value;
+
+        VersionedRepositoryError::VersionConflict(diff)
     }
 }
 

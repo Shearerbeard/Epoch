@@ -11,7 +11,7 @@ pub(crate) mod user {
     use crate::{
         decider::{Decider, DeciderWithContext, Event, Evolver},
         repository::event::StreamIdFromEvent,
-        strategies::{LoadDecideAppend, StateFromEventRepository},
+        strategies::{DecideEvolveWithCommandResponse, LoadDecideAppend, StateFromEventRepository},
         test_helpers::ValueType,
     };
 
@@ -103,6 +103,7 @@ pub(crate) mod user {
         NameToLong(String),
     }
 
+    #[derive(Debug)]
     pub(crate) struct UserDecider;
 
     impl Decider for UserDecider {
@@ -235,6 +236,10 @@ pub(crate) mod user {
     }
 
     impl LoadDecideAppend for UserDecider {
+        type Decide = Self;
+    }
+
+    impl DecideEvolveWithCommandResponse for UserDecider {
         type Decide = Self;
     }
 

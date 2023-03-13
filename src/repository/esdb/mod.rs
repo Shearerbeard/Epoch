@@ -26,7 +26,7 @@ pub struct ESDBEventRepository<E> {
     _hidden: PhantomData<E>,
 }
 
-impl<'a, E> ESDBEventRepository<E> {
+impl<E> ESDBEventRepository<E> {
     pub fn new(client: &Client, stream_name: &str) -> Self {
         Self {
             client: client.to_owned(),
@@ -93,7 +93,7 @@ where
                 self.get_stream(id),
                 &ReadStreamOptions::default()
                     .resolve_link_tos()
-                    .position(Self::version_to_esdb_position(&version)),
+                    .position(Self::version_to_esdb_position(version)),
             )
             .await
             .map_err(Error::ESDBGeneral)

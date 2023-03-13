@@ -2,7 +2,7 @@ use core::time;
 use std::{fmt::Debug, thread};
 
 use crate::{
-    decider::{Decider, DeciderWithContext, Evolver},
+    decider::{DeciderWithContext, Evolver},
     repository::{self, event::VersionedRepositoryError, RepositoryVersion},
 };
 use async_trait::async_trait;
@@ -113,7 +113,7 @@ where
                 .iter()
                 .fold(state, <Self::Decide as Evolver>::evolve);
 
-            let new_evts = <Self::Decide as DeciderWithContext>::decide(&ctx, &state, &cmd)
+            let new_evts = <Self::Decide as DeciderWithContext>::decide(ctx, &state, cmd)
                 .map_err(LoadDecideAppendError::DecideErr)?;
 
             let stream = match stream_id {
@@ -150,7 +150,8 @@ where
     }
 }
 
-pub struct CommandResponse<D: DeciderWithContext>(
+#[derive(Debug)]
+pub struct CommandResponse<D: DeciderWithContext + Debug>(
     <D as DeciderWithContext>::Cmd,
     Vec<<D as Evolver>::Evt>,
     <D as Evolver>::State,
@@ -330,5 +331,16 @@ mod tests {
                 (second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))
                 ])
         );
+    }
+
+    #[actix_rt::test]
+    async fn decide_evolve_with_command_response() {
+        let ctx = UserDeciderCtx::new();
+        let state = UserDeciderState::default();
+
+        let cmd1 = UserCommand::AddUser("Mike".to_string());
+        let res = UserDecider::response(cmd1, &state, &ctx).await;
+
+        assert_matches!(res, Ok(CommandResponse(UserCommand::AddUser(_), _, _)));
     }
 }

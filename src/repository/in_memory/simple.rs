@@ -68,6 +68,15 @@ where
     State: Default + Send + Sync + Debug + Clone,
 {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<State> Default for InMemoryStateRepository<State>
+where
+    State: Default,
+{
+    fn default() -> Self {
         Self {
             state: State::default(),
         }

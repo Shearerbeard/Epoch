@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 pub trait Event {
     type EntityId;
 
@@ -12,10 +14,10 @@ pub trait Decider: Evolver {
     fn decide(state: &Self::State, cmd: &Self::Cmd) -> Result<Vec<Self::Evt>, Self::Err>;
 }
 
-pub trait DeciderWithContext: Evolver {
-    type Ctx;
-    type Cmd: Send + Sync;
-    type Err;
+pub trait DeciderWithContext: Evolver + Debug {
+    type Ctx: std::fmt::Debug;
+    type Cmd: Send + Sync + std::fmt::Debug;
+    type Err: std::fmt::Debug;
 
     fn decide(
         ctx: &Self::Ctx,
@@ -25,8 +27,8 @@ pub trait DeciderWithContext: Evolver {
 }
 
 pub trait Evolver {
-    type State;
-    type Evt: Event;
+    type State: Debug;
+    type Evt: Event + Debug;
     fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
     fn init() -> Self::State;
 }
