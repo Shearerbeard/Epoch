@@ -3,7 +3,9 @@ use std::{fmt::Debug, thread};
 
 use crate::{
     decider::{DeciderWithContext, Evolver},
-    repository::{self, event::VersionedRepositoryError, RepositoryVersion},
+    repository::{
+        self, event::VersionedRepositoryError, state::VersionedStateRepository, RepositoryVersion,
+    },
 };
 use async_trait::async_trait;
 use repository::event::{StreamIdFromEvent, VersionedEventRepositoryWithStreams};
@@ -150,6 +152,26 @@ where
     }
 }
 
+#[async_trait]
+pub trait ReifyDecideSave
+where
+    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Err: Send + Sync,
+{
+    type Decide: DeciderWithContext + Send + Sync;
+
+    async fn execute<'a, RepoErr>(
+        state_repository: &mut (impl VersionedStateRepository<
+            <Self::Decide as Evolver>::State,
+            RepoErr,
+        >),
+        ctx: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx,
+        cmd: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd,
+    ) -> Result<
+        Vec<<Self::Decide as Evolver>::Evt>,
+        ReifyDecideSaveError<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
+    >;
+}
+
 #[derive(Debug)]
 pub struct CommandResponse<D: DeciderWithContext + Debug>(
     <D as DeciderWithContext>::Cmd,
@@ -194,6 +216,12 @@ pub enum StreamState<T> {
 pub enum LoadDecideAppendError<DecideErr: Send + Sync, RepoErr> {
     OccMaxRetries,
     VersionError,
+    DecideErr(DecideErr),
+    RepositoryErr(RepoErr),
+}
+
+#[derive(Debug)]
+pub enum ReifyDecideSaveError<DecideErr: Send + Sync, RepoErr> {
     DecideErr(DecideErr),
     RepositoryErr(RepoErr),
 }
