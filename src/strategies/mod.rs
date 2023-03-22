@@ -155,7 +155,11 @@ where
 #[async_trait]
 pub trait ReifyDecideSave
 where
+    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx: Send + Sync,
+    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd: Send + Sync,
     <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Err: Send + Sync,
+    <<Self as ReifyDecideSave>::Decide as Evolver>::Evt: Send + Sync,
+    <<Self as ReifyDecideSave>::Decide as Evolver>::State: Send + Sync,
 {
     type Decide: DeciderWithContext + Send + Sync;
 
@@ -163,13 +167,18 @@ where
         state_repository: &mut (impl VersionedStateRepository<
             <Self::Decide as Evolver>::State,
             RepoErr,
-        >),
+        > + Send + Sync),
         ctx: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx,
         cmd: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd,
     ) -> Result<
         Vec<<Self::Decide as Evolver>::Evt>,
         ReifyDecideSaveError<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
-    >;
+    >
+    where
+        RepoErr: Send + Sync
+    {
+        todo!()
+    }
 }
 
 #[derive(Debug)]
