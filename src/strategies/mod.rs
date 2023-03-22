@@ -163,11 +163,14 @@ where
 {
     type Decide: DeciderWithContext + Send + Sync;
 
+    fn repo_to_rds_error<DecErr: Send + Sync, RepoErr: Send + Sync>(
+        err: RepoErr,
+    ) -> ReifyDecideSaveError<DecErr, RepoErr>;
+
     async fn execute<'a, RepoErr>(
-        state_repository: &mut (impl VersionedStateRepository<
-            <Self::Decide as Evolver>::State,
-            RepoErr,
-        > + Send + Sync),
+        state_repository: &mut (impl VersionedStateRepository<<Self::Decide as Evolver>::State, RepoErr>
+                  + Send
+                  + Sync),
         ctx: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx,
         cmd: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd,
     ) -> Result<
@@ -175,8 +178,12 @@ where
         ReifyDecideSaveError<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
     >
     where
-        RepoErr: Send + Sync
+        RepoErr: Send + Sync,
     {
+        let (state, version) = state_repository.reify().await.map_err(
+            Self::repo_to_rds_error::<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
+        )?;
+
         todo!()
     }
 }
