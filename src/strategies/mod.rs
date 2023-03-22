@@ -171,7 +171,7 @@ where
         cmd: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd,
         retrys: Option<u32>,
     ) -> Result<
-        Vec<<Self::Decide as Evolver>::Evt>,
+        <Self::Decide as Evolver>::State,
         ReifyDecideSaveError<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
     >
     where
@@ -192,10 +192,10 @@ where
                 .fold(local_state, <Self::Decide as Evolver>::evolve);
 
             match state_repository.save(&version, &new_state).await {
-                Ok(_) => todo!(),
+                Ok(s) => return Ok(s),
                 Err(_) => todo!(),
-            };
-        }
+            }
+        };
 
         todo!()
     }
