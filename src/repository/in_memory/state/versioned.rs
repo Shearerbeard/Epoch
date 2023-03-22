@@ -54,7 +54,7 @@ where
 }
 
 #[async_trait]
-impl<State> VersionedStateRepository<State, Error> for InMemoryStateRepository<State>
+impl<'a, State> VersionedStateRepository<'a, State, Error> for InMemoryStateRepository<State>
 where
     State: Debug + Clone + Send + Sync,
 {

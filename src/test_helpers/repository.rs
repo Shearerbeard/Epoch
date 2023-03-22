@@ -98,8 +98,9 @@ pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug 
     assert_eq!(latest_events.first().unwrap(), new_events.first().unwrap());
 }
 
-pub(crate) async fn test_versioned_state_repository<Err: Debug>(
+pub(crate) async fn test_versioned_state_repository<'a, Err: Debug + Send + Sync>(
     mut state_repository: impl VersionedStateRepository<
+        'a,
         UserDeciderState,
         Err,
         Version = RepositoryVersion,

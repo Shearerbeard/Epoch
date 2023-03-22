@@ -159,20 +159,17 @@ where
     <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd: Send + Sync,
     <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Err: Send + Sync,
     <<Self as ReifyDecideSave>::Decide as Evolver>::Evt: Send + Sync,
-    <<Self as ReifyDecideSave>::Decide as Evolver>::State: Send + Sync,
+    <<Self as ReifyDecideSave>::Decide as Evolver>::State: Send + Sync + Clone,
 {
     type Decide: DeciderWithContext + Send + Sync;
 
-    fn repo_to_rds_error<DecErr: Send + Sync, RepoErr: Send + Sync>(
-        err: RepoErr,
-    ) -> ReifyDecideSaveError<DecErr, RepoErr>;
-
     async fn execute<'a, RepoErr>(
-        state_repository: &mut (impl VersionedStateRepository<<Self::Decide as Evolver>::State, RepoErr>
+        state_repository: &mut (impl VersionedStateRepository<'a, <Self::Decide as Evolver>::State, RepoErr>
                   + Send
                   + Sync),
         ctx: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx,
         cmd: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd,
+        retrys: Option<u32>,
     ) -> Result<
         Vec<<Self::Decide as Evolver>::Evt>,
         ReifyDecideSaveError<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
@@ -180,9 +177,25 @@ where
     where
         RepoErr: Send + Sync,
     {
-        let (state, version) = state_repository.reify().await.map_err(
-            Self::repo_to_rds_error::<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
-        )?;
+        let (mut state, mut version) = state_repository
+            .reify()
+            .await
+            .map_err(ReifyDecideSaveError::RepositoryErr)?;
+
+        for r in 1..retrys.unwrap_or(20) {
+            let local_state = state.clone();
+            let evts = <Self::Decide as DeciderWithContext>::decide(ctx, &local_state, cmd)
+                .map_err(ReifyDecideSaveError::DecideErr)?;
+
+            let new_state = evts
+                .iter()
+                .fold(local_state, <Self::Decide as Evolver>::evolve);
+
+            match state_repository.save(&version, &new_state).await {
+                Ok(_) => todo!(),
+                Err(_) => todo!(),
+            };
+        }
 
         todo!()
     }
