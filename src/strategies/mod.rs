@@ -193,9 +193,11 @@ where
 
             match state_repository.save(&version, &new_state).await {
                 Ok(s) => return Ok(s),
-                Err(_) => todo!(),
+                Err(_) => {
+                    todo!()
+                }
             }
-        };
+        }
 
         todo!()
     }

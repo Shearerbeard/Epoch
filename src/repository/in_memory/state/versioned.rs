@@ -5,7 +5,11 @@ use std::{
 
 use async_trait::async_trait;
 
-use crate::repository::{state::VersionedStateRepository, RepositoryVersion};
+use crate::repository::{
+    event::{VersionDiff, VersionedRepositoryError},
+    state::VersionedStateRepository,
+    RepositoryVersion,
+};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryStateRepository<State>
@@ -25,30 +29,39 @@ where
         }
     }
 
-    fn version_to_usize(version: &RepositoryVersion) -> Result<usize, Error> {
+    fn version_to_usize(
+        version: &RepositoryVersion,
+    ) -> Result<usize, VersionedRepositoryError<Error>> {
         if let RepositoryVersion::Exact(exact) = version {
             Ok(exact.to_owned())
         } else {
-            Err(Error::ExactStreamVersionMustBeKnown)
+            Err(VersionedRepositoryError::RepoErr(
+                Error::ExactStreamVersionMustBeKnown,
+            ))
         }
     }
 
     fn version_check(
         current: &RepositoryVersion,
         incoming: &RepositoryVersion,
-    ) -> Result<(), Error> {
+    ) -> Result<(), VersionedRepositoryError<Error>> {
         if let &RepositoryVersion::StreamExists = current {
             return if let &RepositoryVersion::Exact(_) = incoming {
                 Ok(())
             } else {
-                Err(Error::ExactStreamVersionMustBeKnown)
+                Err(VersionedRepositoryError::RepoErr(
+                    Error::ExactStreamVersionMustBeKnown,
+                ))
             };
         }
 
         if Self::version_to_usize(current)? < Self::version_to_usize(incoming)? {
             Ok(())
         } else {
-            Err(Error::VersionOutOfDate)
+            Err(VersionedRepositoryError::VersionConflict(VersionDiff::new(
+                current.to_owned(),
+                incoming.to_owned(),
+            )))
         }
     }
 }
@@ -66,7 +79,11 @@ where
         Ok((handle.data.to_owned(), handle.version))
     }
 
-    async fn save(&mut self, version: &Self::Version, state: &State) -> Result<State, Error> {
+    async fn save(
+        &mut self,
+        version: &Self::Version,
+        state: &State,
+    ) -> Result<State, VersionedRepositoryError<Error>> {
         let handle_lock = self.state.lock();
         let mut handle = handle_lock.unwrap();
 
@@ -105,7 +122,6 @@ where
 #[derive(Debug, Clone)]
 pub enum Error {
     ExactStreamVersionMustBeKnown,
-    VersionOutOfDate,
 }
 
 #[cfg(test)]
