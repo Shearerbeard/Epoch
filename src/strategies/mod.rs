@@ -156,7 +156,7 @@ where
 pub trait ReifyDecideSave
 where
     <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx: Send + Sync,
-    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd: Send + Sync,
+    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
     <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Err: Send + Sync,
     <<Self as ReifyDecideSave>::Decide as Evolver>::Evt: Send + Sync,
     <<Self as ReifyDecideSave>::Decide as Evolver>::State: Send + Sync + Clone,
@@ -193,13 +193,20 @@ where
 
             match state_repository.save(&version, &new_state).await {
                 Ok(s) => return Ok(s),
-                Err(_) => {
-                    todo!()
+                Err(VersionedRepositoryError::RepoErr(e)) => {
+                    return Err(ReifyDecideSaveError::RepositoryErr(e))
+                }
+                Err(VersionedRepositoryError::VersionConflict(_)) => {
+                    println!("Retry #{} for {:?} - Reload State", &r, &cmd);
+                    (state, version) = state_repository
+                        .reify()
+                        .await
+                        .map_err(ReifyDecideSaveError::RepositoryErr)?;
                 }
             }
         }
 
-        todo!()
+        Err(ReifyDecideSaveError::OccMaxRetries)
     }
 }
 
@@ -253,6 +260,7 @@ pub enum LoadDecideAppendError<DecideErr: Send + Sync, RepoErr> {
 
 #[derive(Debug)]
 pub enum ReifyDecideSaveError<DecideErr: Send + Sync, RepoErr> {
+    OccMaxRetries,
     DecideErr(DecideErr),
     RepositoryErr(RepoErr),
 }
