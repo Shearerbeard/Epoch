@@ -57,7 +57,7 @@ where
     fn bump_version(
         version: &RepositoryVersion
     ) -> Result<RepositoryVersion, VersionedRepositoryError<Error>> {
-        Ok(RepositoryVersion::Exact(Self::version_to_usize(&version)? + 1))
+        Ok(RepositoryVersion::Exact(Self::version_to_usize(version)? + 1))
     }
 }
 
