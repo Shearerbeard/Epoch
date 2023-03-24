@@ -9,9 +9,12 @@ pub(crate) mod user {
     use thiserror::Error;
 
     use crate::{
-        decider::{Decider, DeciderWithContext, Event, Evolver},
+        decider::{Decider, DeciderWithContext, Event, Evolver, InitializeableState},
         repository::event::StreamIdFromEvent,
-        strategies::{DecideEvolveWithCommandResponse, LoadDecideAppend, StateFromEventRepository, ReifyDecideSave},
+        strategies::{
+            DecideEvolveWithCommandResponse, LoadDecideAppend, ReifyDecideSave,
+            StateFromEventRepository,
+        },
         test_helpers::ValueType,
     };
 
@@ -178,7 +181,7 @@ pub(crate) mod user {
             }
         }
 
-        fn init() -> UserDeciderState {
+        fn init(_: ()) -> UserDeciderState {
             UserDeciderState {
                 users: Default::default(),
             }
@@ -259,6 +262,14 @@ pub(crate) mod user {
 
         pub fn set_users(&self, users: HashMap<UserId, User>) -> Self {
             Self { users, ..*self }
+        }
+    }
+
+    impl InitializeableState for UserDeciderState {
+        type Creator = ();
+
+        fn create(_: Self::Creator) -> Self {
+            Self::default()
         }
     }
 

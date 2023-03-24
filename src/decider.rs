@@ -7,6 +7,12 @@ pub trait Event {
     fn get_id(&self) -> Self::EntityId;
 }
 
+pub trait InitializeableState: Debug {
+    type Creator: Clone;
+
+    fn create(b: Self::Creator) -> Self;
+}
+
 pub trait Decider: Evolver {
     type Cmd: Send + Sync;
     type Err;
@@ -27,10 +33,12 @@ pub trait DeciderWithContext: Evolver + Debug {
 }
 
 pub trait Evolver {
-    type State: Debug;
+    type State: InitializeableState;
     type Evt: Event + Debug;
     fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
-    fn init() -> Self::State;
+    fn init(creator: <Self::State as InitializeableState>::Creator) -> Self::State {
+        <Self::State as InitializeableState>::create(creator)
+    }
 }
 
 #[cfg(test)]
@@ -63,7 +71,7 @@ mod tests {
             .await
             .expect("Empty Events Vector")
             .iter()
-            .fold(UserDecider::init(), UserDecider::evolve);
+            .fold(UserDecider::init(()), UserDecider::evolve);
 
         let cmd = UserCommand::AddUser("Mike".to_string() as user::UnvalidatedUserName);
         let events = <UserDecider as Decider>::decide(&state, &cmd).expect("Decider Success");
