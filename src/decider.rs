@@ -33,7 +33,7 @@ pub trait DeciderWithContext: Evolver + Debug {
 }
 
 pub trait Evolver {
-    type State: InitializeableState;
+    type State: InitializeableState + Debug;
     type Evt: Event + Debug;
     fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
     fn init(creator: <Self::State as InitializeableState>::Creator) -> Self::State {
