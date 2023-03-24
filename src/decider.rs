@@ -69,7 +69,7 @@ mod tests {
         let events = <UserDecider as Decider>::decide(&state, &cmd).expect("Decider Success");
 
         if let Some(UserEvent::UserAdded(user::User { name, id, .. })) = events.clone().first() {
-            let user_id = id.clone();
+            let user_id = *id;
             let user_name = name.clone();
 
             assert_eq!(name.value(), "Mike".to_string());
@@ -79,7 +79,7 @@ mod tests {
             let _ = state_repository.save(&state).await;
             assert_eq!(state_repository.reify().await, state.clone());
 
-            assert_matches!(state.users.get(&id).expect("User exists"), user::User {
+            assert_matches!(state.users.get(&user_id).expect("User exists"), user::User {
                 id,
                 name,
                 ..
