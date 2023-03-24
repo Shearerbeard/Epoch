@@ -163,7 +163,7 @@ where
 {
     type Decide: DeciderWithContext + Send + Sync;
 
-    async fn execute<'a, RepoErr>(
+    async fn execute_reify_decide<'a, RepoErr>(
         state_repository: &mut (impl VersionedStateRepository<'a, <Self::Decide as Evolver>::State, RepoErr>
                   + Send
                   + Sync),
@@ -273,7 +273,7 @@ mod tests {
 
     use crate::{
         decider::Event,
-        repository::in_memory::versioned_with_streams::InMemoryEventRepository,
+        repository::in_memory::{versioned_with_streams::InMemoryEventRepository, state::versioned::InMemoryStateRepository},
         test_helpers::{
             deciders::user::{
                 User, UserCommand, UserDecider, UserDeciderCtx, UserDeciderError, UserDeciderState,
@@ -409,5 +409,21 @@ mod tests {
         let res = UserDecider::response(cmd1, &state, &ctx).await;
 
         assert_matches!(res, Ok(CommandResponse(UserCommand::AddUser(_), _, _)));
+    }
+
+    #[actix_rt::test]
+    async fn reify_decide_save_basic_functionality() {
+        let ctx = UserDeciderCtx::new();
+
+        let mut state_repository = InMemoryStateRepository::<UserDeciderState>::new(UserDeciderState::default());
+
+        let cmd1 = UserCommand::AddUser("Mike".to_string());
+
+        let res = UserDecider::execute_reify_decide(&mut state_repository, &ctx, &cmd1, None).await.unwrap();
+
+        assert_eq!(
+            res.users.len(),
+            1
+        );
     }
 }

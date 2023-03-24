@@ -121,7 +121,7 @@ pub(crate) async fn test_versioned_state_repository<'a, Err: Debug + Send + Sync
 
     assert_eq!(
         state_repository.reify().await.expect("Success"),
-        (new_state.to_owned(), version)
+        (new_state.to_owned(), RepositoryVersion::Exact(1))
     );
 
     let res = state_repository.save(&version, &new_state).await;

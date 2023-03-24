@@ -32,12 +32,11 @@ where
     fn version_to_usize(
         version: &RepositoryVersion,
     ) -> Result<usize, VersionedRepositoryError<Error>> {
-        if let RepositoryVersion::Exact(exact) = version {
-            Ok(exact.to_owned())
-        } else {
-            Err(VersionedRepositoryError::RepoErr(
-                Error::ExactStreamVersionMustBeKnown,
-            ))
+        match version {
+            RepositoryVersion::Exact(exact) => Ok(exact.to_owned()),
+            RepositoryVersion::NoStream => Ok(0),
+            RepositoryVersion::StreamExists => Ok(0),
+            RepositoryVersion::Any => Err(VersionedRepositoryError::RepoErr(Error::ExactStreamVersionMustBeKnown))
         }
     }
 
@@ -45,17 +44,7 @@ where
         current: &RepositoryVersion,
         incoming: &RepositoryVersion,
     ) -> Result<(), VersionedRepositoryError<Error>> {
-        if let &RepositoryVersion::StreamExists = current {
-            return if let &RepositoryVersion::Exact(_) = incoming {
-                Ok(())
-            } else {
-                Err(VersionedRepositoryError::RepoErr(
-                    Error::ExactStreamVersionMustBeKnown,
-                ))
-            };
-        }
-
-        if Self::version_to_usize(current)? < Self::version_to_usize(incoming)? {
+        if Self::version_to_usize(current)? == Self::version_to_usize(incoming)? {
             Ok(())
         } else {
             Err(VersionedRepositoryError::VersionConflict(VersionDiff::new(
@@ -63,6 +52,12 @@ where
                 incoming.to_owned(),
             )))
         }
+    }
+
+    fn bump_version(
+        version: &RepositoryVersion
+    ) -> Result<RepositoryVersion, VersionedRepositoryError<Error>> {
+        Ok(RepositoryVersion::Exact(Self::version_to_usize(&version)? + 1))
     }
 }
 
@@ -90,7 +85,7 @@ where
         let _ = Self::version_check(&handle.version, version)?;
 
         handle.data = state.clone();
-        handle.version = version.to_owned();
+        handle.version = Self::bump_version(&handle.version)?;
 
         drop(handle);
 

@@ -11,7 +11,7 @@ pub(crate) mod user {
     use crate::{
         decider::{Decider, DeciderWithContext, Event, Evolver},
         repository::event::StreamIdFromEvent,
-        strategies::{DecideEvolveWithCommandResponse, LoadDecideAppend, StateFromEventRepository},
+        strategies::{DecideEvolveWithCommandResponse, LoadDecideAppend, StateFromEventRepository, ReifyDecideSave},
         test_helpers::ValueType,
     };
 
@@ -240,6 +240,10 @@ pub(crate) mod user {
     }
 
     impl DecideEvolveWithCommandResponse for UserDecider {
+        type Decide = Self;
+    }
+
+    impl ReifyDecideSave for UserDecider {
         type Decide = Self;
     }
 
