@@ -11,7 +11,10 @@ pub(crate) mod user {
     use crate::{
         decider::{Decider, DeciderWithContext, Event, Evolver},
         repository::event::StreamIdFromEvent,
-        strategies::{DecideEvolveWithCommandResponse, LoadDecideAppend, StateFromEventRepository, ReifyDecideSave},
+        strategies::{
+            DecideEvolveWithCommandResponse, LoadDecideAppend, ReifyDecideSave,
+            StateFromEventRepository,
+        },
         test_helpers::ValueType,
     };
 
@@ -178,7 +181,7 @@ pub(crate) mod user {
             }
         }
 
-        fn init() -> UserDeciderState {
+        fn init(&self) -> UserDeciderState {
             UserDeciderState {
                 users: Default::default(),
             }
