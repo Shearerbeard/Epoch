@@ -19,7 +19,7 @@ where
     type Ev: Evolver + Send + Sync;
 
     async fn load<'a, Err>(
-        evolver: &Self::Ev,
+        initial: <Self::Ev as Evolver>::State,
         event_repository: &(impl VersionedEventRepositoryWithStreams<'a, <Self::Ev as Evolver>::Evt, Err>
               + Send
               + Sync),
@@ -32,11 +32,11 @@ where
             .await?
             .0
             .iter()
-            .fold(evolver.init(), Self::Ev::evolve))
+            .fold(initial, Self::Ev::evolve))
     }
 
     async fn load_by_id<'a, Err, StreamId>(
-        evolver: &Self::Ev,
+        initial: <Self::Ev as Evolver>::State,
         event_repository: &(impl VersionedEventRepositoryWithStreams<
             'a,
             <Self::Ev as Evolver>::Evt,
@@ -55,7 +55,7 @@ where
             .await?
             .0
             .iter()
-            .fold(evolver.init(), Self::Ev::evolve))
+            .fold(initial, Self::Ev::evolve))
     }
 }
 
@@ -80,7 +80,7 @@ where
     }
 
     async fn execute<'a, RepoErr, StreamId>(
-        decider: &Self::Decide,
+        initial: <Self::Decide as Evolver>::State,
         event_repository: &mut (impl VersionedEventRepositoryWithStreams<
             'a,
             <Self::Decide as Evolver>::Evt,
@@ -111,7 +111,7 @@ where
                 .map_err(Self::to_lda_error)?,
         };
 
-        let mut state = decider.init();
+        let mut state = initial;
 
         for r in 1..retrys.unwrap_or(20) {
             state = decider_evts
@@ -300,7 +300,7 @@ mod tests {
         let cmd1 = UserCommand::AddUser("Mike".to_string());
 
         let evts = UserDecider::execute(
-            &UserDecider,
+            UserDeciderState::default(),
             &mut event_repository,
             &StreamState::New,
             &ctx,
@@ -317,10 +317,13 @@ mod tests {
             UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike".to_string())
         );
 
-        let state =
-            UserDeciderState::load_by_id(&UserDecider, &event_repository, &first_id.to_string())
-                .await
-                .expect("state is loaded");
+        let state = UserDeciderState::load_by_id(
+            UserDeciderState::default(),
+            &event_repository,
+            &first_id.to_string(),
+        )
+        .await
+        .expect("state is loaded");
 
         assert_matches!(
             state,
@@ -329,7 +332,7 @@ mod tests {
 
         let cmd2 = UserCommand::AddUser("Dmitiry".to_string());
         let evts = UserDecider::execute(
-            &UserDecider,
+            UserDeciderState::default(),
             &mut event_repository,
             &StreamState::New,
             &ctx,
@@ -346,10 +349,13 @@ mod tests {
             UserEvent::UserAdded(User { id, name, .. }) if (&second_id == id) && (name.value() == "Dmitiry".to_string())
         );
 
-        let state =
-            UserDeciderState::load_by_id(&UserDecider, &event_repository, &second_id.to_string())
-                .await
-                .expect("state is loaded");
+        let state = UserDeciderState::load_by_id(
+            UserDeciderState::default(),
+            &event_repository,
+            &second_id.to_string(),
+        )
+        .await
+        .expect("state is loaded");
 
         assert_matches!(
             state,
@@ -358,7 +364,7 @@ mod tests {
 
         let cmd3 = UserCommand::UpdateUserName(second_id.clone(), "Dmitiry2".to_string());
         let evts = UserDecider::execute(
-            &UserDecider,
+            UserDeciderState::default(),
             &mut event_repository,
             &StreamState::Existing(second_id.to_string()),
             &ctx,
@@ -373,10 +379,13 @@ mod tests {
             UserEvent::UserNameUpdated(id, name) if (id == &second_id) && (name == &UserName::try_from("Dmitiry2".to_string()).unwrap())
         );
 
-        let state =
-            UserDeciderState::load_by_id(&UserDecider, &event_repository, &second_id.to_string())
-                .await
-                .expect("state is loaded");
+        let state = UserDeciderState::load_by_id(
+            UserDeciderState::default(),
+            &event_repository,
+            &second_id.to_string(),
+        )
+        .await
+        .expect("state is loaded");
 
         assert_matches!(
             state,
@@ -387,7 +396,7 @@ mod tests {
             UserCommand::UpdateUserName(second_id.clone(), "DmitiryWayToLongToSucceed".to_string());
 
         let res = UserDecider::execute(
-            &UserDecider,
+            UserDeciderState::default(),
             &mut event_repository,
             &StreamState::Existing(second_id.to_string()),
             &ctx,
@@ -401,17 +410,20 @@ mod tests {
             Err(LoadDecideAppendError::DecideErr(UserDeciderError::UserField(UserFieldError::NameToLong(n)))) if n == "DmitiryWayToLongToSucceed".to_string()
         );
 
-        let state =
-            UserDeciderState::load_by_id(&UserDecider, &event_repository, &second_id.to_string())
-                .await
-                .expect("state is loaded");
+        let state = UserDeciderState::load_by_id(
+            UserDeciderState::default(),
+            &event_repository,
+            &second_id.to_string(),
+        )
+        .await
+        .expect("state is loaded");
 
         assert_matches!(
             state,
             UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))])
         );
 
-        let state = UserDeciderState::load(&UserDecider, &event_repository)
+        let state = UserDeciderState::load(UserDeciderState::default(), &event_repository)
             .await
             .expect("state is loaded");
 

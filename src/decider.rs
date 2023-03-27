@@ -30,7 +30,6 @@ pub trait Evolver {
     type State: Debug;
     type Evt: Event + Debug;
     fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
-    fn init(&self) -> Self::State;
 }
 
 #[cfg(test)]
@@ -63,7 +62,7 @@ mod tests {
             .await
             .expect("Empty Events Vector")
             .iter()
-            .fold(UserDecider.init(), UserDecider::evolve);
+            .fold(UserDeciderState::default(), UserDecider::evolve);
 
         let cmd = UserCommand::AddUser("Mike".to_string() as user::UnvalidatedUserName);
         let events = <UserDecider as Decider>::decide(&state, &cmd).expect("Decider Success");

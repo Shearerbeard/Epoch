@@ -240,7 +240,7 @@ mod tests {
         let cmd = UserCommand::AddGuitar(user_id, guitar.to_owned());
 
         let res = UserDecider::execute(
-            &UserDecider,
+            UserDeciderState::default(),
             &mut event_repository,
             &StreamState::Existing(user_id.to_string()),
             &ctx,
@@ -276,7 +276,7 @@ mod tests {
         let cmd1 = UserCommand::AddUser("Mike".to_string());
 
         let evts = UserDecider::execute(
-            &UserDecider,
+            UserDeciderState::default(),
             &mut event_repository,
             &StreamState::New,
             &ctx,
@@ -293,10 +293,13 @@ mod tests {
             UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike".to_string())
         );
 
-        let state =
-            UserDeciderState::load_by_id(&UserDecider, &event_repository, &first_id.to_string())
-                .await
-                .expect("state is loaded");
+        let state = UserDeciderState::load_by_id(
+            UserDeciderState::default(),
+            &event_repository,
+            &first_id.to_string(),
+        )
+        .await
+        .expect("state is loaded");
 
         assert_matches!(
             state,
@@ -343,10 +346,13 @@ mod tests {
 
         thread::sleep(time::Duration::from_secs(1));
 
-        let state =
-            UserDeciderState::load_by_id(&UserDecider, &event_repository, &first_id.to_string())
-                .await
-                .expect("state is loaded");
+        let state = UserDeciderState::load_by_id(
+            UserDeciderState::default(),
+            &event_repository,
+            &first_id.to_string(),
+        )
+        .await
+        .expect("state is loaded");
 
         assert_eq!(
             state.users.get(&first_id).unwrap().guitars,

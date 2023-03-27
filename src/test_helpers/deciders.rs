@@ -180,12 +180,6 @@ pub(crate) mod user {
                 }
             }
         }
-
-        fn init(&self) -> UserDeciderState {
-            UserDeciderState {
-                users: Default::default(),
-            }
-        }
     }
 
     impl DeciderWithContext for UserDecider {
