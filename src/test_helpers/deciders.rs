@@ -11,7 +11,10 @@ pub(crate) mod user {
     use crate::{
         decider::{Decider, DeciderWithContext, Event, Evolver},
         repository::event::StreamIdFromEvent,
-        strategies::{DecideEvolveWithCommandResponse, LoadDecideAppend, StateFromEventRepository, ReifyDecideSave},
+        strategies::{
+            DecideEvolveWithCommandResponse, LoadDecideAppend, ReifyDecideSave,
+            StateFromEventRepository,
+        },
         test_helpers::ValueType,
     };
 
@@ -175,12 +178,6 @@ pub(crate) mod user {
                         .insert(guitar.to_owned());
                     state
                 }
-            }
-        }
-
-        fn init() -> UserDeciderState {
-            UserDeciderState {
-                users: Default::default(),
             }
         }
     }
