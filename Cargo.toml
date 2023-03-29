@@ -1,6 +1,6 @@
 [package]
 name = "epoch"
-version = "1.0.0-alpha.13"
+version = "1.0.0-alpha.14"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -8,17 +8,15 @@ edition = "2021"
 [features]
 default = ["in_memory", "esdb"]
 in_memory = []
-esdb = ["dep:eventstore", "dep:uuid_0_8_2", "dep:serde_json"]
+esdb = ["dep:eventstore", "dep:uuid", "dep:serde_json"]
 
 [dependencies]
 async-trait = "0.1.53"
-eventstore = { version = "2.1, < 2.2",  optional = true }
+eventstore = { version = "2.2.0",  optional = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = { version = "1.0.81", optional = true }
 thiserror = "1.0"
-# Use 0.8.2 only here because of a weird deps bug with eventstore
-# 1.x uuids are not compatible with eventstore internal uuids
-uuid_0_8_2 =  { package = "uuid", version = "0.8.2", features = ["v4", "serde"], optional = true }
+uuid =  { package = "uuid", version = "1.2.2", features = ["v4", "serde"], optional = true }
 
 [dev-dependencies]
 actix-rt = "2.7.0"

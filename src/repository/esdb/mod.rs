@@ -6,7 +6,7 @@ use eventstore::{
     ResolvedEvent, StreamPosition,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use uuid_0_8_2::Uuid;
+use uuid::Uuid;
 
 use crate::decider::Event;
 
