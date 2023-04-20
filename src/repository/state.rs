@@ -4,7 +4,7 @@ use super::event::VersionedRepositoryError;
 
 #[async_trait]
 pub trait StateRepository<State, Err> {
-    async fn reify(&self) -> State;
+    async fn reify(&self) -> Result<State, Err>;
     async fn save(&mut self, state: &State) -> Result<State, Err>;
 }
 
