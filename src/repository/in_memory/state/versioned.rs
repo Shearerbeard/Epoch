@@ -36,7 +36,9 @@ where
             RepositoryVersion::Exact(exact) => Ok(exact.to_owned()),
             RepositoryVersion::NoStream => Ok(0),
             RepositoryVersion::StreamExists => Ok(0),
-            RepositoryVersion::Any => Err(VersionedRepositoryError::RepoErr(Error::ExactStreamVersionMustBeKnown))
+            RepositoryVersion::Any => Err(VersionedRepositoryError::RepoErr(
+                Error::ExactStreamVersionMustBeKnown,
+            )),
         }
     }
 
@@ -55,9 +57,11 @@ where
     }
 
     fn bump_version(
-        version: &RepositoryVersion
+        version: &RepositoryVersion,
     ) -> Result<RepositoryVersion, VersionedRepositoryError<Error>> {
-        Ok(RepositoryVersion::Exact(Self::version_to_usize(version)? + 1))
+        Ok(RepositoryVersion::Exact(
+            Self::version_to_usize(version)? + 1,
+        ))
     }
 }
 
