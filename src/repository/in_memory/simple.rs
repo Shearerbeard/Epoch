@@ -88,8 +88,8 @@ impl<State> StateRepository<State, ()> for InMemoryStateRepository<State>
 where
     State: Default + Send + Sync + Debug + Clone,
 {
-    async fn reify(&self) -> State {
-        self.state.clone()
+    async fn reify(&self) -> Result<State, ()> {
+        Ok(self.state.clone())
     }
 
     async fn save(&mut self, state: &State) -> Result<State, ()> {

@@ -76,7 +76,7 @@ mod tests {
             let state = events.iter().fold(state.clone(), UserDecider::evolve);
 
             let _ = state_repository.save(&state).await;
-            assert_eq!(state_repository.reify().await, state.clone());
+            assert_eq!(state_repository.reify().await.unwrap(), state.clone());
 
             assert_matches!(state.users.get(&user_id).expect("User exists"), user::User {
                 id,
