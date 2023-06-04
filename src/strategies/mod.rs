@@ -10,22 +10,20 @@ use crate::{
 use async_trait::async_trait;
 use repository::event::{StreamIdFromEvent, VersionedEventRepositoryWithStreams};
 
-#[async_trait]
-pub trait StateFromEventRepository
-where
-    <Self::Ev as Evolver>::Evt: Send + Sync + Debug,
-    <Self::Ev as Evolver>::State: Send + Sync + Debug,
-{
+#[async_trait(?Send)]
+pub trait StateFromEventRepository {
     type Ev: Evolver + Send + Sync;
 
     async fn load<'a, Err>(
         initial: <Self::Ev as Evolver>::State,
-        event_repository: &(impl VersionedEventRepositoryWithStreams<'a, <Self::Ev as Evolver>::Evt, Err>
-              + Send
-              + Sync),
+        event_repository: &(impl VersionedEventRepositoryWithStreams<
+            'a,
+            <Self::Ev as Evolver>::Evt,
+            Err,
+        >),
     ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err>>
     where
-        Err: Debug + Send + Sync,
+        Err: Debug,
     {
         Ok(event_repository
             .load(None)
@@ -59,18 +57,14 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait LoadDecideAppend
 where
-    <Self::Decide as Evolver>::State: Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Ctx: Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
-    <Self::Decide as Evolver>::Evt: Clone + Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Err: Send + Sync + Debug,
+    <Self::Decide as Evolver>::Evt: Clone,
 {
-    type Decide: DeciderWithContext + Send + Sync;
+    type Decide: DeciderWithContext;
 
-    fn to_lda_error<DecErr: Send + Sync, RepoErr: Send + Sync>(
+    fn to_lda_error<DecErr, RepoErr>(
         err: VersionedRepositoryError<RepoErr>,
     ) -> LoadDecideAppendError<DecErr, RepoErr> {
         match err {
@@ -86,8 +80,7 @@ where
             <Self::Decide as Evolver>::Evt,
             RepoErr,
             StreamId = StreamId,
-        > + Send
-                  + Sync),
+        >),
         stream_id: &StreamState<StreamId>,
         ctx: &<<Self as LoadDecideAppend>::Decide as DeciderWithContext>::Ctx,
         cmd: &<<Self as LoadDecideAppend>::Decide as DeciderWithContext>::Cmd,
@@ -97,11 +90,8 @@ where
         LoadDecideAppendError<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
     >
     where
-        RepoErr: Debug + Send + Sync,
-        StreamId: Send
-            + Sync
-            + Clone
-            + StreamIdFromEvent<<<Self as LoadDecideAppend>::Decide as Evolver>::Evt>,
+        RepoErr: Debug,
+        StreamId: Clone + StreamIdFromEvent<<<Self as LoadDecideAppend>::Decide as Evolver>::Evt>,
     {
         let (mut decider_evts, mut version) = match stream_id {
             StreamState::New => (vec![], RepositoryVersion::NoStream),
@@ -219,7 +209,7 @@ pub struct CommandResponse<D: DeciderWithContext + Debug>(
 #[async_trait(?Send)]
 pub trait DecideEvolveWithCommandResponse
 where
-    <Self::Decide as Evolver>::State: Clone
+    <Self::Decide as Evolver>::State: Clone,
 {
     type Decide: DeciderWithContext;
 
@@ -246,7 +236,7 @@ pub enum StreamState<T> {
 }
 
 #[derive(Debug)]
-pub enum LoadDecideAppendError<DecideErr: Send + Sync, RepoErr> {
+pub enum LoadDecideAppendError<DecideErr, RepoErr> {
     OccMaxRetries,
     VersionError,
     DecideErr(DecideErr),

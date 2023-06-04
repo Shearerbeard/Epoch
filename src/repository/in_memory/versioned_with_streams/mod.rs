@@ -22,7 +22,7 @@ pub mod error;
 #[derive(Clone)]
 pub struct InMemoryEventRepository<E>
 where
-    E: Event + Sync + Send + Debug,
+    E: Event + Debug,
 {
     stream_name: String,
     state: HashMap<String, Arc<Mutex<InMemoryEventRepositoryState<E>>>>,
@@ -30,7 +30,7 @@ where
 
 impl<E> InMemoryEventRepository<E>
 where
-    E: Event + Sync + Send + Debug,
+    E: Event + Debug,
 {
     pub fn new(stream_name: &str) -> Self {
         Self {
@@ -74,10 +74,10 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<'a, E> VersionedEventRepositoryWithStreams<'a, E, Error> for InMemoryEventRepository<E>
 where
-    E: Event + Sync + Send + Clone + Debug,
+    E: Event + Clone + Debug,
 {
     type StreamId = String;
 

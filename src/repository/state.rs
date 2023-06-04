@@ -2,13 +2,13 @@ use async_trait::async_trait;
 
 use super::event::VersionedRepositoryError;
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait StateRepository<State, Err> {
     async fn reify(&self) -> Result<State, Err>;
     async fn save(&mut self, state: &State) -> Result<State, Err>;
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait VersionedStateRepository<'a, State, Err> {
     type Version;
 

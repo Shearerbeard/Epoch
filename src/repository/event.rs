@@ -6,19 +6,19 @@ use thiserror::Error;
 use super::RepositoryVersion;
 use crate::decider::Event;
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait EventRepository<E, Err>
 where
-    E: Event + Sync + Send,
+    E: Event,
 {
     async fn load(&self) -> Result<Vec<E>, Err>;
     async fn append(&mut self, events: &Vec<E>) -> Result<Vec<E>, Err>;
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait VersionedEventRepository<E, Err>
 where
-    E: Event + Sync + Send + Debug,
+    E: Event,
 {
     type Version: Eq;
 
@@ -36,13 +36,13 @@ where
 // https://stackoverflow.com/questions/69560112/how-to-use-rust-async-trait-generic-to-a-lifetime-parameter
 // https://github.com/dtolnay/async-trait/issues/8
 // https://play.rust-lang.org/?version=stable&mode=debug&edition=2018&gist=e977da3ddc0c21639b3116e123a94b6f
-#[async_trait]
+#[async_trait(?Send)]
 pub trait VersionedEventRepositoryWithStreams<'a, E, Err>
 where
-    E: Event + Sync + Send + Debug,
-    Err: Debug + Send + Sync,
+    E: Event + Debug,
+    Err: Debug,
 {
-    type StreamId: Send + Sync;
+    type StreamId;
 
     async fn load(
         &self,

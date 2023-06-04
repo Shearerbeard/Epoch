@@ -15,14 +15,14 @@ use super::InMemoryEventRepositoryState;
 #[derive(Default)]
 pub struct InMemoryEventRepository<E>
 where
-    E: Event + Clone + Send + Sync,
+    E: Event + Clone,
 {
     state: Arc<Mutex<InMemoryEventRepositoryState<E>>>,
 }
 
 impl<E> InMemoryEventRepository<E>
 where
-    E: Event + Clone + Send + Sync,
+    E: Event + Clone,
 {
     pub fn new() -> Self {
         Self {
@@ -31,10 +31,10 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<E> EventRepository<E, ()> for InMemoryEventRepository<E>
 where
-    E: Event + Clone + Send + Sync,
+    E: Event + Clone,
 {
     async fn load(&self) -> Result<Vec<E>, ()> {
         let lock = self.state.lock().unwrap();
@@ -65,7 +65,7 @@ pub struct InMemoryStateRepository<State> {
 
 impl<State> InMemoryStateRepository<State>
 where
-    State: Default + Send + Sync + Debug + Clone,
+    State: Default + Debug + Clone,
 {
     pub fn new() -> Self {
         Self::default()
@@ -83,10 +83,10 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<State> StateRepository<State, ()> for InMemoryStateRepository<State>
 where
-    State: Default + Send + Sync + Debug + Clone,
+    State: Default + Debug + Clone,
 {
     async fn reify(&self) -> Result<State, ()> {
         Ok(self.state.clone())

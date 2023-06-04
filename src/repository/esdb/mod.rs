@@ -137,7 +137,7 @@ where
     ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>>
     where
         'a: 'async_trait,
-        E: 'async_trait,
+        E: 'async_trait + Send + Sync,
     {
         let mut perpared_events = vec![];
 
