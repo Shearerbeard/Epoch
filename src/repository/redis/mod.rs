@@ -22,6 +22,16 @@ pub struct RedisStreamsEventRepository<E> {
     _hidden: PhantomData<E>,
 }
 
+impl<E> RedisStreamsEventRepository<E> {
+    pub fn new(client: &Client, stream_name: &str) -> Self {
+        Self {
+            client: client.to_owned(),
+            stream_name: stream_name.to_string(),
+            _hidden: PhantomData::default(),
+        }
+    }
+}
+
 #[async_trait]
 impl<'a, E> VersionedEventRepositoryWithStreams<'a, E, Error> for RedisStreamsEventRepository<E>
 where
