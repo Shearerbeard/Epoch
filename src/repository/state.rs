@@ -9,12 +9,8 @@ pub trait StateRepository<State, Err> {
 }
 
 #[async_trait]
-pub trait VersionedStateRepository<'a, State, Err>
-where
-    State: Send + Sync,
-    Err: Send + Sync,
-{
-    type Version: Eq + Send + Sync;
+pub trait VersionedStateRepository<'a, State, Err> {
+    type Version;
 
     async fn reify(&self) -> Result<(State, Self::Version), Err>;
     async fn save(

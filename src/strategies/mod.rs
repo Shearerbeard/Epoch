@@ -155,31 +155,27 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait ReifyDecideSave
 where
-    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx: Send + Sync,
-    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
-    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Err: Send + Sync,
-    <<Self as ReifyDecideSave>::Decide as Evolver>::Evt: Send + Sync,
-    <<Self as ReifyDecideSave>::Decide as Evolver>::State: Send + Sync + Clone,
+    <<Self as ReifyDecideSave>::Decide as Evolver>::State: Clone,
+    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd: Debug,
 {
-    type Decide: DeciderWithContext + Send + Sync;
+    type Decide: DeciderWithContext;
 
     async fn execute_reify_decide<'a, RepoErr>(
-        state_repository: &mut (impl VersionedStateRepository<'a, <Self::Decide as Evolver>::State, RepoErr>
-                  + Send
-                  + Sync),
+        state_repository: &mut (impl VersionedStateRepository<
+            'a,
+            <Self::Decide as Evolver>::State,
+            RepoErr,
+        >),
         ctx: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx,
         cmd: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd,
         retrys: Option<u32>,
     ) -> Result<
         <Self::Decide as Evolver>::State,
         ReifyDecideSaveError<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
-    >
-    where
-        RepoErr: Send + Sync,
-    {
+    > {
         let (mut state, mut version) = state_repository
             .reify()
             .await
@@ -262,7 +258,7 @@ pub enum LoadDecideAppendError<DecideErr: Send + Sync, RepoErr> {
 }
 
 #[derive(Debug)]
-pub enum ReifyDecideSaveError<DecideErr: Send + Sync, RepoErr> {
+pub enum ReifyDecideSaveError<DecideErr, RepoErr> {
     OccMaxRetries,
     DecideErr(DecideErr),
     RepositoryErr(RepoErr),
