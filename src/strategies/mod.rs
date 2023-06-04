@@ -18,12 +18,12 @@ where
 {
     type Ev: Evolver + Send + Sync;
 
-    async fn load<'a, Err>(
+    async fn load<'a, Err, V>(
         initial: <Self::Ev as Evolver>::State,
-        event_repository: &(impl VersionedEventRepositoryWithStreams<'a, <Self::Ev as Evolver>::Evt, Err>
+        event_repository: &(impl VersionedEventRepositoryWithStreams<'a, <Self::Ev as Evolver>::Evt, Err, Version = V>
               + Send
               + Sync),
-    ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err>>
+    ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err, V>>
     where
         Err: Debug + Send + Sync,
     {
@@ -35,17 +35,18 @@ where
             .fold(initial, Self::Ev::evolve))
     }
 
-    async fn load_by_id<'a, Err, StreamId>(
+    async fn load_by_id<'a, Err, StreamId, Version>(
         initial: <Self::Ev as Evolver>::State,
         event_repository: &(impl VersionedEventRepositoryWithStreams<
             'a,
             <Self::Ev as Evolver>::Evt,
             Err,
             StreamId = StreamId,
+            Version = Version,
         > + Send
               + Sync),
         stream_id: &StreamId,
-    ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err>>
+    ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err, Version>>
     where
         Err: Debug + Send + Sync,
         StreamId: Send + Sync,
@@ -70,8 +71,8 @@ where
 {
     type Decide: DeciderWithContext + Send + Sync;
 
-    fn to_lda_error<DecErr: Send + Sync, RepoErr: Send + Sync>(
-        err: VersionedRepositoryError<RepoErr>,
+    fn to_lda_error<DecErr: Send + Sync, RepoErr: Send + Sync, Version: Send + Sync>(
+        err: VersionedRepositoryError<RepoErr, Version>,
     ) -> LoadDecideAppendError<DecErr, RepoErr> {
         match err {
             VersionedRepositoryError::VersionConflict(_) => LoadDecideAppendError::VersionError,

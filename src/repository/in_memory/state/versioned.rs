@@ -30,8 +30,8 @@ where
     }
 
     fn version_to_usize(
-        version: &RepositoryVersion,
-    ) -> Result<usize, VersionedRepositoryError<Error>> {
+        version: &RepositoryVersion<usize>,
+    ) -> Result<usize, VersionedRepositoryError<Error, usize>> {
         match version {
             RepositoryVersion::Exact(exact) => Ok(exact.to_owned()),
             RepositoryVersion::NoStream => Ok(0),
@@ -43,9 +43,9 @@ where
     }
 
     fn version_check(
-        current: &RepositoryVersion,
-        incoming: &RepositoryVersion,
-    ) -> Result<(), VersionedRepositoryError<Error>> {
+        current: &RepositoryVersion<usize>,
+        incoming: &RepositoryVersion<usize>,
+    ) -> Result<(), VersionedRepositoryError<Error, usize>> {
         if Self::version_to_usize(current)? == Self::version_to_usize(incoming)? {
             Ok(())
         } else {
@@ -57,8 +57,8 @@ where
     }
 
     fn bump_version(
-        version: &RepositoryVersion,
-    ) -> Result<RepositoryVersion, VersionedRepositoryError<Error>> {
+        version: &RepositoryVersion<usize>,
+    ) -> Result<RepositoryVersion<usize>, VersionedRepositoryError<Error, usize>> {
         Ok(RepositoryVersion::Exact(
             Self::version_to_usize(version)? + 1,
         ))
@@ -70,9 +70,9 @@ impl<'a, State> VersionedStateRepository<'a, State, Error> for InMemoryStateRepo
 where
     State: Debug + Clone + Send + Sync,
 {
-    type Version = RepositoryVersion;
+    type Version = usize;
 
-    async fn reify(&self) -> Result<(State, Self::Version), Error> {
+    async fn reify(&self) -> Result<(State, RepositoryVersion<Self::Version>), Error> {
         let handle = self.state.lock().unwrap();
 
         Ok((handle.data.to_owned(), handle.version))
@@ -80,9 +80,9 @@ where
 
     async fn save(
         &mut self,
-        version: &Self::Version,
+        version: &RepositoryVersion<Self::Version>,
         state: &State,
-    ) -> Result<State, VersionedRepositoryError<Error>> {
+    ) -> Result<State, VersionedRepositoryError<Error, usize>> {
         let handle_lock = self.state.lock();
         let mut handle = handle_lock.unwrap();
 
@@ -103,7 +103,7 @@ where
     State: Debug,
 {
     data: State,
-    version: RepositoryVersion,
+    version: RepositoryVersion<usize>,
 }
 
 impl<State> VersionedState<State>

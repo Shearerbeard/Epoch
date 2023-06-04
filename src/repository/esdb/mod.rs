@@ -43,7 +43,7 @@ impl<E> ESDBEventRepository<E> {
         }
     }
 
-    fn version_to_esdb_position(version: &RepositoryVersion) -> StreamPosition<u64> {
+    fn version_to_esdb_position(version: &RepositoryVersion<usize>) -> StreamPosition<u64> {
         if let RepositoryVersion::Exact(u) = version {
             StreamPosition::Position(u.to_owned().try_into().unwrap())
         } else {
@@ -51,7 +51,7 @@ impl<E> ESDBEventRepository<E> {
         }
     }
 
-    fn version_to_expected_revision(version: &RepositoryVersion) -> ExpectedRevision {
+    fn version_to_expected_revision(version: &RepositoryVersion<usize>) -> ExpectedRevision {
         match version {
             RepositoryVersion::Exact(u) => {
                 ExpectedRevision::Exact(u.to_owned().try_into().unwrap())
@@ -60,7 +60,7 @@ impl<E> ESDBEventRepository<E> {
         }
     }
 
-    fn current_revision_to_version(revision: &CurrentRevision) -> RepositoryVersion {
+    fn current_revision_to_version(revision: &CurrentRevision) -> RepositoryVersion<usize> {
         match revision {
             CurrentRevision::Current(val) => RepositoryVersion::Exact(*val as usize),
             CurrentRevision::NoStream => RepositoryVersion::NoStream,
@@ -74,19 +74,20 @@ where
     E: Event + Sync + Send + Serialize + DeserializeOwned + Clone + Debug,
 {
     type StreamId = String;
+    type Version = usize;
 
     async fn load(
         &self,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
+    ) -> Result<(Vec<E>, RepositoryVersion<usize>), VersionedRepositoryError<Error, usize>> {
         self.load_from_version(&RepositoryVersion::Any, id).await
     }
 
     async fn load_from_version(
         &self,
-        version: &RepositoryVersion,
+        version: &RepositoryVersion<usize>,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
+    ) -> Result<(Vec<E>, RepositoryVersion<usize>), VersionedRepositoryError<Error, usize>> {
         let mut stream = self
             .client
             .read_stream(
@@ -131,10 +132,10 @@ where
 
     async fn append(
         &mut self,
-        version: &RepositoryVersion,
+        version: &RepositoryVersion<usize>,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>>
+    ) -> Result<(Vec<E>, RepositoryVersion<usize>), VersionedRepositoryError<Error, usize>>
     where
         'a: 'async_trait,
         E: 'async_trait,

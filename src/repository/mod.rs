@@ -10,9 +10,9 @@ pub mod in_memory;
 pub mod state;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RepositoryVersion {
+pub enum RepositoryVersion<V> {
     Any,
-    Exact(usize),
+    Exact(V),
     NoStream,
     StreamExists,
 }

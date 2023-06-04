@@ -43,33 +43,34 @@ where
     Err: Debug + Send + Sync,
 {
     type StreamId: Send + Sync;
+    type Version: Send + Sync + Eq + Ord;
 
     async fn load(
         &self,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Err>>;
+    ) -> Result<(Vec<E>, RepositoryVersion<Self::Version>), VersionedRepositoryError<Err, Self::Version>>;
 
     async fn load_from_version(
         &self,
-        version: &RepositoryVersion,
+        version: &RepositoryVersion<Self::Version>,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Err>>;
+    ) -> Result<(Vec<E>, RepositoryVersion<Self::Version>), VersionedRepositoryError<Err, Self::Version>>;
 
     async fn append(
         &mut self,
-        version: &RepositoryVersion,
+        version: &RepositoryVersion<Self::Version>,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Err>>
+    ) -> Result<(Vec<E>, RepositoryVersion<Self::Version>), VersionedRepositoryError<Err, Self::Version>>
     where
         'a: 'async_trait,
         E: 'async_trait;
 }
 
 #[derive(Debug, Error)]
-pub enum VersionedRepositoryError<RepoErr> {
+pub enum VersionedRepositoryError<RepoErr, V> {
     #[error("Version conflict {0:?}")]
-    VersionConflict(VersionDiff),
+    VersionConflict(VersionDiff<V>),
     #[error("Repository Error {0}")]
     RepoErr(RepoErr),
 }
@@ -83,21 +84,21 @@ pub trait StreamIdFromEvent<Evt: Event>: Sized {
 }
 
 #[derive(Debug)]
-pub struct VersionDiff {
-    expected: RepositoryVersion,
-    actual: RepositoryVersion,
+pub struct VersionDiff<V> {
+    expected: RepositoryVersion<V>,
+    actual: RepositoryVersion<V>,
 }
 
-impl VersionDiff {
-    pub fn new(expected: RepositoryVersion, actual: RepositoryVersion) -> Self {
+impl<V: Clone> VersionDiff<V> {
+    pub fn new(expected: RepositoryVersion<V>, actual: RepositoryVersion<V>) -> Self {
         Self { expected, actual }
     }
 
-    pub fn expected(&self) -> RepositoryVersion {
+    pub fn expected(&self) -> RepositoryVersion<V> {
         self.expected.to_owned()
     }
 
-    pub fn actual(&self) -> RepositoryVersion {
+    pub fn actual(&self) -> RepositoryVersion<V> {
         self.actual.to_owned()
     }
 }

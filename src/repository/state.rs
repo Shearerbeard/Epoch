@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use super::event::VersionedRepositoryError;
+use super::{event::VersionedRepositoryError, RepositoryVersion};
 
 #[async_trait]
 pub trait StateRepository<State, Err> {
@@ -16,12 +16,12 @@ where
 {
     type Version: Eq + Send + Sync;
 
-    async fn reify(&self) -> Result<(State, Self::Version), Err>;
+    async fn reify(&self) -> Result<(State, RepositoryVersion<Self::Version>), Err>;
     async fn save(
         &mut self,
-        version: &Self::Version,
+        version: &RepositoryVersion<Self::Version>,
         state: &State,
-    ) -> Result<State, VersionedRepositoryError<Err>>
+    ) -> Result<State, VersionedRepositoryError<Err, Self::Version>>
     where
         'a: 'async_trait,
         State: 'async_trait,
