@@ -216,16 +216,12 @@ pub struct CommandResponse<D: DeciderWithContext + Debug>(
     <D as Evolver>::State,
 );
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait DecideEvolveWithCommandResponse
 where
-    <Self::Decide as Evolver>::State: Send + Sync + Debug + Clone,
-    <Self::Decide as DeciderWithContext>::Ctx: Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
-    <Self::Decide as Evolver>::Evt: Clone + Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Err: Send + Sync + Debug,
+    <Self::Decide as Evolver>::State: Clone
 {
-    type Decide: DeciderWithContext + Send + Sync;
+    type Decide: DeciderWithContext;
 
     async fn response(
         cmd: <<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Cmd,
