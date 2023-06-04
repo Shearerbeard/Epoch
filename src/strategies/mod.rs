@@ -11,10 +11,11 @@ use async_trait::async_trait;
 use repository::event::{StreamIdFromEvent, VersionedEventRepositoryWithStreams};
 
 #[async_trait(?Send)]
-pub trait StateFromEventRepository {
+pub trait StateFromEventRepository
+{
     type Ev: Evolver + Send + Sync;
 
-    async fn load<'a, Err>(
+    async fn load<'a, Err: Send>(
         initial: <Self::Ev as Evolver>::State,
         event_repository: &(impl VersionedEventRepositoryWithStreams<
             'a,
@@ -60,11 +61,12 @@ pub trait StateFromEventRepository {
 #[async_trait(?Send)]
 pub trait LoadDecideAppend
 where
-    <Self::Decide as Evolver>::Evt: Clone,
+    <Self::Decide as Evolver>::Evt: Clone + Send,
+    <Self::Decide as DeciderWithContext>::Err: Send
 {
     type Decide: DeciderWithContext;
 
-    fn to_lda_error<DecErr, RepoErr>(
+    fn to_lda_error<DecErr: Send, RepoErr: Send>(
         err: VersionedRepositoryError<RepoErr>,
     ) -> LoadDecideAppendError<DecErr, RepoErr> {
         match err {
@@ -73,7 +75,7 @@ where
         }
     }
 
-    async fn execute<'a, RepoErr, StreamId>(
+    async fn execute<'a, RepoErr: Send, StreamId>(
         initial: <Self::Decide as Evolver>::State,
         event_repository: &mut (impl VersionedEventRepositoryWithStreams<
             'a,
@@ -153,7 +155,7 @@ where
 {
     type Decide: DeciderWithContext;
 
-    async fn execute_reify_decide<'a, RepoErr>(
+    async fn execute_reify_decide<'a, RepoErr: Send>(
         state_repository: &mut (impl VersionedStateRepository<
             'a,
             <Self::Decide as Evolver>::State,
@@ -236,7 +238,7 @@ pub enum StreamState<T> {
 }
 
 #[derive(Debug)]
-pub enum LoadDecideAppendError<DecideErr, RepoErr> {
+pub enum LoadDecideAppendError<DecideErr: Send, RepoErr: Send> {
     OccMaxRetries,
     VersionError,
     DecideErr(DecideErr),

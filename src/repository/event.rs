@@ -40,7 +40,7 @@ where
 pub trait VersionedEventRepositoryWithStreams<'a, E, Err>
 where
     E: Event + Debug,
-    Err: Debug,
+    Err: Debug + Send,
 {
     type StreamId;
 
@@ -67,7 +67,7 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum VersionedRepositoryError<RepoErr> {
+pub enum VersionedRepositoryError<RepoErr: Send> {
     #[error("Version conflict {0:?}")]
     VersionConflict(VersionDiff),
     #[error("Repository Error {0}")]

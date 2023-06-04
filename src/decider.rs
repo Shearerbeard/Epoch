@@ -1,5 +1,15 @@
 use std::fmt::Debug;
 
+struct Placeholder {
+    value: String
+}
+
+impl Placeholder {
+    async fn foo(bar: String) -> String {
+        bar
+    }
+}
+
 pub trait Event {
     type EntityId;
 

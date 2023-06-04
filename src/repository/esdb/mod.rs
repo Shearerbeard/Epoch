@@ -68,7 +68,7 @@ impl<E> ESDBEventRepository<E> {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<'a, E> VersionedEventRepositoryWithStreams<'a, E, Error> for ESDBEventRepository<E>
 where
     E: Event + Sync + Send + Serialize + DeserializeOwned + Clone + Debug,
@@ -78,7 +78,10 @@ where
     async fn load(
         &self,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>>
+    where
+        E: Send
+    {
         self.load_from_version(&RepositoryVersion::Any, id).await
     }
 
@@ -86,7 +89,10 @@ where
         &self,
         version: &RepositoryVersion,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
+    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>>
+    where
+        E: Send
+    {
         let mut stream = self
             .client
             .read_stream(
