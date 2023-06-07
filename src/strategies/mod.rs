@@ -10,22 +10,21 @@ use crate::{
 use async_trait::async_trait;
 use repository::event::{StreamIdFromEvent, VersionedEventRepositoryWithStreams};
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait StateFromEventRepository
-where
-    <Self::Ev as Evolver>::Evt: Send + Sync + Debug,
-    <Self::Ev as Evolver>::State: Send + Sync + Debug,
 {
     type Ev: Evolver + Send + Sync;
 
-    async fn load<'a, Err>(
+    async fn load<'a, Err: Send>(
         initial: <Self::Ev as Evolver>::State,
-        event_repository: &(impl VersionedEventRepositoryWithStreams<'a, <Self::Ev as Evolver>::Evt, Err>
-              + Send
-              + Sync),
+        event_repository: &(impl VersionedEventRepositoryWithStreams<
+            'a,
+            <Self::Ev as Evolver>::Evt,
+            Err,
+        >),
     ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err>>
     where
-        Err: Debug + Send + Sync,
+        Err: Debug,
     {
         Ok(event_repository
             .load(None)
@@ -59,18 +58,15 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait LoadDecideAppend
 where
-    <Self::Decide as Evolver>::State: Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Ctx: Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
-    <Self::Decide as Evolver>::Evt: Clone + Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Err: Send + Sync + Debug,
+    <Self::Decide as Evolver>::Evt: Clone + Send,
+    <Self::Decide as DeciderWithContext>::Err: Send
 {
-    type Decide: DeciderWithContext + Send + Sync;
+    type Decide: DeciderWithContext;
 
-    fn to_lda_error<DecErr: Send + Sync, RepoErr: Send + Sync>(
+    fn to_lda_error<DecErr: Send, RepoErr: Send>(
         err: VersionedRepositoryError<RepoErr>,
     ) -> LoadDecideAppendError<DecErr, RepoErr> {
         match err {
@@ -79,15 +75,14 @@ where
         }
     }
 
-    async fn execute<'a, RepoErr, StreamId>(
+    async fn execute<'a, RepoErr: Send, StreamId>(
         initial: <Self::Decide as Evolver>::State,
         event_repository: &mut (impl VersionedEventRepositoryWithStreams<
             'a,
             <Self::Decide as Evolver>::Evt,
             RepoErr,
             StreamId = StreamId,
-        > + Send
-                  + Sync),
+        >),
         stream_id: &StreamState<StreamId>,
         ctx: &<<Self as LoadDecideAppend>::Decide as DeciderWithContext>::Ctx,
         cmd: &<<Self as LoadDecideAppend>::Decide as DeciderWithContext>::Cmd,
@@ -97,11 +92,8 @@ where
         LoadDecideAppendError<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
     >
     where
-        RepoErr: Debug + Send + Sync,
-        StreamId: Send
-            + Sync
-            + Clone
-            + StreamIdFromEvent<<<Self as LoadDecideAppend>::Decide as Evolver>::Evt>,
+        RepoErr: Debug,
+        StreamId: Clone + StreamIdFromEvent<<<Self as LoadDecideAppend>::Decide as Evolver>::Evt>,
     {
         let (mut decider_evts, mut version) = match stream_id {
             StreamState::New => (vec![], RepositoryVersion::NoStream),
@@ -155,31 +147,27 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait ReifyDecideSave
 where
-    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx: Send + Sync,
-    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
-    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Err: Send + Sync,
-    <<Self as ReifyDecideSave>::Decide as Evolver>::Evt: Send + Sync,
-    <<Self as ReifyDecideSave>::Decide as Evolver>::State: Send + Sync + Clone,
+    <<Self as ReifyDecideSave>::Decide as Evolver>::State: Clone,
+    <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd: Debug,
 {
-    type Decide: DeciderWithContext + Send + Sync;
+    type Decide: DeciderWithContext;
 
-    async fn execute_reify_decide<'a, RepoErr>(
-        state_repository: &mut (impl VersionedStateRepository<'a, <Self::Decide as Evolver>::State, RepoErr>
-                  + Send
-                  + Sync),
+    async fn execute_reify_decide<'a, RepoErr: Send>(
+        state_repository: &mut (impl VersionedStateRepository<
+            'a,
+            <Self::Decide as Evolver>::State,
+            RepoErr,
+        >),
         ctx: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx,
         cmd: &<<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Cmd,
         retrys: Option<u32>,
     ) -> Result<
         <Self::Decide as Evolver>::State,
         ReifyDecideSaveError<<Self::Decide as DeciderWithContext>::Err, RepoErr>,
-    >
-    where
-        RepoErr: Send + Sync,
-    {
+    > {
         let (mut state, mut version) = state_repository
             .reify()
             .await
@@ -220,16 +208,12 @@ pub struct CommandResponse<D: DeciderWithContext + Debug>(
     <D as Evolver>::State,
 );
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait DecideEvolveWithCommandResponse
 where
-    <Self::Decide as Evolver>::State: Send + Sync + Debug + Clone,
-    <Self::Decide as DeciderWithContext>::Ctx: Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
-    <Self::Decide as Evolver>::Evt: Clone + Send + Sync + Debug,
-    <Self::Decide as DeciderWithContext>::Err: Send + Sync + Debug,
+    <Self::Decide as Evolver>::State: Clone,
 {
-    type Decide: DeciderWithContext + Send + Sync;
+    type Decide: DeciderWithContext;
 
     async fn response(
         cmd: <<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Cmd,
@@ -254,7 +238,7 @@ pub enum StreamState<T> {
 }
 
 #[derive(Debug)]
-pub enum LoadDecideAppendError<DecideErr: Send + Sync, RepoErr> {
+pub enum LoadDecideAppendError<DecideErr: Send, RepoErr: Send> {
     OccMaxRetries,
     VersionError,
     DecideErr(DecideErr),
@@ -262,7 +246,7 @@ pub enum LoadDecideAppendError<DecideErr: Send + Sync, RepoErr> {
 }
 
 #[derive(Debug)]
-pub enum ReifyDecideSaveError<DecideErr: Send + Sync, RepoErr> {
+pub enum ReifyDecideSaveError<DecideErr, RepoErr> {
     OccMaxRetries,
     DecideErr(DecideErr),
     RepositoryErr(RepoErr),
