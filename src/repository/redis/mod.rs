@@ -2,7 +2,6 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use redis_om::{redis::aio::MultiplexedConnection, Client, RedisError, StreamModel};
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
@@ -62,6 +61,12 @@ impl TryFrom<&str> for RedisVersion {
                 .parse()
                 .map_err(|_e| Self::Error::ParseVersion(value.to_string()))?,
         })
+    }
+}
+
+impl ToString for RedisVersion {
+    fn to_string(&self) -> String {
+        format!("{}-{}", self.timestamp, self.version)
     }
 }
 
@@ -154,7 +159,37 @@ where
         (Vec<E>, RepositoryVersion<RedisVersion>),
         VersionedRepositoryError<Error, RedisVersion>,
     > {
-        todo!()
+        let mut conn = self.get_connection().await?;
+
+        let start = if let RepositoryVersion::Exact(v) = version {
+            Some(v.to_string())
+        } else {
+            None
+        };
+
+        let rv = <SM as StreamModel>::range(start, Option::<String>::None, &mut conn)
+            .await
+            .map_err(Error::ReadError)
+            .map_err(VersionedRepositoryError::RepoErr)?;
+
+        let mut evts: Vec<E> = vec![];
+        let mut redis_version = RepositoryVersion::NoStream;
+
+        for raw_event in rv {
+            let ev = raw_event
+                .data::<DTO>()
+                .map_err(Error::ParseEvent)
+                .and_then(E::try_from_dto)
+                .map_err(|_| Error::FromDTO("Placeholder".to_string()))
+                .map_err(VersionedRepositoryError::RepoErr)?;
+
+            redis_version =
+                RepositoryVersion::Exact(RedisVersion::try_from(raw_event.id.as_ref()).unwrap());
+
+            evts.push(ev);
+        }
+
+        Ok((evts, redis_version))
     }
 
     async fn append(
@@ -176,14 +211,40 @@ where
             .map(|e| e.clone().into_dto())
             .collect::<Vec<DTO>>();
 
-        // let mut version: RepositoryVersion = RepositoryVersion::Any;
+        let mut version = RepositoryVersion::NoStream;
 
         for e in evts {
-            let _ = SM::publish(&e, &mut conn)
+            let version_str = SM::publish(&e, &mut conn)
                 .await
                 .map_err(|e| VersionedRepositoryError::RepoErr(Error::ConnectionError(e)))?;
+
+            version =
+                RepositoryVersion::Exact(RedisVersion::try_from(version_str.as_str()).unwrap());
         }
 
-        todo!()
+        Ok((events.to_owned(), version))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::{
+        deciders::user::{
+            Guitar, User, UserCommand, UserDecider, UserDeciderCtx, UserDeciderState, UserEvent,
+            UserId, UserName,
+        },
+        repository::test_versioned_event_repository_with_streams,
+        ValueType,
+    };
+
+    #[actix_rt::test]
+    async fn repository_spec_test() {
+        // let base_stream = BASE_STREAM;
+        // let client = store_from_environment(&base_stream.to_string(), vec![1, 2]).await;
+        // let event_repository =
+        //     ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
+
+        // let _ = test_versioned_event_repository_with_streams(event_repository).await;
     }
 }
