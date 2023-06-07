@@ -39,7 +39,7 @@ where
 #[async_trait]
 pub trait VersionedEventRepositoryWithStreams<'a, E, Err>
 where
-    E: Event + Sync + Send + Debug,
+    E: Event + Sync + Send + Debug, // TODO: Make <E> an associated type
     Err: Debug + Send + Sync,
 {
     type StreamId: Send + Sync;

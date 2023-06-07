@@ -19,44 +19,49 @@ where
     S: StreamModel,
 {
     fn into_dto(self) -> S::Data;
-    fn from_dto(model: S::Data) -> Self;
+    fn try_from_dto(model: S::Data) -> Result<Self, Error>
+    where
+        Self: Sized;
 }
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Redis connection error {0:?}")]
-    RedisError(RedisError),
+    ConnectionError(RedisError),
+    #[error("Could not parse redis stream version {0:?}")]
+    ParseVersion(String),
+    #[error("Could not read stream: {0:?}")]
+    ReadError(RedisError),
+    #[error("Could not parse event {0:?}")]
+    ParseEvent(RedisError),
+    #[error("Could not convert DTO to Event: {0:?}")]
+    FromDTO(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct RedisVersion {
-    time: DateTime<Utc>,
+    timestamp: usize,
     version: usize,
 }
 
-impl PartialEq for RedisVersion {
-    fn eq(&self, other: &Self) -> bool {
-        self.time == other.time && self.version == other.version
-    }
-}
+impl TryFrom<&str> for RedisVersion {
+    type Error = Error;
 
-impl Eq for RedisVersion {
-    fn assert_receiver_is_total_eq(&self) {}
-}
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let mut split = value.split("-");
 
-impl PartialOrd for RedisVersion {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match self.time.partial_cmp(&other.time) {
-            Some(core::cmp::Ordering::Equal) => {}
-            ord => return ord,
-        }
-        self.version.partial_cmp(&other.version)
-    }
-}
-
-impl Ord for RedisVersion {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        todo!()
+        Ok(Self {
+            timestamp: split
+                .next()
+                .ok_or_else(|| Self::Error::ParseVersion(value.to_string()))?
+                .parse()
+                .map_err(|_e| Self::Error::ParseVersion(value.to_string()))?,
+            version: split
+                .next()
+                .ok_or_else(|| Self::Error::ParseVersion(value.to_string()))?
+                .parse()
+                .map_err(|_e| Self::Error::ParseVersion(value.to_string()))?,
+        })
     }
 }
 
@@ -90,7 +95,7 @@ where
         self.client
             .get_multiplexed_async_connection()
             .await
-            .map_err(|e| VersionedRepositoryError::RepoErr(Error::RedisError(e)))
+            .map_err(|e| VersionedRepositoryError::RepoErr(Error::ConnectionError(e)))
     }
 }
 
@@ -100,7 +105,7 @@ impl<'a, E, SM, DTO> VersionedEventRepositoryWithStreams<'a, E, Error>
 where
     E: Event + Sync + Send + Serialize + DeserializeOwned + Clone + Debug + StreamModelDTO<SM>,
     SM: StreamModel<Data = DTO> + Send + Sync,
-    DTO: Clone + Send + Sync,
+    DTO: Clone + Send + Sync + redis_om::FromRedisValue,
 {
     type StreamId = String;
     type Version = RedisVersion;
@@ -108,15 +113,47 @@ where
     async fn load(
         &self,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion<RedisVersion>), VersionedRepositoryError<Error, RedisVersion>> {
-        todo!()
+    ) -> Result<
+        (Vec<E>, RepositoryVersion<RedisVersion>),
+        VersionedRepositoryError<Error, RedisVersion>,
+    > {
+        let mut conn = self.get_connection().await?;
+
+        let rv = self
+            .stream_model
+            .read(None, None, &mut conn)
+            .await
+            .map_err(Error::ReadError)
+            .map_err(VersionedRepositoryError::RepoErr)?;
+
+        let mut evts: Vec<E> = vec![];
+        let mut redis_version = RepositoryVersion::NoStream;
+
+        for raw_event in rv {
+            let ev = raw_event
+                .data::<DTO>()
+                .map_err(Error::ParseEvent)
+                .and_then(E::try_from_dto)
+                .map_err(|_| Error::FromDTO("Placeholder".to_string()))
+                .map_err(VersionedRepositoryError::RepoErr)?;
+
+            redis_version =
+                RepositoryVersion::Exact(RedisVersion::try_from(raw_event.id.as_ref()).unwrap());
+
+            evts.push(ev);
+        }
+
+        Ok((evts, redis_version))
     }
 
     async fn load_from_version(
         &self,
         version: &RepositoryVersion<RedisVersion>,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion<RedisVersion>), VersionedRepositoryError<Error, RedisVersion>> {
+    ) -> Result<
+        (Vec<E>, RepositoryVersion<RedisVersion>),
+        VersionedRepositoryError<Error, RedisVersion>,
+    > {
         todo!()
     }
 
@@ -125,7 +162,10 @@ where
         version: &RepositoryVersion<RedisVersion>,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, RepositoryVersion<RedisVersion>), VersionedRepositoryError<Error, RedisVersion>>
+    ) -> Result<
+        (Vec<E>, RepositoryVersion<RedisVersion>),
+        VersionedRepositoryError<Error, RedisVersion>,
+    >
     where
         'a: 'async_trait,
         E: 'async_trait,
@@ -141,7 +181,7 @@ where
         for e in evts {
             let _ = SM::publish(&e, &mut conn)
                 .await
-                .map_err(|e| VersionedRepositoryError::RepoErr(Error::RedisError(e)))?;
+                .map_err(|e| VersionedRepositoryError::RepoErr(Error::ConnectionError(e)))?;
         }
 
         todo!()
