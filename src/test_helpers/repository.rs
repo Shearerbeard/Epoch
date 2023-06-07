@@ -13,11 +13,12 @@ use crate::{
 
 use super::deciders::user::{UserDeciderState, UserEvent};
 
-pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug + Send + Sync>(
+pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug + Send + Sync + Debug, V: Eq + PartialEq + Debug>(
     mut event_repository: impl VersionedEventRepositoryWithStreams<
         'a,
         UserEvent,
         Err,
+        Version = V,
         StreamId = String,
     >,
 ) {
@@ -25,7 +26,7 @@ pub(crate) async fn test_versioned_event_repository_with_streams<'a, Err: Debug 
     let id_1 = "1".to_string();
     let id_2 = "2".to_string();
 
-    let res: (Vec<UserEvent>, RepositoryVersion) =
+    let res: (Vec<UserEvent>, RepositoryVersion<V>) =
         event_repository.load(None).await.expect("loaded");
     assert_matches!(res, (v, _) if v == vec![] as Vec<UserEvent>);
 
@@ -103,7 +104,7 @@ pub(crate) async fn test_versioned_state_repository<'a, Err: Debug + Send + Sync
         'a,
         UserDeciderState,
         Err,
-        Version = RepositoryVersion,
+        Version = usize,
     >,
 ) {
     let new_state = UserDeciderState::new(HashMap::from([(
