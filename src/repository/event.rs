@@ -48,20 +48,29 @@ where
     async fn load(
         &self,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion<Self::Version>), VersionedRepositoryError<Err, Self::Version>>;
+    ) -> Result<
+        (Vec<E>, RepositoryVersion<Self::Version>),
+        VersionedRepositoryError<Err, Self::Version>,
+    >;
 
     async fn load_from_version(
         &self,
         version: &RepositoryVersion<Self::Version>,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion<Self::Version>), VersionedRepositoryError<Err, Self::Version>>;
+    ) -> Result<
+        (Vec<E>, RepositoryVersion<Self::Version>),
+        VersionedRepositoryError<Err, Self::Version>,
+    >;
 
     async fn append(
         &mut self,
         version: &RepositoryVersion<Self::Version>,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, RepositoryVersion<Self::Version>), VersionedRepositoryError<Err, Self::Version>>
+    ) -> Result<
+        (Vec<E>, RepositoryVersion<Self::Version>),
+        VersionedRepositoryError<Err, Self::Version>,
+    >
     where
         'a: 'async_trait,
         E: 'async_trait;

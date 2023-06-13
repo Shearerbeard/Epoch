@@ -234,17 +234,30 @@ mod tests {
             Guitar, User, UserCommand, UserDecider, UserDeciderCtx, UserDeciderState, UserEvent,
             UserId, UserName,
         },
+        redis::{UserEventDTO, UserEventDTOManager},
         repository::test_versioned_event_repository_with_streams,
-        ValueType,
     };
+
+    async fn store_from_environment() -> Client {
+        let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
+
+        let settings: String = dotenv::var("REDIS_CONNECTION_STRING")
+            .expect("Redis to be set in env")
+            .parse()
+            .expect("Redis connection string to parse");
+
+        Client::open(settings).expect("Redis Client")
+    }
 
     #[actix_rt::test]
     async fn repository_spec_test() {
-        // let base_stream = BASE_STREAM;
-        // let client = store_from_environment(&base_stream.to_string(), vec![1, 2]).await;
-        // let event_repository =
-        //     ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
+        let client = store_from_environment().await;
+        let manager = UserEventDTOManager::new("users");
+        let event_repository =
+            RedisStreamsEventRepository::<UserEvent, UserEventDTOManager, UserEventDTO>::new(
+                &client, manager,
+            );
 
-        // let _ = test_versioned_event_repository_with_streams(event_repository).await;
+        let _ = test_versioned_event_repository_with_streams(event_repository).await;
     }
 }
