@@ -84,7 +84,7 @@ where
     E: StreamModelDTO<SM>,
 {
     client: Client,
-    stream_model: SM, // TODO: Stream model not needed for directly model storage - this automatically assumes a user group and autoack
+    _stream_model: PhantomData<SM>,
     _event: PhantomData<E>,
 }
 
@@ -93,10 +93,10 @@ where
     SM: StreamModel<Data = DTO>,
     E: StreamModelDTO<SM>,
 {
-    pub fn new(client: &Client, stream_model: SM) -> Self {
+    pub fn new(client: &Client) -> Self {
         Self {
             client: client.to_owned(),
-            stream_model,
+            _stream_model: PhantomData::default(),
             _event: PhantomData::default(),
         }
     }
@@ -332,10 +332,9 @@ mod tests {
     #[actix_rt::test]
     async fn repository_spec_tests() {
         let client = store_from_environment().await;
-        let manager = UserEventDTOManager::new("users"); // TODO: We don't need manager here because were not ack-ing events
         let event_repository =
             RedisStreamsEventRepository::<UserEvent, UserEventDTOManager, UserEventDTO>::new(
-                &client, manager,
+                &client,
             );
 
         // Run both tests in sequence because we cannot specify a stream identifier per test in redis
