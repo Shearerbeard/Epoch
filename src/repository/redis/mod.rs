@@ -77,7 +77,7 @@ impl ToString for RedisVersion {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RedisStreamsEventRepository<E, SM, DTO>
 where
     SM: StreamModel<Data = DTO>,
@@ -303,12 +303,12 @@ mod tests {
 
     use super::*;
     use crate::test_helpers::{
-        deciders::user::{
-            Guitar, User, UserCommand, UserDecider, UserDeciderCtx, UserDeciderState, UserEvent,
-            UserId, UserName,
-        },
+        deciders::user::UserEvent,
         redis::{UserEventDTO, UserEventDTOManager},
-        repository::test_versioned_event_repository_with_streams,
+        repository::{
+            test_versioned_event_repository_with_streams,
+            test_versioned_event_repository_with_streams_occ,
+        },
     };
 
     async fn store_from_environment() -> Client {
@@ -330,17 +330,16 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn repository_spec_test() {
+    async fn repository_spec_tests() {
         let client = store_from_environment().await;
-        let manager = UserEventDTOManager::new("users");
-        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
-        manager.ensure_group_stream(&mut conn).await.unwrap();
-
+        let manager = UserEventDTOManager::new("users"); // TODO: We don't need manager here because were not ack-ing events
         let event_repository =
             RedisStreamsEventRepository::<UserEvent, UserEventDTOManager, UserEventDTO>::new(
                 &client, manager,
             );
 
-        let _ = test_versioned_event_repository_with_streams(event_repository).await;
+        // Run both tests in sequence because we cannot specify a stream identifier per test in redis
+        let _ = test_versioned_event_repository_with_streams(event_repository.clone()).await;
+        let _ = test_versioned_event_repository_with_streams_occ(event_repository).await;
     }
 }

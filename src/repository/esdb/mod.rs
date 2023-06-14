@@ -181,31 +181,18 @@ where
 #[cfg(test)]
 mod tests {
     use const_random::const_random;
-    use core::time;
-    use futures::{
-        future::{self, BoxFuture},
-        FutureExt,
-    };
-    use std::{
-        collections::{HashMap, HashSet},
-        thread,
-    };
 
-    use assert_matches::assert_matches;
     use eventstore::DeleteStreamOptions;
 
-    use crate::strategies::{LoadDecideAppend, StateFromEventRepository, StreamState};
+    use super::*;
 
     use crate::test_helpers::{
-        deciders::user::{
-            Guitar, User, UserCommand, UserDecider, UserDeciderCtx, UserDeciderState, UserEvent,
-            UserId, UserName,
+        deciders::user::UserEvent,
+        repository::{
+            test_versioned_event_repository_with_streams,
+            test_versioned_event_repository_with_streams_occ,
         },
-        repository::test_versioned_event_repository_with_streams,
-        ValueType,
     };
-
-    use super::*;
 
     const BASE_STREAM: u32 = const_random!(u32);
 
@@ -230,34 +217,8 @@ mod tests {
         client
     }
 
-    async fn add_guitar(base_stream: String, user_id: UserId, guitar: Guitar) {
-        let ctx = UserDeciderCtx::new();
-        let client = store_from_environment(&base_stream.to_string(), vec![]).await;
-        let mut event_repository =
-            ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
-
-        println!("Adding Guitar {:?} for user {}", &guitar.brand, &user_id);
-
-        let cmd = UserCommand::AddGuitar(user_id, guitar.to_owned());
-
-        let res = UserDecider::execute(
-            UserDeciderState::default(),
-            &mut event_repository,
-            &StreamState::Existing(user_id.to_string()),
-            &ctx,
-            &cmd,
-            None,
-        )
-        .await;
-
-        println!(
-            "Result for Guitar {:?} for user {}: {:?}",
-            &guitar.brand, &user_id, res
-        );
-    }
-
     #[actix_rt::test]
-    async fn repository_spec_test() {
+    async fn repository_spec_tests() {
         let base_stream = BASE_STREAM;
         let client = store_from_environment(&base_stream.to_string(), vec![1, 2]).await;
         let event_repository =
@@ -267,97 +228,12 @@ mod tests {
     }
 
     #[actix_rt::test]
-    async fn test_occ() {
+    async fn repository_with_occ_spec_test() {
         let base_stream = format!("{}_with_occ", BASE_STREAM);
         let client = store_from_environment(&base_stream.to_string(), vec![1]).await;
-        let mut event_repository =
+        let event_repository =
             ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
-        let ctx = UserDeciderCtx::new();
 
-        let cmd1 = UserCommand::AddUser("Mike".to_string());
-
-        let evts = UserDecider::execute(
-            UserDeciderState::default(),
-            &mut event_repository,
-            &StreamState::New,
-            &ctx,
-            &cmd1,
-            None,
-        )
-        .await
-        .expect("command_succeeds");
-
-        let first_id = evts.first().unwrap().get_id();
-
-        assert_matches!(
-            evts.first().expect("one event"),
-            UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike".to_string())
-        );
-
-        let state = UserDeciderState::load_by_id(
-            UserDeciderState::default(),
-            &event_repository,
-            &first_id.to_string(),
-        )
-        .await
-        .expect("state is loaded");
-
-        assert_matches!(
-            state,
-            UserDeciderState { users } if users == HashMap::from([(first_id.clone(), User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
-        );
-
-        let guitars = vec![
-            Guitar {
-                brand: "Ibanez".to_string(),
-            },
-            Guitar {
-                brand: "Gibson".to_string(),
-            },
-            Guitar {
-                brand: "Fender".to_string(),
-            },
-            Guitar {
-                brand: "Eastman".to_string(),
-            },
-            Guitar {
-                brand: "Meyones".to_string(),
-            },
-            Guitar {
-                brand: "PRS".to_string(),
-            },
-            Guitar {
-                brand: "Yamaha".to_string(),
-            },
-            Guitar {
-                brand: "Benedetto".to_string(),
-            },
-            Guitar {
-                brand: "Strandberg".to_string(),
-            },
-        ];
-
-        let futures = guitars
-            .iter()
-            .cloned()
-            .map(|g| add_guitar(base_stream.clone(), first_id.clone(), g).boxed())
-            .collect::<Vec<BoxFuture<()>>>();
-
-        future::join_all(futures).await;
-
-        thread::sleep(time::Duration::from_secs(1));
-
-        let state = UserDeciderState::load_by_id(
-            UserDeciderState::default(),
-            &event_repository,
-            &first_id.to_string(),
-        )
-        .await
-        .expect("state is loaded");
-
-        assert_eq!(
-            state.users.get(&first_id).unwrap().guitars,
-            HashSet::from_iter(guitars.iter().cloned())
-        );
+        let _ = test_versioned_event_repository_with_streams_occ(event_repository).await;
     }
 }

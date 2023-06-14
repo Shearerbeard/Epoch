@@ -1,14 +1,29 @@
 use core::time;
-use std::{collections::HashMap, fmt::Debug, thread};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+    thread,
+};
 
 use assert_matches::assert_matches;
+use futures::{
+    future::{self, BoxFuture},
+    FutureExt,
+};
 
 use crate::{
+    decider::Event,
     repository::{
         event::VersionedEventRepositoryWithStreams, state::VersionedStateRepository,
         RepositoryVersion,
     },
-    test_helpers::deciders::user::{User, UserId, UserName},
+    strategies::{LoadDecideAppend, LoadDecideAppendError, StateFromEventRepository, StreamState},
+    test_helpers::{
+        deciders::user::{
+            Guitar, User, UserCommand, UserDecider, UserDeciderCtx, UserId, UserName,
+        },
+        ValueType,
+    },
 };
 
 use super::deciders::user::{UserDeciderState, UserEvent};
@@ -126,4 +141,136 @@ pub(crate) async fn test_versioned_state_repository<'a, Err: Debug + Send + Sync
 
     let res = state_repository.save(&version, &new_state).await;
     assert_matches!(res, Err(_));
+}
+
+pub(crate) async fn test_versioned_event_repository_with_streams_occ<
+    'a,
+    Err: Debug + Send + Sync + Debug,
+    V: Eq + PartialEq + Debug + Send + Sync,
+>(
+    mut event_repository: impl VersionedEventRepositoryWithStreams<'a, UserEvent, Err, Version = V, StreamId = String>
+        + Send
+        + Sync
+        + Clone,
+) {
+    let ctx = UserDeciderCtx::new();
+
+    let cmd1 = UserCommand::AddUser("Mike".to_string());
+
+    let evts = UserDecider::execute(
+        UserDeciderState::default(),
+        &mut event_repository,
+        &StreamState::New,
+        &ctx,
+        &cmd1,
+        None,
+    )
+    .await
+    .expect("command_succeeds");
+
+    let first_id = evts.first().unwrap().get_id();
+
+    assert_matches!(
+        evts.first().expect("one event"),
+        UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike".to_string())
+    );
+
+    let state = UserDeciderState::load_by_id(
+        UserDeciderState::default(),
+        &event_repository,
+        &first_id.to_string(),
+    )
+    .await
+    .expect("state is loaded");
+
+    assert_matches!(
+        state,
+        UserDeciderState { users } if users == HashMap::from([(first_id.clone(), User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
+    );
+
+    let guitars = vec![
+        Guitar {
+            brand: "Ibanez".to_string(),
+        },
+        Guitar {
+            brand: "Gibson".to_string(),
+        },
+        Guitar {
+            brand: "Fender".to_string(),
+        },
+        Guitar {
+            brand: "Eastman".to_string(),
+        },
+        Guitar {
+            brand: "Meyones".to_string(),
+        },
+        Guitar {
+            brand: "PRS".to_string(),
+        },
+        Guitar {
+            brand: "Yamaha".to_string(),
+        },
+        Guitar {
+            brand: "Benedetto".to_string(),
+        },
+        Guitar {
+            brand: "Strandberg".to_string(),
+        },
+    ];
+
+    let futures = guitars
+        .iter()
+        .cloned()
+        .map(|g| add_guitar(event_repository.clone(), first_id.clone(), g).boxed())
+        .collect::<Vec<BoxFuture<()>>>();
+
+    future::join_all(futures).await;
+
+    thread::sleep(time::Duration::from_secs(1));
+
+    let state = UserDeciderState::load_by_id(
+        UserDeciderState::default(),
+        &event_repository,
+        &first_id.to_string(),
+    )
+    .await
+    .expect("state is loaded");
+
+    assert_eq!(
+        state.users.get(&first_id).unwrap().guitars,
+        HashSet::from_iter(guitars.iter().cloned())
+    );
+}
+
+async fn add_guitar<
+    'a,
+    Err: Debug + Send + Sync + Debug,
+    V: Eq + PartialEq + Debug + Send + Sync,
+>(
+    mut event_repository: impl VersionedEventRepositoryWithStreams<'a, UserEvent, Err, Version = V, StreamId = String>
+        + Send
+        + Sync,
+    user_id: UserId,
+    guitar: Guitar,
+) {
+    let ctx = UserDeciderCtx::new();
+
+    println!("Adding Guitar {:?} for user {}", &guitar.brand, &user_id);
+
+    let cmd = UserCommand::AddGuitar(user_id, guitar.to_owned());
+
+    let res = UserDecider::execute(
+        UserDeciderState::default(),
+        &mut event_repository,
+        &StreamState::Existing(user_id.to_string()),
+        &ctx,
+        &cmd,
+        None,
+    )
+    .await;
+
+    println!(
+        "Result for Guitar {:?} for user {}: {:?}",
+        &guitar.brand, &user_id, res
+    );
 }
