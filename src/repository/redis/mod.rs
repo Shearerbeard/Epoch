@@ -149,20 +149,10 @@ where
             // Redis does not currently support filtering streams
             // https://github.com/redis/redis/issues/5827
             if let Some(stream_id) = id {
-                println!(
-                    "Stream Id: {:?}, DTO Id: {:?}",
-                    stream_id,
-                    dto.to_sub_stream_id()
-                );
                 if !dto.sub_stream_id_eq(stream_id) {
-                    println!("REJECT DTO ID {:?}", dto.to_sub_stream_id());
                     continue;
-                } else {
-                    println!("ACCEPT DTO ID {:?}", dto.to_sub_stream_id());
                 }
             }
-
-            println!("Parsing Domain Event from Redis Stream Model DTO");
 
             let ev = E::try_from_dto(dto).map_err(VersionedRepositoryError::RepoErr)?;
 
@@ -210,7 +200,6 @@ where
             // https://github.com/redis/redis/issues/5827
             if let Some(stream_id) = id {
                 if !dto.sub_stream_id_eq(stream_id) {
-                    println!("REJECT STREAM ID {:?}", stream_id);
                     continue;
                 }
             }
