@@ -304,7 +304,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::{
         deciders::user::UserEvent,
-        redis::{TestUserEventDTO, UserEventDTOManager},
+        redis::{TestUserEventDTO, TestUserEventDTOManager},
         repository::{
             versioned_event_repository_with_streams_occ_spec,
             versioned_event_repository_with_streams_spec,
@@ -322,7 +322,7 @@ mod tests {
         let client = Client::open(settings).expect("Redis Client");
 
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
-        UserEventDTOManager::trim(StreamMaxlen::Equals(0), &mut conn)
+        TestUserEventDTOManager::trim(StreamMaxlen::Equals(0), &mut conn)
             .await
             .unwrap();
 
@@ -333,7 +333,7 @@ mod tests {
     async fn repository_spec_tests() {
         let client = store_from_environment().await;
         let event_repository =
-            RedisStreamsEventRepository::<UserEvent, UserEventDTOManager, TestUserEventDTO>::new(
+            RedisStreamsEventRepository::<UserEvent, TestUserEventDTOManager, TestUserEventDTO>::new(
                 &client,
             );
 

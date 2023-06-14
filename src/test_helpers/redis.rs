@@ -75,8 +75,8 @@ impl From<GuitarDTO> for Guitar {
     }
 }
 
-impl StreamModelDTO<UserEventDTOManager> for UserEvent {
-    fn into_dto(self) -> <UserEventDTOManager as StreamModel>::Data {
+impl StreamModelDTO<TestUserEventDTOManager> for UserEvent {
+    fn into_dto(self) -> <TestUserEventDTOManager as StreamModel>::Data {
         match self {
             UserEvent::UserAdded(user) => TestUserEventDTO {
                 user_id: user.id.into(),
@@ -103,7 +103,7 @@ impl StreamModelDTO<UserEventDTOManager> for UserEvent {
     }
 
     fn try_from_dto(
-        model: <UserEventDTOManager as StreamModel>::Data,
+        model: <TestUserEventDTOManager as StreamModel>::Data,
     ) -> Result<Self, crate::repository::redis::Error>
     where
         Self: Sized,
