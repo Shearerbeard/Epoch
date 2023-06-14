@@ -126,7 +126,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use crate::test_helpers::{
-        deciders::user::UserDeciderState, repository::test_versioned_state_repository,
+        deciders::user::UserDeciderState, repository::vesioned_state_repository_spec,
     };
 
     use super::*;
@@ -136,6 +136,6 @@ mod tests {
         let state_repository: InMemoryStateRepository<UserDeciderState> =
             InMemoryStateRepository::new(UserDeciderState::default());
 
-        test_versioned_state_repository(state_repository).await;
+        vesioned_state_repository_spec(state_repository).await;
     }
 }

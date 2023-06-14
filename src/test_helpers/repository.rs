@@ -17,7 +17,7 @@ use crate::{
         event::VersionedEventRepositoryWithStreams, state::VersionedStateRepository,
         RepositoryVersion,
     },
-    strategies::{LoadDecideAppend, LoadDecideAppendError, StateFromEventRepository, StreamState},
+    strategies::{LoadDecideAppend, StateFromEventRepository, StreamState},
     test_helpers::{
         deciders::user::{
             Guitar, User, UserCommand, UserDecider, UserDeciderCtx, UserId, UserName,
@@ -28,7 +28,7 @@ use crate::{
 
 use super::deciders::user::{UserDeciderState, UserEvent};
 
-pub(crate) async fn test_versioned_event_repository_with_streams<
+pub(crate) async fn versioned_event_repository_with_streams_spec<
     'a,
     Err: Debug + Send + Sync + Debug,
     V: Eq + PartialEq + Debug,
@@ -118,7 +118,7 @@ pub(crate) async fn test_versioned_event_repository_with_streams<
     assert_eq!(latest_events.first().unwrap(), new_events.first().unwrap());
 }
 
-pub(crate) async fn test_versioned_state_repository<'a, Err: Debug + Send + Sync>(
+pub(crate) async fn vesioned_state_repository_spec<'a, Err: Debug + Send + Sync>(
     mut state_repository: impl VersionedStateRepository<'a, UserDeciderState, Err, Version = usize>,
 ) {
     let new_state = UserDeciderState::new(HashMap::from([(
@@ -143,7 +143,7 @@ pub(crate) async fn test_versioned_state_repository<'a, Err: Debug + Send + Sync
     assert_matches!(res, Err(_));
 }
 
-pub(crate) async fn test_versioned_event_repository_with_streams_occ<
+pub(crate) async fn versioned_event_repository_with_streams_occ_spec<
     'a,
     Err: Debug + Send + Sync + Debug,
     V: Eq + PartialEq + Debug + Send + Sync,

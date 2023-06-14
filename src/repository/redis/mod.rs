@@ -306,8 +306,8 @@ mod tests {
         deciders::user::UserEvent,
         redis::{UserEventDTO, UserEventDTOManager},
         repository::{
-            test_versioned_event_repository_with_streams,
-            test_versioned_event_repository_with_streams_occ,
+            versioned_event_repository_with_streams_occ_spec,
+            versioned_event_repository_with_streams_spec,
         },
     };
 
@@ -338,7 +338,7 @@ mod tests {
             );
 
         // Run both tests in sequence because we cannot specify a stream identifier per test in redis
-        let _ = test_versioned_event_repository_with_streams(event_repository.clone()).await;
-        let _ = test_versioned_event_repository_with_streams_occ(event_repository).await;
+        let _ = versioned_event_repository_with_streams_spec(event_repository.clone()).await;
+        let _ = versioned_event_repository_with_streams_occ_spec(event_repository).await;
     }
 }

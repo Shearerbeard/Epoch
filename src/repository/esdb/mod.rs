@@ -189,8 +189,8 @@ mod tests {
     use crate::test_helpers::{
         deciders::user::UserEvent,
         repository::{
-            test_versioned_event_repository_with_streams,
-            test_versioned_event_repository_with_streams_occ,
+            versioned_event_repository_with_streams_occ_spec,
+            versioned_event_repository_with_streams_spec,
         },
     };
 
@@ -224,7 +224,7 @@ mod tests {
         let event_repository =
             ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
 
-        let _ = test_versioned_event_repository_with_streams(event_repository).await;
+        let _ = versioned_event_repository_with_streams_spec(event_repository).await;
     }
 
     #[actix_rt::test]
@@ -234,6 +234,6 @@ mod tests {
         let event_repository =
             ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
 
-        let _ = test_versioned_event_repository_with_streams_occ(event_repository).await;
+        let _ = versioned_event_repository_with_streams_occ_spec(event_repository).await;
     }
 }

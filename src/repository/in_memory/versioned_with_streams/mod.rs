@@ -160,7 +160,7 @@ impl From<Error> for VersionedRepositoryError<Error, usize> {
 #[cfg(test)]
 mod tests {
     use crate::test_helpers::{
-        deciders::user::UserEvent, repository::test_versioned_event_repository_with_streams,
+        deciders::user::UserEvent, repository::versioned_event_repository_with_streams_spec,
     };
 
     use super::InMemoryEventRepository;
@@ -170,6 +170,6 @@ mod tests {
     #[actix_rt::test]
     async fn repository_spec_test() {
         let event_repository = InMemoryEventRepository::<UserEvent>::new(BASE_STREAM);
-        let _ = test_versioned_event_repository_with_streams(event_repository).await;
+        let _ = versioned_event_repository_with_streams_spec(event_repository).await;
     }
 }
