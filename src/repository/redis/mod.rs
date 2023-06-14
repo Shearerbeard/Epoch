@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::decider::Event;
 
 use super::{
-    event::{VersionedEventRepositoryWithStreams, VersionedRepositoryError},
+    event::{VersionDiff, VersionedEventRepositoryWithStreams, VersionedRepositoryError},
     RepositoryVersion,
 };
 
@@ -44,7 +44,7 @@ pub enum Error {
     FromDTO(String),
 }
 
-#[derive(Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Copy, Clone)]
 pub struct RedisVersion {
     timestamp: usize,
     version: usize,
@@ -84,7 +84,7 @@ where
     E: StreamModelDTO<SM>,
 {
     client: Client,
-    stream_model: SM,
+    stream_model: SM, // TODO: Stream model not needed for directly model storage - this automatically assumes a user group and autoack
     _event: PhantomData<E>,
 }
 
@@ -131,7 +131,7 @@ where
     > {
         let mut conn = self.get_connection().await?;
 
-        let rv = <SM as StreamModel>::range("-".to_string(), "+".to_string(), &mut conn)
+        let rv = <SM as StreamModel>::range("-", "+", &mut conn)
             .await
             .map_err(Error::ReadError)
             .map_err(VersionedRepositoryError::RepoErr)?;
@@ -149,7 +149,11 @@ where
             // Redis does not currently support filtering streams
             // https://github.com/redis/redis/issues/5827
             if let Some(stream_id) = id {
-                println!("Stream Id: {:?}, DTO Id: {:?}", stream_id, dto.to_sub_stream_id());
+                println!(
+                    "Stream Id: {:?}, DTO Id: {:?}",
+                    stream_id,
+                    dto.to_sub_stream_id()
+                );
                 if !dto.sub_stream_id_eq(stream_id) {
                     println!("REJECT DTO ID {:?}", dto.to_sub_stream_id());
                     continue;
@@ -225,7 +229,7 @@ where
     async fn append(
         &mut self,
         version: &RepositoryVersion<RedisVersion>,
-        stream: &Self::StreamId,
+        _stream: &Self::StreamId,
         events: &Vec<E>,
     ) -> Result<
         (Vec<E>, RepositoryVersion<RedisVersion>),
@@ -236,6 +240,54 @@ where
         E: 'async_trait,
     {
         let mut conn = self.get_connection().await?;
+
+        match version {
+            RepositoryVersion::Any => {}
+            RepositoryVersion::Exact(v) => {
+                let res = <SM as StreamModel>::range(v.to_string(), "-".to_string(), &mut conn)
+                    .await
+                    .map_err(Error::ReadError)
+                    .map_err(VersionedRepositoryError::RepoErr)?;
+
+                if res.len() > 1 {
+                    let last_message_id = res.last().unwrap().id.to_owned();
+
+                    return Err(VersionedRepositoryError::VersionConflict(VersionDiff::new(
+                        *version,
+                        RepositoryVersion::Exact(
+                            RedisVersion::try_from(last_message_id.as_ref()).unwrap(),
+                        ),
+                    )));
+                }
+            }
+            RepositoryVersion::NoStream => {
+                let len = <SM as StreamModel>::len(&mut conn)
+                    .await
+                    .map_err(Error::ReadError)
+                    .map_err(VersionedRepositoryError::RepoErr)?;
+
+                if len > 0 {
+                    return Err(VersionedRepositoryError::VersionConflict(VersionDiff::new(
+                        *version,
+                        RepositoryVersion::StreamExists,
+                    )));
+                }
+            }
+            RepositoryVersion::StreamExists => {
+                let len = <SM as StreamModel>::len(&mut conn)
+                    .await
+                    .map_err(Error::ReadError)
+                    .map_err(VersionedRepositoryError::RepoErr)?;
+
+                if len == 0 {
+                    return Err(VersionedRepositoryError::VersionConflict(VersionDiff::new(
+                        *version,
+                        RepositoryVersion::NoStream,
+                    )));
+                }
+            }
+        }
+
         let evts = events
             .iter()
             .map(|e| e.clone().into_dto())
