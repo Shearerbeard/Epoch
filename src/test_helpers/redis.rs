@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use redis_om::{redis, RedisTransportValue, StreamModel};
 
-use crate::repository::redis::StreamModelDTO;
+use crate::repository::redis::{StreamModelDTO, WithSubStreamId};
 
 use super::{
     deciders::user::{Guitar, User, UserEvent, UserId, UserName},
@@ -35,6 +35,12 @@ pub struct UserDTO {
 #[derive(RedisTransportValue, PartialEq, Eq, Hash, Debug, Clone)]
 pub struct GuitarDTO {
     brand: String,
+}
+
+impl WithSubStreamId for UserEventDTO {
+    fn to_sub_stream_id(&self) -> String {
+        self.user_id.clone().to_string()
+    }
 }
 
 impl From<User> for UserDTO {

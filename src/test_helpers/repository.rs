@@ -36,7 +36,7 @@ pub(crate) async fn test_versioned_event_repository_with_streams<
 
     let events1 = vec![
         UserEvent::UserAdded(User::new(
-            1,
+            1 as UserId,
             UserName::try_from("Mike").expect("Name is valid"),
         )),
         UserEvent::UserNameUpdated(
@@ -56,7 +56,7 @@ pub(crate) async fn test_versioned_event_repository_with_streams<
             UserName::try_from("Stella").expect("Name is valid"),
         )),
         UserEvent::UserNameUpdated(
-            1 as UserId,
+            2 as UserId,
             UserName::try_from("Stella2").expect("Name is valid"),
         ),
     ];

@@ -23,6 +23,13 @@ where
         Self: Sized;
 }
 
+pub trait WithSubStreamId {
+    fn to_sub_stream_id(&self) -> String;
+    fn sub_stream_id_eq(&self, comp: &str) -> bool {
+        comp == self.to_sub_stream_id()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Redis connection error {0:?}")]
@@ -110,7 +117,7 @@ impl<'a, E, SM, DTO> VersionedEventRepositoryWithStreams<'a, E, Error>
 where
     E: Event + Sync + Send + Serialize + DeserializeOwned + Clone + Debug + StreamModelDTO<SM>,
     SM: StreamModel<Data = DTO> + Send + Sync,
-    DTO: Clone + Send + Sync + redis_om::FromRedisValue,
+    DTO: WithSubStreamId + Clone + Send + Sync + redis_om::FromRedisValue,
 {
     type StreamId = String;
     type Version = RedisVersion;
@@ -124,9 +131,7 @@ where
     > {
         let mut conn = self.get_connection().await?;
 
-        let rv = self
-            .stream_model
-            .read(None, None, &mut conn)
+        let rv = <SM as StreamModel>::range("-".to_string(), "+".to_string(), &mut conn)
             .await
             .map_err(Error::ReadError)
             .map_err(VersionedRepositoryError::RepoErr)?;
@@ -135,12 +140,27 @@ where
         let mut redis_version = RepositoryVersion::NoStream;
 
         for raw_event in rv {
-            let ev = raw_event
+            let dto = raw_event
                 .data::<DTO>()
                 .map_err(Error::ParseEvent)
-                .and_then(E::try_from_dto)
-                .map_err(|_| Error::FromDTO("Placeholder".to_string()))
                 .map_err(VersionedRepositoryError::RepoErr)?;
+
+            // Filter out events not belonging to sub stream
+            // Redis does not currently support filtering streams
+            // https://github.com/redis/redis/issues/5827
+            if let Some(stream_id) = id {
+                println!("Stream Id: {:?}, DTO Id: {:?}", stream_id, dto.to_sub_stream_id());
+                if !dto.sub_stream_id_eq(stream_id) {
+                    println!("REJECT DTO ID {:?}", dto.to_sub_stream_id());
+                    continue;
+                } else {
+                    println!("ACCEPT DTO ID {:?}", dto.to_sub_stream_id());
+                }
+            }
+
+            println!("Parsing Domain Event from Redis Stream Model DTO");
+
+            let ev = E::try_from_dto(dto).map_err(VersionedRepositoryError::RepoErr)?;
 
             redis_version =
                 RepositoryVersion::Exact(RedisVersion::try_from(raw_event.id.as_ref()).unwrap());
@@ -162,12 +182,12 @@ where
         let mut conn = self.get_connection().await?;
 
         let start = if let RepositoryVersion::Exact(v) = version {
-            Some(v.to_string())
+            v.to_string()
         } else {
-            None
+            "-".to_string()
         };
 
-        let rv = <SM as StreamModel>::range(start, Option::<String>::None, &mut conn)
+        let rv = <SM as StreamModel>::range(start, "+".to_string(), &mut conn)
             .await
             .map_err(Error::ReadError)
             .map_err(VersionedRepositoryError::RepoErr)?;
@@ -176,12 +196,22 @@ where
         let mut redis_version = RepositoryVersion::NoStream;
 
         for raw_event in rv {
-            let ev = raw_event
+            let dto = raw_event
                 .data::<DTO>()
                 .map_err(Error::ParseEvent)
-                .and_then(E::try_from_dto)
-                .map_err(|_| Error::FromDTO("Placeholder".to_string()))
                 .map_err(VersionedRepositoryError::RepoErr)?;
+
+            // Filter out events not belonging to sub stream
+            // Redis does not currently support filtering streams
+            // https://github.com/redis/redis/issues/5827
+            if let Some(stream_id) = id {
+                if !dto.sub_stream_id_eq(stream_id) {
+                    println!("REJECT STREAM ID {:?}", stream_id);
+                    continue;
+                }
+            }
+
+            let ev = E::try_from_dto(dto).map_err(VersionedRepositoryError::RepoErr)?;
 
             redis_version =
                 RepositoryVersion::Exact(RedisVersion::try_from(raw_event.id.as_ref()).unwrap());
@@ -228,6 +258,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use redis_om::redis::streams::StreamMaxlen;
+
     use super::*;
     use crate::test_helpers::{
         deciders::user::{
@@ -246,13 +278,23 @@ mod tests {
             .parse()
             .expect("Redis connection string to parse");
 
-        Client::open(settings).expect("Redis Client")
+        let client = Client::open(settings).expect("Redis Client");
+
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        UserEventDTOManager::trim(StreamMaxlen::Equals(0), &mut conn)
+            .await
+            .unwrap();
+
+        client
     }
 
     #[actix_rt::test]
     async fn repository_spec_test() {
         let client = store_from_environment().await;
         let manager = UserEventDTOManager::new("users");
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        manager.ensure_group_stream(&mut conn).await.unwrap();
+
         let event_repository =
             RedisStreamsEventRepository::<UserEvent, UserEventDTOManager, UserEventDTO>::new(
                 &client, manager,
