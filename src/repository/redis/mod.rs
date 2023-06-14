@@ -304,7 +304,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::{
         deciders::user::UserEvent,
-        redis::{UserEventDTO, UserEventDTOManager},
+        redis::{TestUserEventDTO, UserEventDTOManager},
         repository::{
             versioned_event_repository_with_streams_occ_spec,
             versioned_event_repository_with_streams_spec,
@@ -333,7 +333,7 @@ mod tests {
     async fn repository_spec_tests() {
         let client = store_from_environment().await;
         let event_repository =
-            RedisStreamsEventRepository::<UserEvent, UserEventDTOManager, UserEventDTO>::new(
+            RedisStreamsEventRepository::<UserEvent, UserEventDTOManager, TestUserEventDTO>::new(
                 &client,
             );
 

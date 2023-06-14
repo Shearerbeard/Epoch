@@ -10,7 +10,7 @@ use super::{
 };
 
 #[derive(StreamModel, Debug, Clone)]
-pub struct UserEventDTO {
+pub struct TestUserEventDTO {
     user_id: UserId,
     event_type: UserEventTypeDTO,
     user: Option<UserDTO>,
@@ -37,7 +37,7 @@ pub struct GuitarDTO {
     brand: String,
 }
 
-impl WithSubStreamId for UserEventDTO {
+impl WithSubStreamId for TestUserEventDTO {
     fn to_sub_stream_id(&self) -> String {
         self.user_id.clone().to_string()
     }
@@ -78,21 +78,21 @@ impl From<GuitarDTO> for Guitar {
 impl StreamModelDTO<UserEventDTOManager> for UserEvent {
     fn into_dto(self) -> <UserEventDTOManager as StreamModel>::Data {
         match self {
-            UserEvent::UserAdded(user) => UserEventDTO {
+            UserEvent::UserAdded(user) => TestUserEventDTO {
                 user_id: user.id.into(),
                 event_type: UserEventTypeDTO::UserAdded,
                 user: Some(user.into()),
                 guitar: None,
                 user_name: None,
             },
-            UserEvent::UserNameUpdated(user_id, user_name) => UserEventDTO {
+            UserEvent::UserNameUpdated(user_id, user_name) => TestUserEventDTO {
                 user_id: user_id.into(),
                 event_type: UserEventTypeDTO::UserNameUpdated,
                 user: None,
                 user_name: Some(user_name.value()),
                 guitar: None,
             },
-            UserEvent::UserGuitarAdded(user_id, guitar) => UserEventDTO {
+            UserEvent::UserGuitarAdded(user_id, guitar) => TestUserEventDTO {
                 user_id: user_id.into(),
                 event_type: UserEventTypeDTO::UserGuitarAdded,
                 user: None,
