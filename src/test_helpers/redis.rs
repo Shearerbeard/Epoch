@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use redis_om::{redis, RedisTransportValue, StreamModel};
 
-use crate::repository::redis::versioned_event::{StreamModelDTO, WithSubStreamId};
+use crate::repository::redis::versioned_event::{StreamModelDTO, WithFineGrainedStreamId};
 
 use super::{
     deciders::user::{Guitar, User, UserEvent, UserId, UserName},
@@ -37,8 +37,8 @@ pub struct GuitarDTO {
     brand: String,
 }
 
-impl WithSubStreamId for TestUserEventDTO {
-    fn to_sub_stream_id(&self) -> String {
+impl WithFineGrainedStreamId for TestUserEventDTO {
+    fn to_fine_grained_id(&self) -> String {
         self.user_id.clone().to_string()
     }
 }

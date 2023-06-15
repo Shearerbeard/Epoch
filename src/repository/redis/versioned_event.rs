@@ -23,10 +23,10 @@ where
         Self: Sized;
 }
 
-pub trait WithSubStreamId {
-    fn to_sub_stream_id(&self) -> String;
-    fn sub_stream_id_eq(&self, comp: &str) -> bool {
-        comp == self.to_sub_stream_id()
+pub trait WithFineGrainedStreamId {
+    fn to_fine_grained_id(&self) -> String;
+    fn fine_grained_eq(&self, comp: &str) -> bool {
+        comp == self.to_fine_grained_id()
     }
 }
 
@@ -117,7 +117,7 @@ impl<'a, E, SM, DTO> VersionedEventRepositoryWithStreams<'a, E, Error>
 where
     E: Event + Sync + Send + Serialize + DeserializeOwned + Clone + Debug + StreamModelDTO<SM>,
     SM: StreamModel<Data = DTO> + Send + Sync,
-    DTO: WithSubStreamId + Clone + Send + Sync + redis_om::FromRedisValue,
+    DTO: WithFineGrainedStreamId + Clone + Send + Sync + redis_om::FromRedisValue,
 {
     type StreamId = String;
     type Version = RedisVersion;
@@ -149,7 +149,7 @@ where
             // Redis does not currently support filtering streams
             // https://github.com/redis/redis/issues/5827
             if let Some(stream_id) = id {
-                if !dto.sub_stream_id_eq(stream_id) {
+                if !dto.fine_grained_eq(stream_id) {
                     continue;
                 }
             }
@@ -199,7 +199,7 @@ where
             // Redis does not currently support filtering streams
             // https://github.com/redis/redis/issues/5827
             if let Some(stream_id) = id {
-                if !dto.sub_stream_id_eq(stream_id) {
+                if !dto.fine_grained_eq(stream_id) {
                     continue;
                 }
             }
