@@ -2,7 +2,10 @@ use std::collections::HashSet;
 
 use redis_om::{redis, RedisTransportValue, StreamModel};
 
-use crate::repository::redis::versioned_event::{StreamModelDTO, WithFineGrainedStreamId};
+use crate::repository::{
+    redis::{versioned_event::StreamModelDTO, RedisRepositoryError},
+    WithFineGrainedStreamId,
+};
 
 use super::{
     deciders::user::{Guitar, User, UserEvent, UserId, UserName},
@@ -104,50 +107,39 @@ impl StreamModelDTO<TestUserEventDTOManager> for UserEvent {
 
     fn try_from_dto(
         model: <TestUserEventDTOManager as StreamModel>::Data,
-    ) -> Result<Self, crate::repository::redis::versioned_event::RedisRepositoryError>
+    ) -> Result<Self, RedisRepositoryError>
     where
         Self: Sized,
     {
         match model.event_type {
             UserEventTypeDTO::UserAdded => match model.user {
                 Some(user) => Ok(UserEvent::UserAdded(user.into())),
-                None => Err(
-                    crate::repository::redis::versioned_event::RedisRepositoryError::FromDTO(
-                        format!(
-                            "Redis UserEventDTO invalid: missing Some(User), {:?}",
-                            model
-                        ),
-                    ),
-                ),
+                None => Err(RedisRepositoryError::FromDTO(format!(
+                    "Redis UserEventDTO invalid: missing Some(User), {:?}",
+                    model
+                ))),
             },
             UserEventTypeDTO::UserNameUpdated => match model.user_name {
                 Some(user_name) => Ok(UserEvent::UserNameUpdated(
                     model.user_id,
                     UserName::try_from(user_name).map_err(|e| {
-                        crate::repository::redis::versioned_event::RedisRepositoryError::FromDTO(
-                            format!("Redis UserEventDTO invalid: {:?}", e),
-                        )
+                        RedisRepositoryError::FromDTO(format!(
+                            "Redis UserEventDTO invalid: {:?}",
+                            e
+                        ))
                     })?,
                 )),
-                None => Err(
-                    crate::repository::redis::versioned_event::RedisRepositoryError::FromDTO(
-                        format!(
-                            "Redis UserEventDTO invalid: missing Some(UserName), {:?}",
-                            model
-                        ),
-                    ),
-                ),
+                None => Err(RedisRepositoryError::FromDTO(format!(
+                    "Redis UserEventDTO invalid: missing Some(UserName), {:?}",
+                    model
+                ))),
             },
             UserEventTypeDTO::UserGuitarAdded => match model.guitar {
                 Some(guitar) => Ok(UserEvent::UserGuitarAdded(model.user_id, guitar.into())),
-                None => Err(
-                    crate::repository::redis::versioned_event::RedisRepositoryError::FromDTO(
-                        format!(
-                            "Redis UserEventDTO invalid: missing Some(Guitar), {:?}",
-                            model
-                        ),
-                    ),
-                ),
+                None => Err(RedisRepositoryError::FromDTO(format!(
+                    "Redis UserEventDTO invalid: missing Some(Guitar), {:?}",
+                    model
+                ))),
             },
         }
     }
