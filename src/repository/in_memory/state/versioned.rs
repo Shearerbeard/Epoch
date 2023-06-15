@@ -126,7 +126,10 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use crate::test_helpers::{
-        deciders::user::UserDeciderState, repository::vesioned_state_repository_spec,
+        deciders::user::UserDeciderState,
+        repository::{
+            versioned_event_repository_with_streams_occ_spec, vesioned_state_repository_spec,
+        },
     };
 
     use super::*;
