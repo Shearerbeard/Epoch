@@ -1,9 +1,8 @@
 use std::fmt::Debug;
 
 use async_trait::async_trait;
-use thiserror::Error;
 
-use super::RepositoryVersion;
+use super::{RepositoryVersion, VersionedRepositoryError};
 use crate::decider::Event;
 
 #[async_trait]
@@ -74,40 +73,4 @@ where
     where
         'a: 'async_trait,
         E: 'async_trait;
-}
-
-#[derive(Debug, Error)]
-pub enum VersionedRepositoryError<RepoErr, V> {
-    #[error("Version conflict {0:?}")]
-    VersionConflict(VersionDiff<V>),
-    #[error("Repository Error {0}")]
-    RepoErr(RepoErr),
-}
-
-pub trait StreamIdFromEvent<Evt: Event>: Sized {
-    fn from(e: Evt) -> Self {
-        Self::event_entity_id_into(e.get_id())
-    }
-
-    fn event_entity_id_into(id: <Evt as Event>::EntityId) -> Self;
-}
-
-#[derive(Debug)]
-pub struct VersionDiff<V> {
-    expected: RepositoryVersion<V>,
-    actual: RepositoryVersion<V>,
-}
-
-impl<V: Clone> VersionDiff<V> {
-    pub fn new(expected: RepositoryVersion<V>, actual: RepositoryVersion<V>) -> Self {
-        Self { expected, actual }
-    }
-
-    pub fn expected(&self) -> RepositoryVersion<V> {
-        self.expected.to_owned()
-    }
-
-    pub fn actual(&self) -> RepositoryVersion<V> {
-        self.actual.to_owned()
-    }
 }

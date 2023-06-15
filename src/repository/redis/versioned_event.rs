@@ -2,79 +2,24 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
-use redis_om::{redis::aio::MultiplexedConnection, Client, RedisError, StreamModel};
+use redis_om::{redis::aio::MultiplexedConnection, Client, StreamModel};
 use serde::{de::DeserializeOwned, Serialize};
-use thiserror::Error;
 
 use crate::decider::Event;
 
-use crate::repository::{
-    event::{VersionDiff, VersionedEventRepositoryWithStreams, VersionedRepositoryError},
-    RepositoryVersion,
-};
+use crate::repository::{event::VersionedEventRepositoryWithStreams, RepositoryVersion};
+use crate::repository::{VersionDiff, VersionedRepositoryError, WithFineGrainedStreamId};
+
+use super::{RedisRepositoryError, RedisVersion};
 
 pub trait StreamModelDTO<S>
 where
     S: StreamModel,
 {
     fn into_dto(self) -> S::Data;
-    fn try_from_dto(model: S::Data) -> Result<Self, Error>
+    fn try_from_dto(model: S::Data) -> Result<Self, RedisRepositoryError>
     where
         Self: Sized;
-}
-
-pub trait WithFineGrainedStreamId {
-    fn to_fine_grained_id(&self) -> String;
-    fn fine_grained_eq(&self, comp: &str) -> bool {
-        comp == self.to_fine_grained_id()
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("Redis connection error {0:?}")]
-    ConnectionError(RedisError),
-    #[error("Could not parse redis stream version {0:?}")]
-    ParseVersion(String),
-    #[error("Could not read stream: {0:?}")]
-    ReadError(RedisError),
-    #[error("Could not parse event {0:?}")]
-    ParseEvent(RedisError),
-    #[error("Could not convert DTO to Event: {0:?}")]
-    FromDTO(String),
-}
-
-#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Copy, Clone)]
-pub struct RedisVersion {
-    timestamp: usize,
-    version: usize,
-}
-
-impl TryFrom<&str> for RedisVersion {
-    type Error = Error;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let mut split = value.split("-");
-
-        Ok(Self {
-            timestamp: split
-                .next()
-                .ok_or_else(|| Self::Error::ParseVersion(value.to_string()))?
-                .parse()
-                .map_err(|_e| Self::Error::ParseVersion(value.to_string()))?,
-            version: split
-                .next()
-                .ok_or_else(|| Self::Error::ParseVersion(value.to_string()))?
-                .parse()
-                .map_err(|_e| Self::Error::ParseVersion(value.to_string()))?,
-        })
-    }
-}
-
-impl ToString for RedisVersion {
-    fn to_string(&self) -> String {
-        format!("{}-{}", self.timestamp, self.version)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -103,16 +48,19 @@ where
 
     pub async fn get_connection(
         &self,
-    ) -> Result<MultiplexedConnection, VersionedRepositoryError<Error, RedisVersion>> {
+    ) -> Result<MultiplexedConnection, VersionedRepositoryError<RedisRepositoryError, RedisVersion>>
+    {
         self.client
             .get_multiplexed_async_connection()
             .await
-            .map_err(|e| VersionedRepositoryError::RepoErr(Error::ConnectionError(e)))
+            .map_err(|e| {
+                VersionedRepositoryError::RepoErr(RedisRepositoryError::ConnectionError(e))
+            })
     }
 }
 
 #[async_trait]
-impl<'a, E, SM, DTO> VersionedEventRepositoryWithStreams<'a, E, Error>
+impl<'a, E, SM, DTO> VersionedEventRepositoryWithStreams<'a, E, RedisRepositoryError>
     for RedisStreamsEventRepository<E, SM, DTO>
 where
     E: Event + Sync + Send + Serialize + DeserializeOwned + Clone + Debug + StreamModelDTO<SM>,
@@ -127,13 +75,13 @@ where
         id: Option<&Self::StreamId>,
     ) -> Result<
         (Vec<E>, RepositoryVersion<RedisVersion>),
-        VersionedRepositoryError<Error, RedisVersion>,
+        VersionedRepositoryError<RedisRepositoryError, RedisVersion>,
     > {
         let mut conn = self.get_connection().await?;
 
         let rv = <SM as StreamModel>::range("-", "+", &mut conn)
             .await
-            .map_err(Error::ReadError)
+            .map_err(RedisRepositoryError::ReadError)
             .map_err(VersionedRepositoryError::RepoErr)?;
 
         let mut evts: Vec<E> = vec![];
@@ -142,7 +90,7 @@ where
         for raw_event in rv {
             let dto = raw_event
                 .data::<DTO>()
-                .map_err(Error::ParseEvent)
+                .map_err(RedisRepositoryError::ParseEvent)
                 .map_err(VersionedRepositoryError::RepoErr)?;
 
             // Filter out events not belonging to sub stream
@@ -171,7 +119,7 @@ where
         id: Option<&Self::StreamId>,
     ) -> Result<
         (Vec<E>, RepositoryVersion<RedisVersion>),
-        VersionedRepositoryError<Error, RedisVersion>,
+        VersionedRepositoryError<RedisRepositoryError, RedisVersion>,
     > {
         let mut conn = self.get_connection().await?;
 
@@ -183,7 +131,7 @@ where
 
         let rv = <SM as StreamModel>::range(start, "+".to_string(), &mut conn)
             .await
-            .map_err(Error::ReadError)
+            .map_err(RedisRepositoryError::ReadError)
             .map_err(VersionedRepositoryError::RepoErr)?;
 
         let mut evts: Vec<E> = vec![];
@@ -192,7 +140,7 @@ where
         for raw_event in rv {
             let dto = raw_event
                 .data::<DTO>()
-                .map_err(Error::ParseEvent)
+                .map_err(RedisRepositoryError::ParseEvent)
                 .map_err(VersionedRepositoryError::RepoErr)?;
 
             // Filter out events not belonging to sub stream
@@ -222,7 +170,7 @@ where
         events: &Vec<E>,
     ) -> Result<
         (Vec<E>, RepositoryVersion<RedisVersion>),
-        VersionedRepositoryError<Error, RedisVersion>,
+        VersionedRepositoryError<RedisRepositoryError, RedisVersion>,
     >
     where
         'a: 'async_trait,
@@ -235,7 +183,7 @@ where
             RepositoryVersion::Exact(v) => {
                 let res = <SM as StreamModel>::range(v.to_string(), "-".to_string(), &mut conn)
                     .await
-                    .map_err(Error::ReadError)
+                    .map_err(RedisRepositoryError::ReadError)
                     .map_err(VersionedRepositoryError::RepoErr)?;
 
                 if res.len() > 1 {
@@ -252,7 +200,7 @@ where
             RepositoryVersion::NoStream => {
                 let len = <SM as StreamModel>::len(&mut conn)
                     .await
-                    .map_err(Error::ReadError)
+                    .map_err(RedisRepositoryError::ReadError)
                     .map_err(VersionedRepositoryError::RepoErr)?;
 
                 if len > 0 {
@@ -265,7 +213,7 @@ where
             RepositoryVersion::StreamExists => {
                 let len = <SM as StreamModel>::len(&mut conn)
                     .await
-                    .map_err(Error::ReadError)
+                    .map_err(RedisRepositoryError::ReadError)
                     .map_err(VersionedRepositoryError::RepoErr)?;
 
                 if len == 0 {
@@ -285,9 +233,9 @@ where
         let mut version = RepositoryVersion::NoStream;
 
         for e in evts {
-            let version_str = SM::publish(&e, &mut conn)
-                .await
-                .map_err(|e| VersionedRepositoryError::RepoErr(Error::ConnectionError(e)))?;
+            let version_str = SM::publish(&e, &mut conn).await.map_err(|e| {
+                VersionedRepositoryError::RepoErr(RedisRepositoryError::ConnectionError(e))
+            })?;
 
             version =
                 RepositoryVersion::Exact(RedisVersion::try_from(version_str.as_str()).unwrap());

@@ -6,9 +6,7 @@ use std::{
 use async_trait::async_trait;
 
 use crate::repository::{
-    event::{VersionDiff, VersionedRepositoryError},
-    state::VersionedStateRepository,
-    RepositoryVersion,
+    state::VersionedStateRepository, RepositoryVersion, VersionDiff, VersionedRepositoryError,
 };
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::repository::event::VersionDiff;
+use crate::repository::VersionDiff;
 
 #[derive(Debug, Error)]
 pub enum Error {

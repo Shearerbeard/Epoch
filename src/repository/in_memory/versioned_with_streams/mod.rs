@@ -9,8 +9,8 @@ use std::{
 use crate::{
     decider::Event,
     repository::{
-        event::{VersionDiff, VersionedEventRepositoryWithStreams, VersionedRepositoryError},
-        RepositoryVersion,
+        event::VersionedEventRepositoryWithStreams, RepositoryVersion, VersionDiff,
+        VersionedRepositoryError,
     },
 };
 

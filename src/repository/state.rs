@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use super::{event::VersionedRepositoryError, RepositoryVersion};
+use super::{RepositoryVersion, VersionedRepositoryError};
 
 #[async_trait]
 pub trait StateRepository<State, Err> {
@@ -29,7 +29,7 @@ where
 }
 
 #[async_trait]
-pub trait VersionedStreamSnapshotRepository<'a, State, StreamId, Err>
+pub trait VersionedStreamSnapshotRepository<State, Err>
 where
     State: Send + Sync,
     Err: Send + Sync,
@@ -39,16 +39,16 @@ where
 
     async fn reify(
         &self,
-        stream: Option<StreamId>,
-    ) -> Result<(State, RepositoryVersion<Self::Version>), Err>;
+        stream: Option<Self::StreamId>,
+    ) -> Result<
+        (State, RepositoryVersion<Self::Version>),
+        VersionedRepositoryError<Err, Self::Version>,
+    >;
+
     async fn save(
         &mut self,
         version: &RepositoryVersion<Self::Version>,
         state: &State,
-        stream: Option<StreamId>,
-    ) -> Result<State, VersionedRepositoryError<Err, Self::Version>>
-    where
-        'a: 'async_trait,
-        State: 'async_trait,
-        Err: 'async_trait;
+        stream: Option<Self::StreamId>,
+    ) -> Result<State, VersionedRepositoryError<Err, Self::Version>>;
 }

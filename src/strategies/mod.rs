@@ -4,11 +4,12 @@ use std::{fmt::Debug, thread};
 use crate::{
     decider::{DeciderWithContext, Evolver},
     repository::{
-        self, event::VersionedRepositoryError, state::VersionedStateRepository, RepositoryVersion,
+        self, state::VersionedStateRepository, RepositoryVersion, StreamIdFromEvent,
+        VersionedRepositoryError,
     },
 };
 use async_trait::async_trait;
-use repository::event::{StreamIdFromEvent, VersionedEventRepositoryWithStreams};
+use repository::event::VersionedEventRepositoryWithStreams;
 
 #[async_trait]
 pub trait StateFromEventRepository

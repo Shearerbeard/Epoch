@@ -13,8 +13,8 @@ use crate::decider::Event;
 use self::error::Error;
 
 use super::{
-    event::{VersionDiff, VersionedEventRepositoryWithStreams, VersionedRepositoryError},
-    RepositoryVersion,
+    event::VersionedEventRepositoryWithStreams, RepositoryVersion, VersionDiff,
+    VersionedRepositoryError,
 };
 
 pub mod error;
