@@ -53,3 +53,47 @@ impl ToString for RedisVersion {
         format!("{}-{}", self.timestamp, self.version)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TS1: &str = "1686947654949-0";
+    const TS2: &str = "1686947654949-1";
+    const TS3: &str = "1686947676187-0";
+    const TS4: &str = "1686947676187-1";
+    const TS5: &str = "1686947697295-0";
+    const TS6: &str = "1686947697295-1";
+
+    #[test]
+    fn test_redis_version_to_from_str() {
+        assert_eq!(TS1, RedisVersion::try_from(TS1).unwrap().to_string());
+        assert_eq!(TS2, RedisVersion::try_from(TS2).unwrap().to_string());
+        assert_eq!(TS3, RedisVersion::try_from(TS3).unwrap().to_string());
+        assert_eq!(TS4, RedisVersion::try_from(TS4).unwrap().to_string());
+        assert_eq!(TS5, RedisVersion::try_from(TS5).unwrap().to_string());
+        assert_eq!(TS6, RedisVersion::try_from(TS6).unwrap().to_string());
+    }
+
+    #[test]
+    fn test_redis_version_ordered() {
+        let mut versions: Vec<RedisVersion> = vec![
+            TS6.try_into().unwrap(),
+            TS1.try_into().unwrap(),
+            TS5.try_into().unwrap(),
+            TS2.try_into().unwrap(),
+            TS4.try_into().unwrap(),
+            TS3.try_into().unwrap(),
+        ];
+
+        versions.sort();
+
+        assert_eq!(
+            versions
+                .into_iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<String>>(),
+            vec![TS1, TS2, TS3, TS4, TS5, TS6]
+        );
+    }
+}
