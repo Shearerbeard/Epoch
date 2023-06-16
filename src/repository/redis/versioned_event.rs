@@ -259,7 +259,7 @@ mod tests {
         },
     };
 
-    async fn store_from_environment() -> Client {
+    async fn client_from_environment() -> Client {
         let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
 
         let settings: String = dotenv::var("REDIS_CONNECTION_STRING")
@@ -279,7 +279,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn repository_spec_tests() {
-        let client = store_from_environment().await;
+        let client = client_from_environment().await;
         let event_repository = RedisStreamsEventRepository::<
             UserEvent,
             TestUserEventDTOManager,

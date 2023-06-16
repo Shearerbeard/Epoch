@@ -1,20 +1,40 @@
 use async_trait::async_trait;
+use redis_om::{redis, redis::aio::MultiplexedConnection, Client, JsonModel};
+use serde::{Deserialize, Serialize};
 
 use crate::repository::{
-    state::VersionedStreamSnapshotRepository, RepositoryVersion, VersionedRepositoryError,
+    state::{StateStream, VersionedStreamSnapshotRepository},
+    RepositoryVersion, VersionedRepositoryError,
 };
 
-use super::RedisVersion;
+use super::{RedisRepositoryError, RedisVersion};
 
-pub struct RedisJSONSnapshotRepository {}
+pub struct RedisJSONSnapshotRepository {
+    client: Client,
+    snapshot_expiry: Option<usize>,
+}
+
+impl RedisJSONSnapshotRepository {
+    pub async fn get_connection(
+        &self,
+    ) -> Result<MultiplexedConnection, VersionedRepositoryError<RedisRepositoryError, RedisVersion>>
+    {
+        self.client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| {
+                VersionedRepositoryError::RepoErr(RedisRepositoryError::ConnectionError(e))
+            })
+    }
+}
 
 #[async_trait]
-impl<State, Err> VersionedStreamSnapshotRepository<State, Err> for RedisJSONSnapshotRepository
+impl<State> VersionedStreamSnapshotRepository<State> for RedisJSONSnapshotRepository
 where
-    State: Send + Sync,
-    Err: Send + Sync,
+    State: Send + Sync + JsonModel + Clone + StateStream<String>,
 {
     type Version = RedisVersion;
+    type Err = RedisRepositoryError;
 
     type StreamId = String;
 
@@ -23,17 +43,83 @@ where
         stream: Option<Self::StreamId>,
     ) -> Result<
         (State, RepositoryVersion<Self::Version>),
-        VersionedRepositoryError<Err, Self::Version>,
+        VersionedRepositoryError<Self::Err, Self::Version>,
     > {
         todo!()
     }
 
     async fn save(
         &mut self,
-        version: &RepositoryVersion<Self::Version>,
+        version: &Self::Version,
         state: &State,
-        stream: Option<Self::StreamId>,
-    ) -> Result<State, VersionedRepositoryError<Err, Self::Version>> {
-        todo!()
+    ) -> Result<State, VersionedRepositoryError<Self::Err, Self::Version>> {
+        let mut conn = self.get_connection().await?;
+
+        // TODO: Require ToRedisStateDTO<State>
+        // Convert State to DTO
+        // struct RedisStateDTO<State> {
+        //     id: String,
+        //     data: State,
+
+        // }
+
+        // impl<State> RedisStateDTO<State> {
+        //     fn _get_composite_id(id: Self::StreamId, version: Self::Version) -> &str{
+        //         format!("{}:{}", id, version)
+        //     }
+        // }
+
+        // TODO: Write Version to Version Set in redis under key <JSONModelKey>:versions
+        // TODO: Write Latest to key in redus under <JSONModelKey>:latest_version
+
+        state
+            .clone()
+            .save(&mut conn)
+            .await
+            .map_err(RedisRepositoryError::SaveError)
+            .map_err(VersionedRepositoryError::RepoErr)?;
+
+        if let Some(secs) = self.snapshot_expiry {
+            state
+                .expire(secs, &mut conn)
+                .await
+                .map_err(RedisRepositoryError::SaveError)
+                .map_err(VersionedRepositoryError::RepoErr)?;
+        }
+
+        Ok(state.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(JsonModel, Serialize, Deserialize)]
+    struct TestModel {
+        id: String,
+    }
+
+    async fn client_from_environment() -> Client {
+        let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
+
+        let settings: String = dotenv::var("REDIS_CONNECTION_STRING")
+            .expect("Redis to be set in env")
+            .parse()
+            .expect("Redis connection string to parse");
+
+        Client::open(settings).expect("Redis Client")
+    }
+
+    #[actix_rt::test]
+    async fn test_json() {
+        let client = client_from_environment().await;
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+        let mut test = TestModel {
+            id: "1".to_string(),
+        };
+
+        let _ = test.save(&mut conn).await.unwrap();
     }
 }

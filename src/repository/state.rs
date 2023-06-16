@@ -29,26 +29,29 @@ where
 }
 
 #[async_trait]
-pub trait VersionedStreamSnapshotRepository<State, Err>
+pub trait VersionedStreamSnapshotRepository<State>
 where
-    State: Send + Sync,
-    Err: Send + Sync,
+    State: Send + Sync + StateStream<Self::StreamId>,
 {
     type Version: Eq + Send + Sync;
     type StreamId: Eq + Send + Sync;
+    type Err: Send + Sync;
 
     async fn reify(
         &self,
         stream: Option<Self::StreamId>,
     ) -> Result<
         (State, RepositoryVersion<Self::Version>),
-        VersionedRepositoryError<Err, Self::Version>,
+        VersionedRepositoryError<Self::Err, Self::Version>,
     >;
 
     async fn save(
         &mut self,
-        version: &RepositoryVersion<Self::Version>,
+        version: &Self::Version,
         state: &State,
-        stream: Option<Self::StreamId>,
-    ) -> Result<State, VersionedRepositoryError<Err, Self::Version>>;
+    ) -> Result<State, VersionedRepositoryError<Self::Err, Self::Version>>;
+}
+
+pub trait StateStream<T> {
+    fn to_stream_id(&self) -> T;
 }

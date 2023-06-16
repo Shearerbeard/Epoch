@@ -12,6 +12,8 @@ pub enum RedisRepositoryError {
     ParseVersion(String),
     #[error("Could not read stream: {0:?}")]
     ReadError(RedisError),
+    #[error("Could not save state: {0:?}")]
+    SaveError(RedisError),
     #[error("Could not parse event {0:?}")]
     ParseEvent(RedisError),
     #[error("Could not convert DTO to Event: {0:?}")]

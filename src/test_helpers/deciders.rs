@@ -10,11 +10,12 @@ pub(crate) mod user {
 
     use crate::{
         decider::{Decider, DeciderWithContext, Event, Evolver},
+        repository::StreamIdFromEvent,
         strategies::{
             DecideEvolveWithCommandResponse, LoadDecideAppend, ReifyDecideSave,
             StateFromEventRepository,
         },
-        test_helpers::ValueType, repository::StreamIdFromEvent,
+        test_helpers::ValueType,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
