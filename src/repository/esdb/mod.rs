@@ -1,3 +1,5 @@
+pub use eventstore;
+
 use std::{fmt::Debug, marker::PhantomData};
 
 use async_trait::async_trait;

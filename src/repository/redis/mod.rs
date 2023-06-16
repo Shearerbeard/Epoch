@@ -1,3 +1,5 @@
+pub use redis_om::redis::*;
+
 use redis_om::RedisError;
 use thiserror::Error;
 
