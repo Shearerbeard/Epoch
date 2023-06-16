@@ -14,7 +14,7 @@ pub trait Decider: Evolver {
     fn decide(state: &Self::State, cmd: &Self::Cmd) -> Result<Vec<Self::Evt>, Self::Err>;
 }
 
-pub trait DeciderWithContext: Evolver + Debug {
+pub trait DeciderWithContext: Evolver {
     type Ctx: std::fmt::Debug;
     type Cmd: Send + Sync + std::fmt::Debug;
     type Err: std::fmt::Debug;
@@ -27,8 +27,8 @@ pub trait DeciderWithContext: Evolver + Debug {
 }
 
 pub trait Evolver {
-    type State: Debug;
-    type Evt: Event + Debug;
+    type State;
+    type Evt: Event;
     fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
 }
 

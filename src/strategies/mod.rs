@@ -216,7 +216,7 @@ where
 }
 
 #[derive(Debug)]
-pub struct CommandResponse<D: DeciderWithContext + Debug>(
+pub struct CommandResponse<E: Debug, S: Debug, D: DeciderWithContext<State = S, Evt = E>>(
     <D as DeciderWithContext>::Cmd,
     Vec<<D as Evolver>::Evt>,
     <D as Evolver>::State,
@@ -238,7 +238,11 @@ where
         state: &<<Self as DecideEvolveWithCommandResponse>::Decide as Evolver>::State,
         ctx: &<<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Ctx,
     ) -> Result<
-        CommandResponse<<Self as DecideEvolveWithCommandResponse>::Decide>,
+        CommandResponse<
+            <<Self as DecideEvolveWithCommandResponse>::Decide as Evolver>::Evt,
+            <<Self as DecideEvolveWithCommandResponse>::Decide as Evolver>::State,
+            <Self as DecideEvolveWithCommandResponse>::Decide,
+        >,
         <<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Err,
     > {
         let evts = <Self::Decide as DeciderWithContext>::decide(ctx, state, &cmd)?;
