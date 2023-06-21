@@ -1,13 +1,29 @@
+use std::fmt::Debug;
+
 use async_trait::async_trait;
-use redis_om::{redis, redis::aio::MultiplexedConnection, Client, JsonModel};
-use serde::{Deserialize, Serialize};
+use redis_om::{redis::aio::MultiplexedConnection, Client, JsonModel, RedisError};
+use thiserror::Error;
 
 use crate::repository::{
     state::{StateStream, VersionedStreamSnapshotRepository},
     RepositoryVersion, VersionedRepositoryError,
 };
 
-use super::{RedisRepositoryError, RedisVersion};
+use super::{RedisVersion};
+
+#[derive(Debug, Error)]
+pub enum RedisRepositoryError {
+    #[error("Redis connection error {0:?}")]
+    ConnectionError(RedisError),
+    #[error("Could not parse redis stream version {0:?}")]
+    ParseVersion(String),
+    #[error("Could not read stream: {0:?}")]
+    ReadError(RedisError),
+    #[error("Could not save state: {0:?}")]
+    SaveError(RedisError),
+    #[error("Could not parse event {0:?}")]
+    ParseEvent(RedisError),
+}
 
 pub struct RedisJSONSnapshotRepository {
     client: Client,
@@ -93,6 +109,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use serde::{Serialize, Deserialize};
+
     use super::*;
 
     #[derive(JsonModel, Serialize, Deserialize)]

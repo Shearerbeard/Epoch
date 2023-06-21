@@ -1,3 +1,5 @@
+use std::{error::Error, fmt::Debug, marker::PhantomData};
+
 use redis_om::RedisError;
 
 use thiserror::Error;
@@ -6,11 +8,11 @@ pub mod versioned_event;
 pub mod versioned_stream_snapshot;
 
 #[derive(Debug, Error)]
-pub enum RedisRepositoryError {
+pub enum RedisRepositoryError<DTOErr: Error + Debug> {
     #[error("Redis connection error {0:?}")]
     ConnectionError(RedisError),
-    #[error("Could not parse redis stream version {0:?}")]
-    ParseVersion(String),
+    #[error("Redis Version Error {0:?}")] 
+    Version(RedisVersionError),
     #[error("Could not read stream: {0:?}")]
     ReadError(RedisError),
     #[error("Could not save state: {0:?}")]
@@ -18,7 +20,15 @@ pub enum RedisRepositoryError {
     #[error("Could not parse event {0:?}")]
     ParseEvent(RedisError),
     #[error("Could not convert DTO to Event: {0:?}")]
-    FromDTO(String),
+    FromDTO(DTOErr),
+    #[error("Could not convert Event to DTO: {0:?}")]
+    ToDTO(DTOErr),
+}
+
+#[derive(Error, Debug)]
+pub enum RedisVersionError {
+    #[error("Could not parse redis stream version {0:?}")]
+    ParseVersion(String),
 }
 
 #[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Copy, Clone)]
@@ -27,8 +37,9 @@ pub struct RedisVersion {
     version: usize,
 }
 
-impl TryFrom<&str> for RedisVersion {
-    type Error = RedisRepositoryError;
+impl TryFrom<&str> for RedisVersion
+{
+    type Error = RedisVersionError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let mut split = value.split("-");
