@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
+use redis_om::RedisError;
 use redis_om::{redis::aio::MultiplexedConnection, Client, StreamModel};
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -16,7 +17,7 @@ use super::{RedisRepositoryError, RedisVersion};
 pub trait StreamModelDTO<SM, DTOErr>
 where
     SM: StreamModel,
-    DTOErr: Error + Debug
+    DTOErr: Error + Debug,
 {
     fn into_dto(self) -> SM::Data;
     fn try_from_dto(model: SM::Data) -> Result<Self, RedisRepositoryError<DTOErr>>
@@ -25,54 +26,46 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct RedisStreamsEventRepository<E, SM, DTO, DTOErr>
+pub struct RedisStreamsEventRepository<SM, DTO>
 where
     SM: StreamModel<Data = DTO>,
-    E: StreamModelDTO<SM, DTOErr>,
-    DTOErr: Error + Debug
 {
     client: Client,
-    _stream_model: PhantomData<SM>,
-    _event: PhantomData<E>,
-    _dto_err: PhantomData<DTOErr>
+    _sm: PhantomData<SM>,
 }
 
-impl<E, SM, DTO, DTOErr> RedisStreamsEventRepository<E, SM, DTO, DTOErr>
+impl<SM, DTO> RedisStreamsEventRepository<SM, DTO>
 where
     SM: StreamModel<Data = DTO>,
-    E: StreamModelDTO<SM, DTOErr>,
-    DTOErr: Error + Debug
 {
     pub fn new(client: &Client) -> Self {
         Self {
             client: client.to_owned(),
-            _stream_model: PhantomData::default(),
-            _event: PhantomData::default(),
-            _dto_err: PhantomData::default(),
+            _sm: PhantomData::default(),
         }
     }
 
-    pub async fn get_connection(
-        &self,
-    ) -> Result<MultiplexedConnection, VersionedRepositoryError<RedisRepositoryError<DTOErr>, RedisVersion>>
-    {
-        self.client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| {
-                VersionedRepositoryError::RepoErr(RedisRepositoryError::ConnectionError(e))
-            })
+    pub async fn get_connection(&self) -> Result<MultiplexedConnection, RedisError> {
+        self.client.get_multiplexed_async_connection().await
     }
 }
 
 #[async_trait]
-impl<'a, E, SM, DTO, DTOErr> VersionedEventRepositoryWithStreams<'a, E, RedisRepositoryError<DTOErr>>
-    for RedisStreamsEventRepository<E, SM, DTO, DTOErr>
+impl<'a, E, SM, DTO, DTOErr>
+    VersionedEventRepositoryWithStreams<'a, E, RedisRepositoryError<DTOErr>>
+    for RedisStreamsEventRepository<SM, DTO>
 where
-    E: Event + Sync + Send + Serialize + DeserializeOwned + Clone + Debug + StreamModelDTO<SM, DTOErr>,
+    E: Event
+        + Sync
+        + Send
+        + Serialize
+        + DeserializeOwned
+        + Clone
+        + Debug
+        + StreamModelDTO<SM, DTOErr>,
     SM: StreamModel<Data = DTO> + Send + Sync,
     DTO: WithFineGrainedStreamId + Clone + Send + Sync + redis_om::FromRedisValue,
-    DTOErr: Debug + Error + Send + Sync + Clone
+    DTOErr: Debug + Error + Send + Sync + Clone,
 {
     type StreamId = String;
     type Version = RedisVersion;
@@ -84,7 +77,11 @@ where
         (Vec<E>, RepositoryVersion<RedisVersion>),
         VersionedRepositoryError<RedisRepositoryError<DTOErr>, RedisVersion>,
     > {
-        let mut conn = self.get_connection().await?;
+        let mut conn = self
+            .get_connection()
+            .await
+            .map_err(RedisRepositoryError::ConnectionError)
+            .map_err(VersionedRepositoryError::RepoErr)?;
 
         let rv = <SM as StreamModel>::range("-", "+", &mut conn)
             .await
@@ -128,7 +125,11 @@ where
         (Vec<E>, RepositoryVersion<RedisVersion>),
         VersionedRepositoryError<RedisRepositoryError<DTOErr>, RedisVersion>,
     > {
-        let mut conn = self.get_connection().await?;
+        let mut conn = self
+            .get_connection()
+            .await
+            .map_err(RedisRepositoryError::ConnectionError)
+            .map_err(VersionedRepositoryError::RepoErr)?;
 
         let start = if let RepositoryVersion::Exact(v) = version {
             v.to_string()
@@ -183,7 +184,11 @@ where
         'a: 'async_trait,
         E: 'async_trait,
     {
-        let mut conn = self.get_connection().await?;
+        let mut conn = self
+            .get_connection()
+            .await
+            .map_err(RedisRepositoryError::ConnectionError)
+            .map_err(VersionedRepositoryError::RepoErr)?;
 
         match version {
             RepositoryVersion::Any => {}
@@ -259,7 +264,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::{
         deciders::user::UserEvent,
-        redis::{TestUserEventDTO, TestUserEventDTOManager, TestUserDTOErr},
+        redis::{TestUserDTOErr, TestUserEventDTO, TestUserEventDTOManager},
         repository::{
             versioned_event_repository_with_streams_occ_spec,
             versioned_event_repository_with_streams_spec,
@@ -287,12 +292,8 @@ mod tests {
     #[actix_rt::test]
     async fn repository_spec_tests() {
         let client = client_from_environment().await;
-        let event_repository = RedisStreamsEventRepository::<
-            UserEvent,
-            TestUserEventDTOManager,
-            TestUserEventDTO,
-            TestUserDTOErr
-        >::new(&client);
+        let event_repository =
+            RedisStreamsEventRepository::<TestUserEventDTOManager, TestUserEventDTO>::new(&client);
 
         // Run both tests in sequence because we cannot specify a stream identifier per test in redis
         let _ = versioned_event_repository_with_streams_spec(event_repository.clone()).await;

@@ -1,4 +1,4 @@
-use std::{error::Error, fmt::Debug, marker::PhantomData};
+use std::{error::Error, fmt::Debug};
 
 use redis_om::RedisError;
 
