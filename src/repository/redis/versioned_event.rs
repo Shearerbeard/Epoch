@@ -97,7 +97,7 @@ where
         for raw_event in rv {
             let dto = raw_event
                 .data::<DTO>()
-                .map_err(RedisRepositoryError::ParseEvent)
+                .map_err(RedisRepositoryError::ParseDTO)
                 .map_err(VersionedRepositoryError::RepoErr)?;
 
             // Filter out events not belonging to sub stream
@@ -147,7 +147,7 @@ where
         for raw_event in rv {
             let dto = raw_event
                 .data::<DTO>()
-                .map_err(RedisRepositoryError::ParseEvent)
+                .map_err(RedisRepositoryError::ParseDTO)
                 .map_err(VersionedRepositoryError::RepoErr)?;
 
             // Filter out events not belonging to sub stream
@@ -259,7 +259,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::{
         deciders::user::UserEvent,
-        redis::{TestUserEventDTO, TestUserEventDTOManager},
+        redis::{TestUserEventDTO, TestUserEventDTOManager, TestUserDTOErr},
         repository::{
             versioned_event_repository_with_streams_occ_spec,
             versioned_event_repository_with_streams_spec,
@@ -291,6 +291,7 @@ mod tests {
             UserEvent,
             TestUserEventDTOManager,
             TestUserEventDTO,
+            TestUserDTOErr
         >::new(&client);
 
         // Run both tests in sequence because we cannot specify a stream identifier per test in redis

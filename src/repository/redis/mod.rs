@@ -18,11 +18,9 @@ pub enum RedisRepositoryError<DTOErr: Error + Debug> {
     #[error("Could not save state: {0:?}")]
     SaveError(RedisError),
     #[error("Could not parse event {0:?}")]
-    ParseEvent(RedisError),
+    ParseDTO(RedisError),
     #[error("Could not convert DTO to Event: {0:?}")]
     FromDTO(DTOErr),
-    #[error("Could not convert Event to DTO: {0:?}")]
-    ToDTO(DTOErr),
 }
 
 #[derive(Error, Debug)]
@@ -31,10 +29,32 @@ pub enum RedisVersionError {
     ParseVersion(String),
 }
 
-#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub struct RedisVersion {
     timestamp: usize,
     version: usize,
+}
+
+impl Ord for RedisVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self > other {
+            std::cmp::Ordering::Greater
+        } else if self < other {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    }
+}
+
+impl PartialOrd for RedisVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match self.timestamp.partial_cmp(&other.timestamp) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.version.partial_cmp(&other.version)
+    }
 }
 
 impl TryFrom<&str> for RedisVersion
