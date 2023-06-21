@@ -118,39 +118,41 @@ impl StreamModelDTO<TestUserEventDTOManager, TestUserDTOErr> for UserEvent {
 
     fn try_from_dto(
         model: <TestUserEventDTOManager as StreamModel>::Data,
-    ) -> Result<Self, RedisRepositoryError<TestUserDTOErr>>
+    ) -> Result<Self, TestUserDTOErr>
     where
         Self: Sized,
     {
         match model.event_type {
             UserEventTypeDTO::UserAdded => match model.user {
                 Some(user) => Ok(UserEvent::UserAdded(user.into())),
-                None => Err(RedisRepositoryError::FromDTO(format!(
-                    "Redis UserEventDTO invalid: missing Some(User), {:?}",
-                    model
-                ).into())),
+                None => Err(TestUserDTOErr(
+                    format!(
+                        "Redis UserEventDTO invalid: missing Some(User), {:?}",
+                        model
+                    )
+                    .into(),
+                )),
             },
             UserEventTypeDTO::UserNameUpdated => match model.user_name {
                 Some(user_name) => Ok(UserEvent::UserNameUpdated(
                     model.user_id,
                     UserName::try_from(user_name).map_err(|e| {
-                        RedisRepositoryError::FromDTO(format!(
-                            "Redis UserEventDTO invalid: {:?}",
-                            e
-                        ).into())
+                        TestUserDTOErr(format!("Redis UserEventDTO invalid: {:?}", e).into())
                     })?,
                 )),
-                None => Err(RedisRepositoryError::FromDTO(format!(
+                None => Err(TestUserDTOErr(format!(
                     "Redis UserEventDTO invalid: missing Some(UserName), {:?}",
                     model
-                ).into())),
+                ))
+                .into()),
             },
             UserEventTypeDTO::UserGuitarAdded => match model.guitar {
                 Some(guitar) => Ok(UserEvent::UserGuitarAdded(model.user_id, guitar.into())),
-                None => Err(RedisRepositoryError::FromDTO(format!(
+                None => Err(TestUserDTOErr(format!(
                     "Redis UserEventDTO invalid: missing Some(Guitar), {:?}",
                     model
-                ).into())),
+                ))
+                .into()),
             },
         }
     }

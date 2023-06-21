@@ -20,7 +20,7 @@ where
     DTOErr: Error + Debug,
 {
     fn into_dto(self) -> SM::Data;
-    fn try_from_dto(model: SM::Data) -> Result<Self, RedisRepositoryError<DTOErr>>
+    fn try_from_dto(model: SM::Data) -> Result<Self, DTOErr>
     where
         Self: Sized;
 }
@@ -106,7 +106,9 @@ where
                 }
             }
 
-            let ev = E::try_from_dto(dto).map_err(VersionedRepositoryError::RepoErr)?;
+            let ev = E::try_from_dto(dto)
+                .map_err(RedisRepositoryError::FromDTO)
+                .map_err(VersionedRepositoryError::RepoErr)?;
 
             redis_version =
                 RepositoryVersion::Exact(RedisVersion::try_from(raw_event.id.as_ref()).unwrap());
@@ -160,7 +162,9 @@ where
                 }
             }
 
-            let ev = E::try_from_dto(dto).map_err(VersionedRepositoryError::RepoErr)?;
+            let ev = E::try_from_dto(dto)
+                .map_err(RedisRepositoryError::FromDTO)
+                .map_err(VersionedRepositoryError::RepoErr)?;
 
             redis_version =
                 RepositoryVersion::Exact(RedisVersion::try_from(raw_event.id.as_ref()).unwrap());
