@@ -1,7 +1,11 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, marker::PhantomData};
 
 use async_trait::async_trait;
-use redis_om::{redis::aio::MultiplexedConnection, Client, JsonModel, RedisError};
+use redis_om::{
+    redis::{aio::MultiplexedConnection, streams::StreamId},
+    Client, JsonModel, RedisError,
+};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::repository::{
@@ -9,7 +13,7 @@ use crate::repository::{
     RepositoryVersion, VersionedRepositoryError,
 };
 
-use super::{RedisVersion};
+use super::RedisVersion;
 
 #[derive(Debug, Error)]
 pub enum RedisRepositoryError {
@@ -23,14 +27,48 @@ pub enum RedisRepositoryError {
     SaveError(RedisError),
     #[error("Could not parse event {0:?}")]
     ParseEvent(RedisError),
+    #[error("Could not use data transfer type")]
+    RedisDTO(RedisJsonDTOError),
 }
 
-pub struct RedisJSONSnapshotRepository {
+#[derive(Debug, Error)]
+pub enum RedisJsonDTOError {
+    #[error("Could not deserialize")]
+    Deserialize,
+}
+
+pub trait VersionedStateModel<Data> {
+    fn id(&self) -> String;
+    fn version(&self) -> RedisVersion;
+    fn data(&self) -> Data;
+    fn new(id: String, version: RedisVersion, data: Data) -> Self;
+}
+
+pub trait RedisJsonDTO<JM, Data, DTOErr>
+where
+    JM: JsonModel + VersionedStateModel<Data>,
+    Data: Serialize + DeserializeOwned + Debug + Sized,
+{
+    fn to_dto(data: Data, version: RedisVersion) -> JM;
+    fn try_from_dto(model: &JM) -> Result<Data, DTOErr>;
+}
+
+pub struct RedisJSONSnapshotRepository<State, JM>
+where
+    State: Send + Sync,
+    JM: JsonModel + VersionedStateModel<State> + Send + Sync,
+{
     client: Client,
     snapshot_expiry: Option<usize>,
+    _st: PhantomData<State>,
+    _jm: PhantomData<JM>,
 }
 
-impl RedisJSONSnapshotRepository {
+impl<State, JM> RedisJSONSnapshotRepository<State, JM>
+where
+    State: Send + Sync,
+    JM: JsonModel + VersionedStateModel<State> + Send + Sync,
+{
     pub async fn get_connection(
         &self,
     ) -> Result<MultiplexedConnection, VersionedRepositoryError<RedisRepositoryError, RedisVersion>>
@@ -45,9 +83,19 @@ impl RedisJSONSnapshotRepository {
 }
 
 #[async_trait]
-impl<State> VersionedStreamSnapshotRepository<State> for RedisJSONSnapshotRepository
+impl<'a, State, JM> VersionedStreamSnapshotRepository<State>
+    for RedisJSONSnapshotRepository<State, JM>
 where
-    State: Send + Sync + JsonModel + Clone + StateStream<String>,
+    State: Send
+        + Sync
+        + Serialize
+        + DeserializeOwned
+        + JsonModel
+        + Clone
+        + StateStream<String>
+        + Debug
+        + RedisJsonDTO<JM, State, RedisJsonDTOError>,
+    JM: Send + Sync + JsonModel + VersionedStateModel<State>,
 {
     type Version = RedisVersion;
     type Err = RedisRepositoryError;
@@ -61,7 +109,16 @@ where
         (State, RepositoryVersion<Self::Version>),
         VersionedRepositoryError<Self::Err, Self::Version>,
     > {
-        todo!()
+        let mut conn = self.get_connection().await?;
+        let json_model = JM::get(stream.unwrap(), &mut conn)
+            .await
+            .map_err(RedisRepositoryError::ReadError)
+            .map_err(VersionedRepositoryError::RepoErr)?;
+
+        Ok((
+            json_model.data(),
+            RepositoryVersion::Exact(json_model.version()),
+        ))
     }
 
     async fn save(
@@ -71,25 +128,7 @@ where
     ) -> Result<State, VersionedRepositoryError<Self::Err, Self::Version>> {
         let mut conn = self.get_connection().await?;
 
-        // TODO: Require ToRedisStateDTO<State>
-        // Convert State to DTO
-        // struct RedisStateDTO<State> {
-        //     id: String,
-        //     data: State,
-
-        // }
-
-        // impl<State> RedisStateDTO<State> {
-        //     fn _get_composite_id(id: Self::StreamId, version: Self::Version) -> &str{
-        //         format!("{}:{}", id, version)
-        //     }
-        // }
-
-        // TODO: Write Version to Version Set in redis under key <JSONModelKey>:versions
-        // TODO: Write Latest to key in redus under <JSONModelKey>:latest_version
-
-        state
-            .clone()
+        State::to_dto(state.clone(), version.clone())
             .save(&mut conn)
             .await
             .map_err(RedisRepositoryError::SaveError)
@@ -109,7 +148,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use serde::{Serialize, Deserialize};
+    use serde::{Deserialize, Serialize};
 
     use super::*;
 
