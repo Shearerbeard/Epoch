@@ -1,11 +1,8 @@
 use std::{fmt::Debug, marker::PhantomData};
 
 use async_trait::async_trait;
-use redis_om::{
-    redis::{aio::MultiplexedConnection, streams::StreamId},
-    Client, JsonModel, RedisError,
-};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use redis_om::{redis::aio::MultiplexedConnection, Client, JsonModel, RedisError};
+use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
 use crate::repository::{
@@ -27,8 +24,6 @@ pub enum RedisRepositoryError {
     SaveError(RedisError),
     #[error("Could not parse event {0:?}")]
     ParseEvent(RedisError),
-    #[error("Could not use data transfer type")]
-    RedisDTO(RedisJsonDTOError),
 }
 
 #[derive(Debug, Error)]
@@ -44,7 +39,7 @@ pub trait VersionedRedisJsonDTO<Data: Clone> {
     fn new(id: String, version: RedisVersion, data: Data) -> Self;
 }
 
-pub trait WithVersionedRedisDTO<JM, DTOErr>: Sized + Clone
+pub trait WithVersionedRedisDTO<JM>: Sized + Clone
 where
     JM: JsonModel + VersionedRedisJsonDTO<Self>,
 {
@@ -101,7 +96,7 @@ where
         + Clone
         + StateStream<String>
         + Debug
-        + WithVersionedRedisDTO<JM, RedisJsonDTOError>,
+        + WithVersionedRedisDTO<JM>,
     JM: Send + Sync + JsonModel + VersionedRedisJsonDTO<State>,
 {
     type Version = RedisVersion;
@@ -180,7 +175,7 @@ mod tests {
         }
     }
 
-    impl WithVersionedRedisDTO<TestModelDTO, RedisJsonDTOError> for TestModel {
+    impl WithVersionedRedisDTO<TestModelDTO> for TestModel {
         fn to_dto(&self, version: RedisVersion) -> TestModelDTO {
             TestModelDTO::new(self.id.clone(), version, self.to_owned())
         }
