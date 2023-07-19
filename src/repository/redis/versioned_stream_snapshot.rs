@@ -156,13 +156,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use assert_matches::assert_matches;
     use serde::{Deserialize, Serialize};
 
     use super::*;
 
-    const TS1: &str = "1686947654949-0";
-    // const TS2: &str = "1686947654949-1";
+    const TS: &str = "1686947654949-0";
 
     #[derive(JsonModel, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     struct TestModel {
@@ -229,13 +227,17 @@ mod tests {
             RedisJSONSnapshotRepository::new(&client);
 
         let res1 = repository
-            .save(&RedisVersion::try_from(TS1).unwrap(), &test)
+            .save(&RedisVersion::try_from(TS).unwrap(), &test)
             .await
             .unwrap();
 
         let (res2, version) = repository.reify(Some(test.to_stream_id())).await.unwrap();
 
-        assert_matches!(version, RepositoryVersion::Exact(rv));
-        assert_eq!(res1, res2);
+        if let RepositoryVersion::Exact(v) = version {
+            assert_eq!(v.to_string(), TS.to_string());
+            assert_eq!(res1, res2);
+        } else {
+            panic!("Should return exact repository version")
+        }
     }
 }
