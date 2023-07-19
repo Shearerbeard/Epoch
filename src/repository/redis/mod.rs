@@ -2,6 +2,7 @@ use std::{error::Error, fmt::Debug};
 
 use redis_om::RedisError;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod versioned_event;
@@ -11,7 +12,7 @@ pub mod versioned_stream_snapshot;
 pub enum RedisRepositoryError<DTOErr: Error + Debug> {
     #[error("Redis connection error {0:?}")]
     ConnectionError(RedisError),
-    #[error("Redis Version Error {0:?}")] 
+    #[error("Redis Version Error {0:?}")]
     Version(RedisVersionError),
     #[error("Could not read stream: {0:?}")]
     ReadError(RedisError),
@@ -29,7 +30,7 @@ pub enum RedisVersionError {
     ParseVersion(String),
 }
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, Serialize, Deserialize)]
 pub struct RedisVersion {
     timestamp: usize,
     version: usize,
@@ -57,8 +58,7 @@ impl PartialOrd for RedisVersion {
     }
 }
 
-impl TryFrom<&str> for RedisVersion
-{
+impl TryFrom<&str> for RedisVersion {
     type Error = RedisVersionError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {

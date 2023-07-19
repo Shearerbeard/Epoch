@@ -37,26 +37,24 @@ pub enum RedisJsonDTOError {
     Deserialize,
 }
 
-pub trait VersionedStateModel<Data> {
+pub trait VersionedRedisJsonDTO<Data: Clone> {
     fn id(&self) -> String;
     fn version(&self) -> RedisVersion;
     fn data(&self) -> Data;
     fn new(id: String, version: RedisVersion, data: Data) -> Self;
 }
 
-pub trait RedisJsonDTO<JM, Data, DTOErr>
+pub trait WithVersionedRedisDTO<JM, DTOErr>: Sized + Clone
 where
-    JM: JsonModel + VersionedStateModel<Data>,
-    Data: Serialize + DeserializeOwned + Debug + Sized,
+    JM: JsonModel + VersionedRedisJsonDTO<Self>,
 {
-    fn to_dto(data: Data, version: RedisVersion) -> JM;
-    fn try_from_dto(model: &JM) -> Result<Data, DTOErr>;
+    fn to_dto(&self, version: RedisVersion) -> JM;
 }
 
 pub struct RedisJSONSnapshotRepository<State, JM>
 where
-    State: Send + Sync,
-    JM: JsonModel + VersionedStateModel<State> + Send + Sync,
+    State: Send + Sync + Clone,
+    JM: JsonModel + VersionedRedisJsonDTO<State> + Send + Sync,
 {
     client: Client,
     snapshot_expiry: Option<usize>,
@@ -66,8 +64,8 @@ where
 
 impl<State, JM> RedisJSONSnapshotRepository<State, JM>
 where
-    State: Send + Sync,
-    JM: JsonModel + VersionedStateModel<State> + Send + Sync,
+    State: Send + Sync + Clone,
+    JM: JsonModel + VersionedRedisJsonDTO<State> + Send + Sync,
 {
     pub async fn get_connection(
         &self,
@@ -79,6 +77,15 @@ where
             .map_err(|e| {
                 VersionedRepositoryError::RepoErr(RedisRepositoryError::ConnectionError(e))
             })
+    }
+
+    pub fn new(client: &Client) -> Self {
+        Self {
+            client: client.clone(),
+            snapshot_expiry: None,
+            _st: PhantomData::default(),
+            _jm: PhantomData::default(),
+        }
     }
 }
 
@@ -94,8 +101,8 @@ where
         + Clone
         + StateStream<String>
         + Debug
-        + RedisJsonDTO<JM, State, RedisJsonDTOError>,
-    JM: Send + Sync + JsonModel + VersionedStateModel<State>,
+        + WithVersionedRedisDTO<JM, RedisJsonDTOError>,
+    JM: Send + Sync + JsonModel + VersionedRedisJsonDTO<State>,
 {
     type Version = RedisVersion;
     type Err = RedisRepositoryError;
@@ -128,7 +135,8 @@ where
     ) -> Result<State, VersionedRepositoryError<Self::Err, Self::Version>> {
         let mut conn = self.get_connection().await?;
 
-        State::to_dto(state.clone(), version.clone())
+        state
+            .to_dto(version.clone())
             .save(&mut conn)
             .await
             .map_err(RedisRepositoryError::SaveError)
@@ -148,13 +156,54 @@ where
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
     use serde::{Deserialize, Serialize};
 
     use super::*;
 
-    #[derive(JsonModel, Serialize, Deserialize)]
+    const TS1: &str = "1686947654949-0";
+    // const TS2: &str = "1686947654949-1";
+
+    #[derive(JsonModel, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     struct TestModel {
         id: String,
+    }
+
+    #[derive(JsonModel, Serialize, Deserialize)]
+    struct TestModelDTO {
+        id: String,
+        version: RedisVersion,
+        data: TestModel,
+    }
+
+    impl StateStream<String> for TestModel {
+        fn to_stream_id(&self) -> String {
+            self.id.clone()
+        }
+    }
+
+    impl WithVersionedRedisDTO<TestModelDTO, RedisJsonDTOError> for TestModel {
+        fn to_dto(&self, version: RedisVersion) -> TestModelDTO {
+            TestModelDTO::new(self.id.clone(), version, self.to_owned())
+        }
+    }
+
+    impl VersionedRedisJsonDTO<TestModel> for TestModelDTO {
+        fn id(&self) -> String {
+            self.id.clone()
+        }
+
+        fn version(&self) -> RedisVersion {
+            self.version.clone()
+        }
+
+        fn data(&self) -> TestModel {
+            self.data.clone()
+        }
+
+        fn new(id: String, version: RedisVersion, data: TestModel) -> Self {
+            Self { id, version, data }
+        }
     }
 
     async fn client_from_environment() -> Client {
@@ -171,12 +220,22 @@ mod tests {
     #[actix_rt::test]
     async fn test_json() {
         let client = client_from_environment().await;
-        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
 
-        let mut test = TestModel {
+        let test = TestModel {
             id: "1".to_string(),
         };
 
-        let _ = test.save(&mut conn).await.unwrap();
+        let mut repository: RedisJSONSnapshotRepository<TestModel, TestModelDTO> =
+            RedisJSONSnapshotRepository::new(&client);
+
+        let res1 = repository
+            .save(&RedisVersion::try_from(TS1).unwrap(), &test)
+            .await
+            .unwrap();
+
+        let (res2, version) = repository.reify(Some(test.to_stream_id())).await.unwrap();
+
+        assert_matches!(version, RepositoryVersion::Exact(rv));
+        assert_eq!(res1, res2);
     }
 }
