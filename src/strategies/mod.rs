@@ -158,6 +158,18 @@ where
 }
 
 #[async_trait]
+pub trait LoadDecideAppendWithSnapshot
+where
+    <Self::Decide as Evolver>::State: Send + Sync + Debug,
+    <Self::Decide as DeciderWithContext>::Ctx: Send + Sync + Debug,
+    <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
+    <Self::Decide as Evolver>::Evt: Clone + Send + Sync + Debug,
+    <Self::Decide as DeciderWithContext>::Err: Send + Sync + Debug,
+{
+    type Decide: DeciderWithContext + Send + Sync;
+}
+
+#[async_trait]
 pub trait ReifyDecideSave
 where
     <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx: Send + Sync,
