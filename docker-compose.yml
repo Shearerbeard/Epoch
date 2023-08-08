@@ -5,7 +5,7 @@ services:
     restart: always
     ports:
       - '6379:6379' 
-    command: redis-server --save 20 1 --loglevel warning --loadmodule /usr/lib/redis/modules/rejson.so
+    command: redis-server --save 120 1 --appendonly yes --loglevel warning --loadmodule /usr/lib/redis/modules/rejson.so
     volumes:
       - redis:/data
   eventstore.db:

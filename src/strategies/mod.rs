@@ -4,11 +4,12 @@ use std::{fmt::Debug, thread};
 use crate::{
     decider::{DeciderWithContext, Evolver},
     repository::{
-        self, event::VersionedRepositoryError, state::VersionedStateRepository, RepositoryVersion,
+        self, state::VersionedStateRepository, RepositoryVersion, StreamIdFromEvent,
+        VersionedRepositoryError,
     },
 };
 use async_trait::async_trait;
-use repository::event::{StreamIdFromEvent, VersionedEventRepositoryWithStreams};
+use repository::event::VersionedEventRepositoryWithStreams;
 
 #[async_trait]
 pub trait StateFromEventRepository
@@ -18,12 +19,12 @@ where
 {
     type Ev: Evolver + Send + Sync;
 
-    async fn load<'a, Err>(
+    async fn load<'a, Err, V>(
         initial: <Self::Ev as Evolver>::State,
-        event_repository: &(impl VersionedEventRepositoryWithStreams<'a, <Self::Ev as Evolver>::Evt, Err>
+        event_repository: &(impl VersionedEventRepositoryWithStreams<'a, <Self::Ev as Evolver>::Evt, Err, Version = V>
               + Send
               + Sync),
-    ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err>>
+    ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err, V>>
     where
         Err: Debug + Send + Sync,
     {
@@ -35,17 +36,18 @@ where
             .fold(initial, Self::Ev::evolve))
     }
 
-    async fn load_by_id<'a, Err, StreamId>(
+    async fn load_by_id<'a, Err, StreamId, Version>(
         initial: <Self::Ev as Evolver>::State,
         event_repository: &(impl VersionedEventRepositoryWithStreams<
             'a,
             <Self::Ev as Evolver>::Evt,
             Err,
             StreamId = StreamId,
+            Version = Version,
         > + Send
               + Sync),
         stream_id: &StreamId,
-    ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err>>
+    ) -> Result<<Self::Ev as Evolver>::State, VersionedRepositoryError<Err, Version>>
     where
         Err: Debug + Send + Sync,
         StreamId: Send + Sync,
@@ -70,8 +72,8 @@ where
 {
     type Decide: DeciderWithContext + Send + Sync;
 
-    fn to_lda_error<DecErr: Send + Sync, RepoErr: Send + Sync>(
-        err: VersionedRepositoryError<RepoErr>,
+    fn to_lda_error<DecErr: Send + Sync, RepoErr: Send + Sync, Version: Send + Sync>(
+        err: VersionedRepositoryError<RepoErr, Version>,
     ) -> LoadDecideAppendError<DecErr, RepoErr> {
         match err {
             VersionedRepositoryError::VersionConflict(_) => LoadDecideAppendError::VersionError,
@@ -156,6 +158,18 @@ where
 }
 
 #[async_trait]
+pub trait LoadDecideAppendWithSnapshot
+where
+    <Self::Decide as Evolver>::State: Send + Sync + Debug,
+    <Self::Decide as DeciderWithContext>::Ctx: Send + Sync + Debug,
+    <Self::Decide as DeciderWithContext>::Cmd: Send + Sync + Debug,
+    <Self::Decide as Evolver>::Evt: Clone + Send + Sync + Debug,
+    <Self::Decide as DeciderWithContext>::Err: Send + Sync + Debug,
+{
+    type Decide: DeciderWithContext + Send + Sync;
+}
+
+#[async_trait]
 pub trait ReifyDecideSave
 where
     <<Self as ReifyDecideSave>::Decide as DeciderWithContext>::Ctx: Send + Sync,
@@ -214,7 +228,7 @@ where
 }
 
 #[derive(Debug)]
-pub struct CommandResponse<D: DeciderWithContext + Debug>(
+pub struct CommandResponse<E: Debug, S: Debug, D: DeciderWithContext<State = S, Evt = E>>(
     <D as DeciderWithContext>::Cmd,
     Vec<<D as Evolver>::Evt>,
     <D as Evolver>::State,
@@ -236,7 +250,11 @@ where
         state: &<<Self as DecideEvolveWithCommandResponse>::Decide as Evolver>::State,
         ctx: &<<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Ctx,
     ) -> Result<
-        CommandResponse<<Self as DecideEvolveWithCommandResponse>::Decide>,
+        CommandResponse<
+            <<Self as DecideEvolveWithCommandResponse>::Decide as Evolver>::Evt,
+            <<Self as DecideEvolveWithCommandResponse>::Decide as Evolver>::State,
+            <Self as DecideEvolveWithCommandResponse>::Decide,
+        >,
         <<Self as DecideEvolveWithCommandResponse>::Decide as DeciderWithContext>::Err,
     > {
         let evts = <Self::Decide as DeciderWithContext>::decide(ctx, state, &cmd)?;

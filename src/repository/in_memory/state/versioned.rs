@@ -6,9 +6,7 @@ use std::{
 use async_trait::async_trait;
 
 use crate::repository::{
-    event::{VersionDiff, VersionedRepositoryError},
-    state::VersionedStateRepository,
-    RepositoryVersion,
+    state::VersionedStateRepository, RepositoryVersion, VersionDiff, VersionedRepositoryError,
 };
 
 #[derive(Debug, Clone)]
@@ -30,8 +28,8 @@ where
     }
 
     fn version_to_usize(
-        version: &RepositoryVersion,
-    ) -> Result<usize, VersionedRepositoryError<Error>> {
+        version: &RepositoryVersion<usize>,
+    ) -> Result<usize, VersionedRepositoryError<Error, usize>> {
         match version {
             RepositoryVersion::Exact(exact) => Ok(exact.to_owned()),
             RepositoryVersion::NoStream => Ok(0),
@@ -43,9 +41,9 @@ where
     }
 
     fn version_check(
-        current: &RepositoryVersion,
-        incoming: &RepositoryVersion,
-    ) -> Result<(), VersionedRepositoryError<Error>> {
+        current: &RepositoryVersion<usize>,
+        incoming: &RepositoryVersion<usize>,
+    ) -> Result<(), VersionedRepositoryError<Error, usize>> {
         if Self::version_to_usize(current)? == Self::version_to_usize(incoming)? {
             Ok(())
         } else {
@@ -57,8 +55,8 @@ where
     }
 
     fn bump_version(
-        version: &RepositoryVersion,
-    ) -> Result<RepositoryVersion, VersionedRepositoryError<Error>> {
+        version: &RepositoryVersion<usize>,
+    ) -> Result<RepositoryVersion<usize>, VersionedRepositoryError<Error, usize>> {
         Ok(RepositoryVersion::Exact(
             Self::version_to_usize(version)? + 1,
         ))
@@ -70,9 +68,9 @@ impl<'a, State> VersionedStateRepository<'a, State, Error> for InMemoryStateRepo
 where
     State: Debug + Clone + Send + Sync,
 {
-    type Version = RepositoryVersion;
+    type Version = usize;
 
-    async fn reify(&self) -> Result<(State, Self::Version), Error> {
+    async fn reify(&self) -> Result<(State, RepositoryVersion<Self::Version>), Error> {
         let handle = self.state.lock().unwrap();
 
         Ok((handle.data.to_owned(), handle.version))
@@ -80,9 +78,9 @@ where
 
     async fn save(
         &mut self,
-        version: &Self::Version,
+        version: &RepositoryVersion<Self::Version>,
         state: &State,
-    ) -> Result<State, VersionedRepositoryError<Error>> {
+    ) -> Result<State, VersionedRepositoryError<Error, usize>> {
         let handle_lock = self.state.lock();
         let mut handle = handle_lock.unwrap();
 
@@ -103,7 +101,7 @@ where
     State: Debug,
 {
     data: State,
-    version: RepositoryVersion,
+    version: RepositoryVersion<usize>,
 }
 
 impl<State> VersionedState<State>
@@ -126,7 +124,10 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use crate::test_helpers::{
-        deciders::user::UserDeciderState, repository::test_versioned_state_repository,
+        deciders::user::UserDeciderState,
+        repository::{
+            versioned_event_repository_with_streams_occ_spec, vesioned_state_repository_spec,
+        },
     };
 
     use super::*;
@@ -136,6 +137,6 @@ mod tests {
         let state_repository: InMemoryStateRepository<UserDeciderState> =
             InMemoryStateRepository::new(UserDeciderState::default());
 
-        test_versioned_state_repository(state_repository).await;
+        vesioned_state_repository_spec(state_repository).await;
     }
 }

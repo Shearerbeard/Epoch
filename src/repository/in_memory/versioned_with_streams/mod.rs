@@ -9,8 +9,8 @@ use std::{
 use crate::{
     decider::Event,
     repository::{
-        event::{VersionDiff, VersionedEventRepositoryWithStreams, VersionedRepositoryError},
-        RepositoryVersion,
+        event::VersionedEventRepositoryWithStreams, RepositoryVersion, VersionDiff,
+        VersionedRepositoryError,
     },
 };
 
@@ -19,7 +19,7 @@ use error::Error;
 
 pub mod error;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InMemoryEventRepository<E>
 where
     E: Event + Sync + Send + Debug,
@@ -62,14 +62,14 @@ where
         self.state.get(key).unwrap()
     }
 
-    fn index_from_version(version: &RepositoryVersion) -> usize {
+    fn index_from_version(version: &RepositoryVersion<usize>) -> usize {
         match version {
             RepositoryVersion::Exact(v) => *v,
             _ => 0,
         }
     }
 
-    fn version_from_index(index: &usize) -> RepositoryVersion {
+    fn version_from_index(index: &usize) -> RepositoryVersion<usize> {
         RepositoryVersion::Exact(*index)
     }
 }
@@ -80,18 +80,19 @@ where
     E: Event + Sync + Send + Clone + Debug,
 {
     type StreamId = String;
+    type Version = usize;
 
     async fn load(
         &self,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
+    ) -> Result<(Vec<E>, RepositoryVersion<usize>), VersionedRepositoryError<Error, usize>> {
         self.load_from_version(&RepositoryVersion::Any, id).await
     }
     async fn load_from_version(
         &self,
-        version: &RepositoryVersion,
+        version: &RepositoryVersion<usize>,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>> {
+    ) -> Result<(Vec<E>, RepositoryVersion<usize>), VersionedRepositoryError<Error, usize>> {
         let stream_key = self.get_stream_key(id);
 
         if let Some(m) = self.state.get(&stream_key) {
@@ -110,10 +111,10 @@ where
     }
     async fn append(
         &mut self,
-        version: &RepositoryVersion,
+        version: &RepositoryVersion<usize>,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Error>>
+    ) -> Result<(Vec<E>, RepositoryVersion<usize>), VersionedRepositoryError<Error, usize>>
     where
         'a: 'async_trait,
         E: 'async_trait,
@@ -148,7 +149,7 @@ where
     }
 }
 
-impl From<Error> for VersionedRepositoryError<Error> {
+impl From<Error> for VersionedRepositoryError<Error, usize> {
     fn from(value: Error) -> Self {
         let Error::VersionConflict(diff) = value;
 
@@ -159,7 +160,7 @@ impl From<Error> for VersionedRepositoryError<Error> {
 #[cfg(test)]
 mod tests {
     use crate::test_helpers::{
-        deciders::user::UserEvent, repository::test_versioned_event_repository_with_streams,
+        deciders::user::UserEvent, repository::versioned_event_repository_with_streams_spec,
     };
 
     use super::InMemoryEventRepository;
@@ -169,6 +170,6 @@ mod tests {
     #[actix_rt::test]
     async fn repository_spec_test() {
         let event_repository = InMemoryEventRepository::<UserEvent>::new(BASE_STREAM);
-        let _ = test_versioned_event_repository_with_streams(event_repository).await;
+        let _ = versioned_event_repository_with_streams_spec(event_repository).await;
     }
 }

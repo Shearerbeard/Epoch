@@ -1,9 +1,8 @@
 use std::fmt::Debug;
 
 use async_trait::async_trait;
-use thiserror::Error;
 
-use super::RepositoryVersion;
+use super::{RepositoryVersion, VersionedRepositoryError};
 use crate::decider::Event;
 
 #[async_trait]
@@ -39,65 +38,39 @@ where
 #[async_trait]
 pub trait VersionedEventRepositoryWithStreams<'a, E, Err>
 where
-    E: Event + Sync + Send + Debug,
+    E: Event + Sync + Send + Debug, // TODO: Make <E> an associated type
     Err: Debug + Send + Sync,
 {
     type StreamId: Send + Sync;
+    type Version: Send + Sync + Eq + Ord;
 
     async fn load(
         &self,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Err>>;
+    ) -> Result<
+        (Vec<E>, RepositoryVersion<Self::Version>),
+        VersionedRepositoryError<Err, Self::Version>,
+    >;
 
     async fn load_from_version(
         &self,
-        version: &RepositoryVersion,
+        version: &RepositoryVersion<Self::Version>,
         id: Option<&Self::StreamId>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Err>>;
+    ) -> Result<
+        (Vec<E>, RepositoryVersion<Self::Version>),
+        VersionedRepositoryError<Err, Self::Version>,
+    >;
 
     async fn append(
         &mut self,
-        version: &RepositoryVersion,
+        version: &RepositoryVersion<Self::Version>,
         stream: &Self::StreamId,
         events: &Vec<E>,
-    ) -> Result<(Vec<E>, RepositoryVersion), VersionedRepositoryError<Err>>
+    ) -> Result<
+        (Vec<E>, RepositoryVersion<Self::Version>),
+        VersionedRepositoryError<Err, Self::Version>,
+    >
     where
         'a: 'async_trait,
         E: 'async_trait;
-}
-
-#[derive(Debug, Error)]
-pub enum VersionedRepositoryError<RepoErr> {
-    #[error("Version conflict {0:?}")]
-    VersionConflict(VersionDiff),
-    #[error("Repository Error {0}")]
-    RepoErr(RepoErr),
-}
-
-pub trait StreamIdFromEvent<Evt: Event>: Sized {
-    fn from(e: Evt) -> Self {
-        Self::event_entity_id_into(e.get_id())
-    }
-
-    fn event_entity_id_into(id: <Evt as Event>::EntityId) -> Self;
-}
-
-#[derive(Debug)]
-pub struct VersionDiff {
-    expected: RepositoryVersion,
-    actual: RepositoryVersion,
-}
-
-impl VersionDiff {
-    pub fn new(expected: RepositoryVersion, actual: RepositoryVersion) -> Self {
-        Self { expected, actual }
-    }
-
-    pub fn expected(&self) -> RepositoryVersion {
-        self.expected.to_owned()
-    }
-
-    pub fn actual(&self) -> RepositoryVersion {
-        self.actual.to_owned()
-    }
 }
