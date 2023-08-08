@@ -2,6 +2,7 @@ use std::{error::Error, fmt::Debug};
 
 use redis_om::RedisError;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod versioned_event;
@@ -29,7 +30,7 @@ pub enum RedisVersionError {
     ParseVersion(String),
 }
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, Serialize, Deserialize)]
 pub struct RedisVersion {
     timestamp: usize,
     version: usize,
