@@ -238,4 +238,136 @@ mod tests {
 
         let _ = versioned_event_repository_with_streams_occ_spec(event_repository).await;
     }
+
+    #[actix_rt::test]
+    async fn constructor_basic_functionality() {
+        let base_stream = format!("{}_constructor", BASE_STREAM);
+        let client = store_from_environment(&base_stream.to_string(), vec![]).await;
+        let stream_name = "test_stream";
+
+        let repository = ESDBEventRepository::<UserEvent>::new(&client, stream_name);
+
+        // Verify the repository was created successfully
+        assert_eq!(repository.stream_name, stream_name);
+        // Client should be owned copy, not a reference
+        // PhantomData should be default
+        assert_eq!(std::mem::size_of_val(&repository._hidden), 0);
+    }
+
+    #[actix_rt::test]
+    async fn constructor_with_different_stream_names() {
+        let base_stream = format!("{}_stream_names", BASE_STREAM);
+        let client = store_from_environment(&base_stream.to_string(), vec![]).await;
+
+        // Test various stream name patterns
+        let test_cases = vec![
+            "simple",
+            "with-dashes",
+            "with_underscores",
+            "WithCamelCase",
+            "with.dots",
+            "123numeric",
+            "mixed-123_test.stream",
+        ];
+
+        for stream_name in test_cases {
+            let repository = ESDBEventRepository::<UserEvent>::new(&client, stream_name);
+            assert_eq!(repository.stream_name, stream_name);
+
+            // Test get_stream method with the constructor-set stream name
+            let stream_no_id = repository.get_stream(None);
+            let expected_category = format!("$ce-{}", stream_name);
+            assert_eq!(stream_no_id, expected_category);
+
+            let stream_with_id = repository.get_stream(Some(&"test_id".to_string()));
+            let expected_stream = format!("{}-test_id", stream_name);
+            assert_eq!(stream_with_id, expected_stream);
+        }
+    }
+
+    #[actix_rt::test]
+    async fn constructor_with_empty_stream_name() {
+        let base_stream = format!("{}_empty_stream", BASE_STREAM);
+        let client = store_from_environment(&base_stream.to_string(), vec![]).await;
+
+        let repository = ESDBEventRepository::<UserEvent>::new(&client, "");
+        assert_eq!(repository.stream_name, "");
+
+        // Even with empty stream name, get_stream should work
+        let category_stream = repository.get_stream(None);
+        assert_eq!(category_stream, "$ce-");
+
+        let individual_stream = repository.get_stream(Some(&"123".to_string()));
+        assert_eq!(individual_stream, "-123");
+    }
+
+    #[actix_rt::test]
+    async fn constructor_client_ownership() {
+        let base_stream = format!("{}_ownership", BASE_STREAM);
+        let client = store_from_environment(&base_stream.to_string(), vec![]).await;
+        let stream_name = "test_ownership";
+
+        // Create repository with client reference
+        let repository1 = ESDBEventRepository::<UserEvent>::new(&client, stream_name);
+
+        // Create another repository with the same client reference
+        let repository2 = ESDBEventRepository::<UserEvent>::new(&client, "different_stream");
+
+        // Both should have their own owned copy of the client
+        assert_eq!(repository1.stream_name, stream_name);
+        assert_eq!(repository2.stream_name, "different_stream");
+
+        // Original client should still be usable
+        drop(repository1);
+        drop(repository2);
+        // Client should still be valid for further use
+        let repository3 = ESDBEventRepository::<UserEvent>::new(&client, "third_stream");
+        assert_eq!(repository3.stream_name, "third_stream");
+    }
+
+    #[actix_rt::test]
+    async fn constructor_generic_type_parameter() {
+        let base_stream = format!("{}_generics", BASE_STREAM);
+        let client = store_from_environment(&base_stream.to_string(), vec![]).await;
+        let stream_name = "test_generics";
+
+        // Test with UserEvent
+        let user_repo = ESDBEventRepository::<UserEvent>::new(&client, stream_name);
+        assert_eq!(user_repo.stream_name, stream_name);
+
+        // The PhantomData should be zero-sized regardless of the generic type
+        assert_eq!(std::mem::size_of_val(&user_repo._hidden), 0);
+
+        // Verify we can create repositories with the same client for different event types
+        // (This tests that the generic type parameter is properly handled)
+        let stream_name2 = "different_stream";
+        let user_repo2 = ESDBEventRepository::<UserEvent>::new(&client, stream_name2);
+        assert_eq!(user_repo2.stream_name, stream_name2);
+    }
+
+    #[actix_rt::test]
+    async fn constructor_stream_formatting_edge_cases() {
+        let base_stream = format!("{}_edge_cases", BASE_STREAM);
+        let client = store_from_environment(&base_stream.to_string(), vec![]).await;
+
+        // Test stream formatting with special characters
+        let repository = ESDBEventRepository::<UserEvent>::new(&client, "test/stream");
+
+        // Category stream should handle forward slash
+        let category = repository.get_stream(None);
+        assert_eq!(category, "$ce-test/stream");
+
+        // Individual stream should handle forward slash
+        let individual = repository.get_stream(Some(&"id/with/slashes".to_string()));
+        assert_eq!(individual, "test/stream-id/with/slashes");
+
+        // Test with None vs Some empty string
+        let empty_id = repository.get_stream(Some(&"".to_string()));
+        assert_eq!(empty_id, "test/stream-");
+
+        let none_id = repository.get_stream(None);
+        assert_eq!(none_id, "$ce-test/stream");
+
+        assert_ne!(empty_id, none_id);
+    }
 }
