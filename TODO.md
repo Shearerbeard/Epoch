@@ -7,14 +7,49 @@
 
 ---
 
+## Next Session Focus
+
+**Recommended Starting Point**: Update README.md to use Decider pattern
+
+**Context**: The README currently shows outdated EventContext API examples. This is a major known issue that affects user onboarding and public perception. Updating it to use the current Decider/Evolver pattern will:
+- Fix the primary documentation issue
+- Provide users with correct examples
+- Demonstrate the Railway-Oriented Programming patterns we've documented
+- Take approximately 2 hours
+
+**Preparation**:
+1. Review current README.md examples
+2. Check src/test_helpers/deciders.rs for correct patterns
+3. Reference coding-style-guide.md for conventions
+4. Ensure all examples compile and test
+
+**Alternative**: If you prefer to work on code rather than documentation, "Replace thread::sleep with tokio::sleep" is a 1-hour technical improvement that addresses a known issue in the retry logic.
+
+---
+
 ## Current Sprint
 
 ### In Progress
 - [ ] None currently
 
-### Ready to Start
-- [ ] Update README.md to use Decider pattern (not EventContext)
-- [ ] Create examples directory with compilable examples
+### Ready to Start (Recommended Next Steps)
+1. [ ] Update README.md to use Decider pattern (not EventContext)
+   - Location: README.md
+   - Reason: Major known issue, users see outdated API examples
+   - Blocks: Public perception, user onboarding
+   - Effort: ~2 hours
+
+2. [ ] Create examples directory with compilable examples
+   - Location: Create examples/ directory
+   - Reason: Helps users understand patterns in practice
+   - Contents: User domain, Truck domain, Expense domain examples
+   - Effort: ~3 hours
+
+3. [ ] Replace thread::sleep with tokio::sleep in retry logic
+   - Location: src/strategies/mod.rs
+   - Reason: Better async runtime integration
+   - Blocks: Production-grade async usage
+   - Effort: ~1 hour
 
 ---
 
@@ -126,14 +161,33 @@
 
 ## Completed
 
-### Recently Completed
+### Recently Completed (2025-11-21 Session)
 - [x] Create comprehensive internal documentation structure
-- [x] Add .claude/context.md for LLM-assisted development
-- [x] Document Railway-Oriented Programming patterns
-- [x] Add "Making Illegal States Unrepresentable" guide
-- [x] Create coding style guide with anti-patterns
-- [x] Add CHANGELOG.md
-- [x] Add TODO.md (this file)
+  - Added docs/internal/planning/ directory
+  - Created epoch-architecture-philosophy.md
+  - Created coding-style-guide.md
+  - Created documentation-guidelines.md
+  - Created docs/README.md overview
+
+- [x] Integrate trucker_buddy_rs coding philosophy
+  - Added Railway-Oriented Programming patterns
+  - Added "Making Illegal States Unrepresentable" principle
+  - Added protected concrete types (smart constructors)
+  - Added NO EMOJIS documentation standard
+  - Enhanced error handling guidelines
+
+- [x] Add TODO and CHANGELOG workflow system
+  - Created TODO.md for work item tracking
+  - Created CHANGELOG.md following Keep a Changelog format
+  - Created docs/internal/todo-changelog-workflow.md
+  - Created .claude/session-start.md checklist
+  - Updated .claude/context.md with Session Start Protocol
+
+- [x] Set up automatic LLM session support
+  - Session start protocol in context.md
+  - Workflow documentation for daily/weekly/release processes
+  - Templates for TODO items and CHANGELOG entries
+  - Integration with git workflow
 
 ---
 
