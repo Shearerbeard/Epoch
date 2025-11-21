@@ -10,6 +10,29 @@
 - **Core Pattern**: Decider Pattern (pure functional event sourcing)
 - **Rust Edition**: 2021
 
+## Session Start Protocol
+
+**At the start of each session, review**:
+
+1. **[TODO.md](../TODO.md)** - Current work items and priorities
+   - Check "Current Sprint" section for active work
+   - Review "High Priority" for next tasks
+   - Note any blockers in "Known Issues"
+
+2. **[CHANGELOG.md](../CHANGELOG.md)** - Recent changes
+   - Review "Unreleased" section for latest updates
+   - Understand what changed since last session
+
+3. **[Session Start Checklist](.claude/session-start.md)** - Detailed session setup
+   - Verify development environment
+   - Review core principles
+   - Set session goals
+
+**Throughout the session**:
+- Update TODO.md when starting/completing work
+- Add to CHANGELOG.md for user-facing changes
+- Keep both files synchronized with work progress
+
 ## Essential Reading
 
 Before making changes, review these internal documents:
