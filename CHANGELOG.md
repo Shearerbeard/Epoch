@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Release workflow with 10-step process
   - LLM-assisted development patterns
   - Templates for TODO items and CHANGELOG entries
+- PostgreSQL repository implementation planning document (docs/internal/planning/postgres-repository-implementation.md)
+  - Comprehensive 4-phase implementation plan (8-12 hours total)
+  - Database schema design with JSONB event storage
+  - Trait implementation patterns following ESDB and Redis
+  - Connection pooling strategy with bb8
+  - Optimistic concurrency control using sequence numbers
+  - Generic spec test integration approach
+  - Migration guides from in-memory, ESDB, and Redis backends
+  - Railway-Oriented Programming error handling patterns
+  - Performance considerations and indexing strategy
 
 ### Changed
 - Enhanced coding style guide with trucker_buddy_rs patterns

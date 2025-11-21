@@ -51,6 +51,16 @@
    - Blocks: Production-grade async usage
    - Effort: ~1 hour
 
+4. [ ] Implement PostgreSQL repository backend
+   - Location: Create src/repository/postgres/
+   - Reason: Add relational database backend for broader adoption
+   - Planning: Complete planning doc available
+   - Effort: ~8-12 hours (can be done in phases)
+   - Phase 1: Foundation (2-3 hours) - Module structure, dependencies
+   - Phase 2: Core implementation (3-4 hours) - Repository trait
+   - Phase 3: Testing (2-3 hours) - Spec tests, integration tests
+   - Phase 4: Documentation (1-2 hours) - README examples, migration guide
+
 ---
 
 ## High Priority
@@ -69,6 +79,13 @@
 - [ ] Add code coverage reporting
 
 ### Features
+- [ ] Implement PostgreSQL repository backend
+  - Location: Create src/repository/postgres/
+  - Planning: docs/internal/planning/postgres-repository-implementation.md
+  - Reason: Provide relational database option for event sourcing
+  - Dependencies: tokio-postgres, bb8, bb8-postgres
+  - Effort: ~8-12 hours (4 phases)
+  - Includes: Connection pooling, optimistic concurrency, generic spec tests
 - [ ] Implement LoadDecideAppendWithSnapshot strategy
 - [ ] Add projection pattern for read models
 - [ ] Add event upcasting support for schema evolution
@@ -188,6 +205,14 @@
   - Workflow documentation for daily/weekly/release processes
   - Templates for TODO items and CHANGELOG entries
   - Integration with git workflow
+
+- [x] Plan PostgreSQL repository implementation
+  - Created comprehensive planning document
+  - Researched ESDB and Redis patterns
+  - Reviewed Thalo PostgreSQL implementation
+  - Defined schema, trait implementation, testing strategy
+  - Documented 4-phase implementation plan
+  - Ready for development
 
 ---
 
