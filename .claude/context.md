@@ -26,6 +26,35 @@ Before making changes, review these internal documents:
    - Error handling strategy
    - Testing patterns
 
+## Core Philosophical Principles
+
+**Influenced by Scott Wlaschin's "Domain Modeling Made Functional"**
+
+### 1. Make Illegal States Unrepresentable
+
+**Core Mantra**: "Make impossible states unrepresentable" - Yaron Minsky
+
+- Use **protected concrete types** (smart constructors) with private fields
+- All domain types validate in constructors, return `Result`
+- **No primitive obsession**: Wrap all domain concepts (no raw String, Uuid, usize)
+- State machines with enums for explicit transitions
+
+### 2. Railway-Oriented Programming
+
+**Error Handling Philosophy**:
+- All fallible operations return `Result<T, E>`
+- **Never panic** in business logic (except Evolvers where events are guaranteed valid)
+- Use `?` operator for clean error propagation
+- Chain validations for self-documenting code
+- Custom error types with `thiserror`
+
+### 3. NO EMOJIS
+
+**Strict Rule**: Never use emojis in code, comments, commit messages, or documentation.
+- Professional codebase
+- Consistent tone
+- Avoids encoding issues
+
 ## Core Architecture Summary
 
 ### The Decider Pattern (Central Concept)
@@ -264,11 +293,15 @@ cargo clippy -- -D warnings
 Before making changes:
 1. ✓ Read relevant sections of architecture doc
 2. ✓ Review coding style guide
-3. ✓ Check if domain logic remains pure
-4. ✓ Ensure changes work with all backends (or add feature gates)
-5. ✓ Update tests (use generic spec test pattern)
-6. ✓ Update documentation if changing public API
-7. ✓ Check README examples still work
+3. ✓ Check if domain logic remains pure (no side effects in `decide`/`evolve`)
+4. ✓ Use protected concrete types (smart constructors, private fields)
+5. ✓ No primitive obsession (wrap String, Uuid, usize in domain types)
+6. ✓ Railway-oriented error handling (Result everywhere, no unwrap in business logic)
+7. ✓ NO EMOJIS in code, comments, or commits
+8. ✓ Ensure changes work with all backends (or add feature gates)
+9. ✓ Update tests (use generic spec test pattern)
+10. ✓ Update documentation if changing public API
+11. ✓ Check README examples still work
 
 ## Getting Help
 

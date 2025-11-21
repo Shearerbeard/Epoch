@@ -97,6 +97,93 @@ Strategies automatically retry with exponential backoff on version conflicts (up
 - Automatic resolution of transient conflicts
 - Manual handling of persistent conflicts
 
+### 6. Making Illegal States Unrepresentable
+
+**Core Mantra**: "Make impossible states unrepresentable" - Yaron Minsky
+
+Epoch uses Rust's type system to prevent invalid states at compile time:
+
+**Protected Concrete Types** (Smart Constructors):
+- All domain types have private fields
+- Validation happens in constructors (returns `Result`)
+- Once created, types are guaranteed valid
+- No primitive obsession - wrap all domain concepts
+
+```rust
+// Protected type with validation
+pub struct StreamId {
+    uuid: Uuid,  // Private - cannot be set directly
+}
+
+impl StreamId {
+    pub fn new() -> Self { /* validates */ }
+    pub fn from(str: &str) -> Result<Self, Error> { /* validates */ }
+    pub fn value(&self) -> Uuid { /* controlled access */ }
+}
+```
+
+**State Machines with Enums**:
+- Use enums to model explicit state transitions
+- Invalid transitions are impossible at compile time
+- Pattern matching ensures all cases handled
+
+**Benefits**:
+- Encapsulation: Validation logic centralized
+- Invariants: Types are always valid
+- Type Safety: Can't mix UserId with StreamId
+- Refactoring: Internal changes don't break API
+
+### 7. Railway-Oriented Programming
+
+Heavily influenced by Scott Wlaschin's error handling approach, Epoch uses **Railway-Oriented Programming**:
+
+**The Railway Metaphor**:
+- **Success track**: `Result::Ok` path
+- **Failure track**: `Result::Err` path
+- **Switches**: Functions that can fail (using `?` operator)
+- **Composition**: Chain operations cleanly
+
+```
+Input
+  │
+  ├─[parse]──────┐
+  │              ↓ Error track
+  ├─[validate]───┐
+  │              ↓ Error track
+  ├─[process]────┐
+  │              ↓ Error track
+  ↓
+Output (Success)
+```
+
+**Key Principles**:
+- All fallible operations return `Result<T, E>`
+- Never panic in business logic (except Evolvers where events are guaranteed valid)
+- Use `?` operator for clean error propagation
+- Custom error types with `thiserror`
+- Validation helpers that compose with `?`
+
+**Example**:
+```rust
+fn decide(
+    context: &MyContext,
+    state: &MyState,
+    cmd: &MyCommand,
+) -> Result<Vec<MyEvent>, MyError> {
+    // Each ? is a "switch" to error track
+    let id = EntityId::from(&cmd.id)
+        .map_err(MyError::InvalidId)?;  // Switch point
+
+    Self::validate_exists(state, &id)?;  // Switch point
+    Self::validate_unique(context, &cmd.name)?;  // Switch point
+
+    // Only reaches here if all validations passed
+    Ok(vec![MyEvent::Created { /* ... */ }])
+}
+```
+
+This pattern creates self-documenting, composable, and safe validation chains.
+
 ## Architectural Layers
 
 ### Layer 1: Core Traits (Pure Domain)
