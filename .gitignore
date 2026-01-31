@@ -12,3 +12,7 @@ Cargo.lock
 .env
 Session.vim
 
+# Claude Code local files (personal, not shared)
+.claude/*.local.json
+.claude/*.local.md
+

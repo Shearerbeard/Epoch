@@ -139,3 +139,15 @@ Run in-memory tests only:
 ```bash
 cargo test --no-default-features --features in_memory
 ```
+
+## Session Management
+
+**Starting a session:**
+1. Read `HANDOFF.md` for current project state
+2. Check `TODO.md` for pending work
+3. Verify environment: `cargo test --all-features`
+
+**Ending a session:**
+1. Update `HANDOFF.md` with session summary
+2. Add new discoveries to `TODO.md`
+3. Commit both files with your changes
