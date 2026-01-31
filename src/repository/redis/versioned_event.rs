@@ -41,7 +41,7 @@ where
     pub fn new(client: &Client) -> Self {
         Self {
             client: client.to_owned(),
-            _sm: PhantomData::default(),
+            _sm: PhantomData,
         }
     }
 
@@ -179,7 +179,7 @@ where
         &mut self,
         version: &RepositoryVersion<RedisVersion>,
         _stream: &Self::StreamId,
-        events: &Vec<E>,
+        events: &[E],
     ) -> Result<
         (Vec<E>, RepositoryVersion<RedisVersion>),
         VersionedRepositoryError<RedisRepositoryError<DTOErr>, RedisVersion>,
@@ -267,8 +267,7 @@ mod tests {
 
     use super::*;
     use crate::test_helpers::{
-        deciders::user::UserEvent,
-        redis::{TestUserDTOErr, TestUserEventDTO, TestUserEventDTOManager},
+        redis::{TestUserEventDTO, TestUserEventDTOManager},
         repository::{
             versioned_event_repository_with_streams_occ_spec,
             versioned_event_repository_with_streams_spec,
@@ -276,9 +275,9 @@ mod tests {
     };
 
     async fn client_from_environment() -> Client {
-        let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
+        let _ = dotenvy::dotenv().expect("File .env or Env Vars not found");
 
-        let settings: String = dotenv::var("REDIS_CONNECTION_STRING")
+        let settings: String = dotenvy::var("REDIS_CONNECTION_STRING")
             .expect("Redis to be set in env")
             .parse()
             .expect("Redis connection string to parse");

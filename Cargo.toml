@@ -12,19 +12,19 @@ esdb = ["dep:eventstore", "dep:uuid", "dep:serde_json"]
 redis = ["dep:redis-om"]
 
 [dependencies]
-async-trait = "0.1.53"
-eventstore = { version = "2.2.0",  optional = true }
-redis-om = { version = "0.1.0", features = ["json"], optional = true}
+async-trait = "0.1.89"
+eventstore = { version = "4.0.0", optional = true }
+redis-om = { version = "0.1.0", features = ["json"], optional = true }
 rusty_ulid = "2.0.0"
-serde = { version = "1.0.136", features = ["derive"] }
-serde_json = { version = "1.0.81", optional = true }
-thiserror = "1.0"
-uuid =  { package = "uuid", version = "1.2.2", features = ["v4", "serde"], optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", optional = true }
+thiserror = "2.0.18"
+uuid = { version = "1.20.0", features = ["v4", "serde"], optional = true }
 
 [dev-dependencies]
-actix-rt = "2.7.0"
+actix-rt = "2.11.0"
 assert_matches = "1.5.0"
-const-random = "0.1.15"
-autoincrement = "1"
-dotenv = "0.15.0"
-futures = "0.3.25"
+const-random = "0.1.18"
+autoincrement = "1.0.1"
+dotenvy = "0.15.7"
+futures = "0.3.31"

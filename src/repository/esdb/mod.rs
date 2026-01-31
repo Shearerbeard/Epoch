@@ -33,7 +33,7 @@ impl<E> ESDBEventRepository<E> {
         Self {
             client: client.to_owned(),
             stream_name: stream_name.to_owned(),
-            _hidden: PhantomData::default(),
+            _hidden: PhantomData,
         }
     }
 
@@ -136,7 +136,7 @@ where
         &mut self,
         version: &RepositoryVersion<usize>,
         stream: &Self::StreamId,
-        events: &Vec<E>,
+        events: &[E],
     ) -> Result<(Vec<E>, RepositoryVersion<usize>), VersionedRepositoryError<Error, usize>>
     where
         'a: 'async_trait,
@@ -199,8 +199,8 @@ mod tests {
     const BASE_STREAM: u32 = const_random!(u32);
 
     async fn store_from_environment(base_stream: &str, ids: Vec<usize>) -> eventstore::Client {
-        let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
-        let settings = dotenv::var("ESDB_CONNECTION_STRING")
+        let _ = dotenvy::dotenv().expect("File .env or Env Vars not found");
+        let settings = dotenvy::var("ESDB_CONNECTION_STRING")
             .expect("ESDB to be set in env")
             .parse()
             .expect("ESDB connection string to parse");

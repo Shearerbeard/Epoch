@@ -41,12 +41,12 @@ where
         Ok(lock.events.clone())
     }
 
-    async fn append(&mut self, events: &Vec<E>) -> Result<Vec<E>, ()> {
+    async fn append(&mut self, events: &[E]) -> Result<Vec<E>, ()> {
         let mut lock = self.state.lock().unwrap();
         lock.events.extend(events.to_owned());
         lock.position = lock.events.len();
 
-        Ok(events.clone())
+        Ok(events.to_vec())
     }
 }
 

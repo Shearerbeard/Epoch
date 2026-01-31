@@ -78,15 +78,14 @@ where
         Self {
             client: client.clone(),
             snapshot_expiry: None,
-            _st: PhantomData::default(),
-            _jm: PhantomData::default(),
+            _st: PhantomData,
+            _jm: PhantomData,
         }
     }
 }
 
 #[async_trait]
-impl<'a, State, JM> VersionedStreamSnapshotRepository<State>
-    for RedisJSONSnapshotRepository<State, JM>
+impl<State, JM> VersionedStreamSnapshotRepository<State> for RedisJSONSnapshotRepository<State, JM>
 where
     State: Send
         + Sync
@@ -131,7 +130,7 @@ where
         let mut conn = self.get_connection().await?;
 
         state
-            .to_dto(version.clone())
+            .to_dto(*version)
             .save(&mut conn)
             .await
             .map_err(RedisRepositoryError::SaveError)
@@ -200,9 +199,9 @@ mod tests {
     }
 
     async fn client_from_environment() -> Client {
-        let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
+        let _ = dotenvy::dotenv().expect("File .env or Env Vars not found");
 
-        let settings: String = dotenv::var("REDIS_CONNECTION_STRING")
+        let settings: String = dotenvy::var("REDIS_CONNECTION_STRING")
             .expect("Redis to be set in env")
             .parse()
             .expect("Redis connection string to parse");

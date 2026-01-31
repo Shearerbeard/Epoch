@@ -38,23 +38,15 @@ pub struct RedisVersion {
 
 impl Ord for RedisVersion {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if self > other {
-            std::cmp::Ordering::Greater
-        } else if self < other {
-            std::cmp::Ordering::Less
-        } else {
-            std::cmp::Ordering::Equal
-        }
+        self.timestamp
+            .cmp(&other.timestamp)
+            .then_with(|| self.version.cmp(&other.version))
     }
 }
 
 impl PartialOrd for RedisVersion {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match self.timestamp.partial_cmp(&other.timestamp) {
-            Some(core::cmp::Ordering::Equal) => {}
-            ord => return ord,
-        }
-        self.version.partial_cmp(&other.version)
+        Some(self.cmp(other))
     }
 }
 
@@ -79,9 +71,9 @@ impl TryFrom<&str> for RedisVersion {
     }
 }
 
-impl ToString for RedisVersion {
-    fn to_string(&self) -> String {
-        format!("{}-{}", self.timestamp, self.version)
+impl std::fmt::Display for RedisVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.timestamp, self.version)
     }
 }
 

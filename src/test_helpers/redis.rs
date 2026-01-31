@@ -3,10 +3,7 @@ use std::collections::HashSet;
 use redis_om::{redis, RedisTransportValue, StreamModel};
 use thiserror::Error;
 
-use crate::repository::{
-    redis::{versioned_event::StreamModelDTO, RedisRepositoryError},
-    WithFineGrainedStreamId,
-};
+use crate::repository::{redis::versioned_event::StreamModelDTO, WithFineGrainedStreamId};
 
 use super::{
     deciders::user::{Guitar, User, UserEvent, UserId, UserName},

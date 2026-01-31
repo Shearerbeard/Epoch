@@ -52,7 +52,7 @@ where
     }
 
     fn get_stream_or_new(&mut self, key: &str) -> &Arc<Mutex<InMemoryEventRepositoryState<E>>> {
-        if self.state.get(key).is_none() {
+        if !self.state.contains_key(key) {
             self.state.insert(
                 key.to_owned(),
                 Arc::new(Mutex::new(InMemoryEventRepositoryState::new())),
@@ -113,7 +113,7 @@ where
         &mut self,
         version: &RepositoryVersion<usize>,
         stream: &Self::StreamId,
-        events: &Vec<E>,
+        events: &[E],
     ) -> Result<(Vec<E>, RepositoryVersion<usize>), VersionedRepositoryError<Error, usize>>
     where
         'a: 'async_trait,
@@ -124,7 +124,7 @@ where
         let mut stream = self.get_stream_or_new(&stream_key).lock().unwrap();
 
         if stream.position == Self::index_from_version(version) {
-            stream.events.extend(events.clone());
+            stream.events.extend(events.iter().cloned());
             let position = stream.events.len() - 1;
             stream.position = position;
 
@@ -134,11 +134,11 @@ where
                 .get_stream_or_new(&self.get_base_stream_key())
                 .lock()
                 .unwrap();
-            sub_stream.events.extend(events.clone());
+            sub_stream.events.extend(events.iter().cloned());
             let sub_position = sub_stream.events.len() - 1;
             sub_stream.position = sub_position;
 
-            Ok((events.to_owned(), RepositoryVersion::Exact(position)))
+            Ok((events.to_vec(), RepositoryVersion::Exact(position)))
         } else {
             Err(Error::VersionConflict(VersionDiff::new(
                 *version,

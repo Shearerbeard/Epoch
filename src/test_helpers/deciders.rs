@@ -279,6 +279,7 @@ pub(crate) mod user {
             }
         }
 
+        #[allow(dead_code)]
         pub fn current(&self) -> usize {
             let IdGen(id) = self.id_sequence.lock().unwrap().current();
             id

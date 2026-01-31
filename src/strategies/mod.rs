@@ -230,7 +230,7 @@ where
 #[derive(Debug)]
 pub struct CommandResponse<E: Debug, S: Debug, D: DeciderWithContext<State = S, Evt = E>>(
     <D as DeciderWithContext>::Cmd,
-    Vec<<D as Evolver>::Evt>,
+    #[allow(dead_code)] Vec<<D as Evolver>::Evt>,
     <D as Evolver>::State,
 );
 
