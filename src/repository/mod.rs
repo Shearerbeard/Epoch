@@ -8,6 +8,8 @@ pub mod esdb;
 pub mod event;
 #[cfg(feature = "in_memory")]
 pub mod in_memory;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 #[cfg(feature = "redis")]
 pub mod redis;
 pub mod state;

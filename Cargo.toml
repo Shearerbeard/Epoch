@@ -10,6 +10,7 @@ default = ["in_memory", "esdb", "redis"]
 in_memory = []
 esdb = ["dep:eventstore", "dep:uuid", "dep:serde_json"]
 redis = ["dep:redis-om"]
+postgres = ["dep:tokio-postgres", "dep:bb8", "dep:bb8-postgres", "dep:serde_json"]
 
 [dependencies]
 async-trait = "0.1.53"
@@ -20,6 +21,9 @@ serde = { version = "1.0.136", features = ["derive"] }
 serde_json = { version = "1.0.81", optional = true }
 thiserror = "1.0"
 uuid =  { package = "uuid", version = "1.2.2", features = ["v4", "serde"], optional = true }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
+bb8 = { version = "0.8", optional = true }
+bb8-postgres = { version = "0.8", optional = true }
 
 [dev-dependencies]
 actix-rt = "2.7.0"
