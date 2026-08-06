@@ -1,0 +1,242 @@
+<title>Epoch B &amp; C — Runtime Flowcharts</title>
+<style>
+  /* Committed dark styling — matches the atlas and skeletons. */
+  :root, :root[data-theme="dark"], :root[data-theme="light"] {
+    --paper: #171a19;
+    --ink: #e6ebe8;
+    --muted: #a4afa9;
+    --line: #333a37;
+    --card: #1e2321;
+    --kid: #7aa7d9;
+    --chore: #4dbd93;
+    --danger: #e08a72;
+    --danger-tint: rgba(217, 123, 98, 0.10);
+    --warn: #d4b04a;
+    --warn-tint: rgba(207, 169, 63, 0.10);
+    --accent: #4dbd93;
+  }
+  html, body { background: var(--paper) !important; }
+  body {
+    color: var(--ink);
+    font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0;
+  }
+  main {
+    max-width: 82ch; margin: 0 auto; padding: 3rem 1.25rem 6rem;
+    background: var(--paper); color: var(--ink);
+  }
+  h1, h2 {
+    font-family: ui-serif, "Iowan Old Style", Charter, Georgia, serif;
+    line-height: 1.2; text-wrap: balance; margin: 0;
+  }
+  h1 { font-size: 2.05rem; font-weight: 600; }
+  h2 { font-size: 1.4rem; font-weight: 600; margin-top: .3rem; }
+  .eyebrow {
+    font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+  }
+  header.masthead { display: flex; flex-direction: column; gap: .6rem; margin-bottom: 1rem; }
+  .masthead .meta { color: var(--muted); font-size: .88rem; }
+  section { margin-top: 3rem; display: flex; flex-direction: column; gap: .9rem; }
+  p { margin: 0; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: #262c29; padding: .1em .35em; border-radius: 3px; font-size: .86em; }
+  figure { margin: .5rem 0 0; }
+  .figwrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--card); padding: .75rem; }
+  figure svg { display: block; min-width: 720px; max-width: 100%; height: auto; margin: 0 auto; }
+  figcaption { color: var(--muted); font-size: .85rem; margin-top: .55rem; line-height: 1.5; }
+  .aside {
+    border-left: 3px solid var(--warn); background: var(--warn-tint);
+    padding: .8rem 1rem; border-radius: 0 6px 6px 0; font-size: .92rem;
+  }
+  .aside strong:first-child { display: block; margin-bottom: .25rem; }
+</style>
+
+<main>
+<header class="masthead">
+  <span class="eyebrow">epoch redesign · flowcharts · 2026-08</span>
+  <h1>B &amp; C at Runtime</h1>
+  <p class="meta">The two surfaces from the skeletons document, drawn as control flow: what
+  would actually run, where the loops close, and where each design pays its consistency
+  bill. Both surfaces are proposed, not shipped; see the ADRs. Companion to the failure
+  atlas and the type skeletons.</p>
+</header>
+
+<section>
+  <span class="eyebrow">Panel B · saga + event feed</span>
+  <h2>B — the at-least-once loop</h2>
+  <figure>
+    <div class="figwrap">
+    <svg viewBox="0 0 880 700" role="img" aria-label="Flowchart of the saga and event feed runtime: a writer appends to the chore stream, the event lands in the events table with a global sequence, the saga runner polls deliveries after its cursor, react maps the event to commands, execute runs load-decide-append against the kid stream; on success the cursor is acked, on failure or crash there is no ack and the same delivery is redelivered on the next poll, forming the at-least-once loop.">
+      <defs>
+        <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g font-size="12.5" fill="currentColor">
+        <!-- n1 writer -->
+        <rect x="140" y="20" width="420" height="46" rx="6" fill="none" stroke="var(--chore)"/>
+        <text x="160" y="41" fill="var(--chore)" font-weight="600">writer (any process)</text>
+        <text x="160" y="58">chores.append(card, Exact(v&#8203;c), [Assigned]) — panel-A single append</text>
+        <line x1="350" y1="66" x2="350" y2="94" stroke="currentColor" marker-end="url(#fa)"/>
+
+        <!-- n2 events table -->
+        <rect x="140" y="96" width="420" height="46" rx="6" fill="none" stroke="var(--chore)"/>
+        <text x="160" y="117" fill="var(--chore)" font-weight="600">events table — the log</text>
+        <text x="160" y="134">row committed · global_sequence = n (bigserial, commit-ordered)</text>
+        <line x1="350" y1="142" x2="350" y2="176" stroke="currentColor" marker-end="url(#fa)"/>
+        <text x="362" y="164">poll: WHERE global_sequence &gt; cursor ORDER BY global_sequence</text>
+
+        <!-- NOTIFY dashed shortcut -->
+        <path d="M 560 119 C 700 119, 700 199, 604 199" fill="none" stroke="currentColor" stroke-dasharray="5 4" marker-end="url(#fa)"/>
+        <text x="648" y="150">LISTEN/NOTIFY</text>
+        <text x="648" y="167" fill="var(--muted)">(latency opt., not correctness)</text>
+
+        <!-- n3 runner poll -->
+        <rect x="140" y="178" width="460" height="46" rx="6" fill="none" stroke="var(--kid)"/>
+        <text x="160" y="199" fill="var(--kid)" font-weight="600">SagaRunner — the proposed control plane</text>
+        <text x="160" y="216">feed.poll(group, after = cursor, max) &#8594; Vec&lt;Delivery&lt;E, Cursor&gt;&gt;</text>
+        <line x1="350" y1="224" x2="350" y2="252" stroke="currentColor" marker-end="url(#fa)"/>
+
+        <!-- n4 react -->
+        <rect x="140" y="254" width="420" height="46" rx="6" fill="none" stroke="currentColor"/>
+        <text x="160" y="275" font-weight="600">saga.react(&amp;Assigned) — pure, stateless</text>
+        <text x="160" y="292">&#8594; [KidCommand::DrawChore { … }]   (dumb pipe: no state, no retries)</text>
+        <line x1="350" y1="300" x2="350" y2="328" stroke="currentColor" marker-end="url(#fa)"/>
+
+        <!-- n5 execute -->
+        <rect x="140" y="330" width="420" height="46" rx="6" fill="none" stroke="var(--kid)"/>
+        <text x="160" y="351" fill="var(--kid)" font-weight="600">execute — ordinary panel-A code</text>
+        <text x="160" y="368">kids.load &#8594; decide &#8594; kids.append(kid, Exact(v&#8203;k), events)</text>
+
+        <!-- branch arrows -->
+        <line x1="260" y1="376" x2="260" y2="412" stroke="var(--accent)" marker-end="url(#fa)"/>
+        <text x="180" y="400" fill="var(--accent)" font-weight="600">ok</text>
+        <line x1="460" y1="376" x2="620" y2="412" stroke="var(--danger)" marker-end="url(#fa)"/>
+        <text x="540" y="388" fill="var(--danger)" font-weight="600">error / crash / conflict</text>
+
+        <!-- n6 ack -->
+        <rect x="110" y="414" width="330" height="46" rx="6" fill="none" stroke="var(--accent)"/>
+        <text x="130" y="435" fill="var(--accent)" font-weight="600">feed.ack(group, upto = cursor)</text>
+        <text x="130" y="452">cursor advances — delivery complete</text>
+
+        <!-- n7 no-ack -->
+        <rect x="490" y="414" width="330" height="46" rx="6" fill="none" stroke="var(--danger)"/>
+        <text x="510" y="435" fill="var(--danger)" font-weight="600">no ack — nothing to undo</text>
+        <text x="510" y="452">offset unchanged in consumer_offsets</text>
+
+        <!-- redelivery loop -->
+        <path d="M 820 437 C 862 437, 862 201, 606 201" fill="none" stroke="var(--danger)" stroke-dasharray="5 4" marker-end="url(#fa)"/>
+        <text x="662" y="240" fill="var(--danger)" font-weight="600">redelivered next poll</text>
+        <text x="662" y="257" fill="var(--danger)">(at-least-once)</text>
+
+        <!-- obligation band -->
+        <rect x="110" y="500" width="710" height="64" rx="6" fill="var(--warn-tint)" stroke="var(--warn)" stroke-dasharray="5 4"/>
+        <text x="130" y="524" fill="var(--warn)" font-weight="600">the bill: execute runs 1..N times per event</text>
+        <text x="130" y="544">idempotency becomes a domain obligation — draw is covered (AlreadyHolds);</text>
+        <text x="130" y="561">a redelivered MarkReturned has no guard today and would need one.</text>
+
+        <!-- gap note -->
+        <text x="110" y="606" fill="var(--muted)">consistency: eventual — between commit (seq n) and ack, the kid stream lags the chore stream;</text>
+        <text x="110" y="624" fill="var(--muted)">the orphan window from the atlas still exists, but it is owned by machinery that retries until it closes,</text>
+        <text x="110" y="642" fill="var(--muted)">instead of by a parent noticing a stuck card.</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>
+      Panel B in motion. Everything above the branch is Epoch machinery
+      (<code>EventFeed</code> + <code>SagaRunner</code>); <code>react</code> and
+      <code>execute</code> are the only consumer-authored parts. The dashed red edge is the
+      whole guarantee: an unacked delivery comes back until execute succeeds.
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <span class="eyebrow">Panel C · atomic multi-stream batch</span>
+  <h2>C — one commit, no window</h2>
+  <figure>
+    <div class="figwrap">
+    <svg viewBox="0 0 880 660" role="img" aria-label="Flowchart of the atomic batch commit path: the consumer assembles a batch of writes and constraints, transact opens a transaction, takes advisory locks on all touched stream keys in sorted order, checks every constraint against the per-stream max sequence, then either inserts all rows and commits, or rolls back and returns a typed conflict which the consumer retries from a fresh load. A band notes that a crash anywhere before commit leaves nothing on any stream.">
+      <defs>
+        <marker id="fc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g font-size="12.5" fill="currentColor">
+        <!-- n1 batch assembly -->
+        <rect x="120" y="20" width="500" height="64" rx="6" fill="none" stroke="currentColor"/>
+        <text x="140" y="41" font-weight="600">consumer assembles Batch (typed in, erased at the boundary)</text>
+        <text x="140" y="59">write(chores, card, Exact(v&#8203;c), [Assigned]) · write(kids, kid, Exact(v&#8203;k), [DrewChore])</text>
+        <text x="140" y="76">constraints: (implied by Exact) + any extra StreamExists / StreamDoesNotExist</text>
+        <line x1="370" y1="84" x2="370" y2="112" stroke="currentColor" marker-end="url(#fc)"/>
+        <text x="382" y="104">store.transact(batch)</text>
+
+        <!-- n2 begin -->
+        <rect x="120" y="114" width="500" height="34" rx="6" fill="none" stroke="var(--chore)"/>
+        <text x="140" y="136" fill="var(--chore)" font-weight="600">BEGIN — one pg transaction is the whole control plane</text>
+        <line x1="370" y1="148" x2="370" y2="176" stroke="currentColor" marker-end="url(#fc)"/>
+
+        <!-- n3 locks -->
+        <rect x="120" y="178" width="500" height="50" rx="6" fill="none" stroke="var(--chore)"/>
+        <text x="140" y="199" fill="var(--chore)" font-weight="600">lock all touched streams, sorted</text>
+        <text x="140" y="217">for k in sort(keys): pg_advisory_xact_lock(hashtext(k))</text>
+        <text x="640" y="199" fill="var(--muted)">sorted &#8658; no deadlock cycles</text>
+        <text x="640" y="217" fill="var(--muted)">disjoint batches run in parallel</text>
+        <line x1="370" y1="228" x2="370" y2="256" stroke="currentColor" marker-end="url(#fc)"/>
+
+        <!-- n4 check -->
+        <rect x="120" y="258" width="500" height="50" rx="6" fill="none" stroke="var(--chore)"/>
+        <text x="140" y="279" fill="var(--chore)" font-weight="600">evaluate every BatchConstraint</text>
+        <text x="140" y="297">vs MAX(sequence) per stream — a consistent snapshot, guaranteed by the locks</text>
+
+        <!-- branch -->
+        <line x1="280" y1="308" x2="280" y2="344" stroke="var(--accent)" marker-end="url(#fc)"/>
+        <text x="196" y="332" fill="var(--accent)" font-weight="600">all hold</text>
+        <line x1="500" y1="308" x2="640" y2="344" stroke="var(--danger)" marker-end="url(#fc)"/>
+        <text x="560" y="322" fill="var(--danger)" font-weight="600">any violated</text>
+
+        <!-- n5 insert+commit -->
+        <rect x="90" y="346" width="370" height="64" rx="6" fill="none" stroke="var(--accent)"/>
+        <text x="110" y="367" fill="var(--accent)" font-weight="600">insert all rows, COMMIT</text>
+        <text x="110" y="385">per-stream sequence advances; global_sequence orders the log</text>
+        <text x="110" y="402">&#8594; Ok(Committed { version per stream })</text>
+
+        <!-- n6 rollback -->
+        <rect x="500" y="346" width="330" height="64" rx="6" fill="none" stroke="var(--danger)"/>
+        <text x="520" y="367" fill="var(--danger)" font-weight="600">ROLLBACK — all or nothing</text>
+        <text x="520" y="385">&#8594; Err(BatchError::Conflict {</text>
+        <text x="520" y="402">      violated, actual })   typed race signal</text>
+
+        <!-- retry loop -->
+        <path d="M 830 378 C 866 378, 866 52, 624 52" fill="none" stroke="var(--danger)" stroke-dasharray="5 4" marker-end="url(#fc)"/>
+        <text x="672" y="90" fill="var(--danger)" font-weight="600">retry from a fresh load</text>
+        <text x="672" y="107" fill="var(--danger)">(same shape as today's F1)</text>
+
+        <!-- crash band -->
+        <rect x="90" y="452" width="740" height="52" rx="6" fill="var(--danger-tint)" stroke="var(--danger)" stroke-dasharray="5 4"/>
+        <text x="110" y="476" fill="var(--danger)" font-weight="600">crash anywhere above COMMIT &#8658; nothing landed on any stream, locks release with the tx</text>
+        <text x="110" y="494" fill="var(--danger)">the atlas's F2 / F3 / F4 windows are not error paths here — they are unrepresentable</text>
+
+        <!-- feed note -->
+        <text x="90" y="546" fill="var(--muted)">downstream: the committed batch enters the same global_sequence log that panel B's feed reads —</text>
+        <text x="90" y="564" fill="var(--muted)">C for the invariant write, B for what follows from it (external task-tracker sync, read-model projections).</text>
+        <text x="90" y="600" fill="var(--muted)">backends: postgres — this chart; in_memory — same semantics under one store mutex;</text>
+        <text x="90" y="618" fill="var(--muted)">esdb — no AtomicStreams impl, callers fall back to panel A by construction.</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>
+      Panel C in motion. The only branch is the constraint check; both exits are typed. The
+      dashed red retry edge replaces the entire five-row failure ledger with the one failure
+      mode OCC already taught every consumer to handle.
+    </figcaption>
+  </figure>
+  <div class="aside">
+    <strong>Reading the two charts together</strong>
+    B has two authors (Epoch machinery + consumer <code>react</code>/<code>execute</code>) and
+    buys integration; its loop closes over <em>time</em>. C has one author (the consumer's
+    batch) and buys invariants; its loop closes inside one transaction. The draw wants C.
+    Everything that <em>reacts to</em> a draw wants B.
+  </div>
+</section>
+</main>

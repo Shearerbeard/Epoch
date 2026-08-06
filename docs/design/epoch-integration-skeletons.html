@@ -1,0 +1,331 @@
+<title>Epoch Integration Surfaces — Type Skeletons</title>
+<style>
+  /* Committed dark styling — matches the failure atlas. */
+  :root, :root[data-theme="dark"], :root[data-theme="light"] {
+    --paper: #171a19;
+    --ink: #e6ebe8;
+    --muted: #a4afa9;
+    --line: #333a37;
+    --card: #1e2321;
+    --kid: #7aa7d9;
+    --chore: #4dbd93;
+    --danger: #e08a72;
+    --warn: #d4b04a;
+    --warn-tint: rgba(207, 169, 63, 0.10);
+    --accent: #4dbd93;
+    --code-bg: #12100e00;
+    --hask: #c9a3d9;
+    --kw: #d4b04a;
+    --cm: #7d8a83;
+  }
+  html, body { background: var(--paper) !important; }
+  body {
+    color: var(--ink);
+    font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0;
+  }
+  main {
+    max-width: 82ch; margin: 0 auto; padding: 3rem 1.25rem 6rem;
+    background: var(--paper); color: var(--ink);
+  }
+  h1, h2, h3 {
+    font-family: ui-serif, "Iowan Old Style", Charter, Georgia, serif;
+    line-height: 1.2; text-wrap: balance; margin: 0;
+  }
+  h1 { font-size: 2.05rem; font-weight: 600; }
+  h2 { font-size: 1.4rem; font-weight: 600; margin-top: .3rem; }
+  h3 { font-size: 1.05rem; font-weight: 600; }
+  .eyebrow {
+    font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+  }
+  header.masthead { display: flex; flex-direction: column; gap: .6rem; margin-bottom: 1rem; }
+  .masthead .meta { color: var(--muted); font-size: .88rem; }
+  section { margin-top: 3rem; display: flex; flex-direction: column; gap: .9rem; }
+  p { margin: 0; }
+  code, pre {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  code { background: #262c29; padding: .1em .35em; border-radius: 3px; font-size: .86em; }
+  pre {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 1rem 1.15rem; overflow-x: auto; font-size: .82rem; line-height: 1.55;
+    margin: 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .hs { border-left: 3px solid var(--hask); }
+  .hs .lbl, .rs .lbl {
+    display: block; font-size: .68rem; letter-spacing: .12em; text-transform: uppercase;
+    margin-bottom: .6rem; font-weight: 700;
+  }
+  .hs .lbl { color: var(--hask); }
+  .rs { border-left: 3px solid var(--chore); }
+  .rs .lbl { color: var(--chore); }
+  .k { color: var(--kw); }
+  .c { color: var(--cm); font-style: italic; }
+  .t { color: var(--kid); }
+  .aside {
+    border-left: 3px solid var(--warn); background: var(--warn-tint);
+    padding: .8rem 1rem; border-radius: 0 6px 6px 0; font-size: .92rem;
+  }
+  .aside strong:first-child { display: block; margin-bottom: .25rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .tablewrap { overflow-x: auto; }
+  .yes { color: var(--chore); font-weight: 600; }
+  .no { color: var(--danger); font-weight: 600; }
+  .partial { color: var(--warn); font-weight: 600; }
+  a { color: var(--accent); }
+</style>
+
+<main>
+<header class="masthead">
+  <span class="eyebrow">epoch redesign · type skeletons · 2026-08</span>
+  <h1>Three Integration Surfaces</h1>
+  <p class="meta">What panels A, B, and C from the failure atlas each demand of Epoch's public
+  types — model lines in Haskell-like syntax, integration surface in post-redesign Rust
+  (AFIT, <code>&amp;self</code>, typed stream ids, split version types). Every type shown is
+  a proposal, not shipped API; see the ADRs for status. Ends with the
+  control-plane answer: why postgres advisory locks replace the Datomic transactor we don't
+  have.</p>
+</header>
+
+<section>
+  <span class="eyebrow">Shared foundation</span>
+  <h2>The core every option builds on</h2>
+  <p>These types make the ADR 0001-0005 decisions concrete and are common to all three panels —
+  they replace <code>VersionedEventRepositoryWithStreams&lt;'a, E, Err&gt;</code> outright.</p>
+
+  <pre class="hs"><code><span class="lbl">model · haskell-like</span><span class="k">data</span> <span class="t">ExpectedVersion</span> v = Any | NoStream | StreamExists | Exact v   <span class="c">-- write-side assertion</span>
+<span class="k">data</span> <span class="t">StreamVersion</span>   v = Empty | At v                              <span class="c">-- read-side observation</span>
+<span class="k">data</span> <span class="t">AppendError</span> v e  = Conflict (VersionDiff v) | Backend e        <span class="c">-- branch once, typed</span>
+
+<span class="k">class</span> <span class="t">StreamId</span> s <span class="k">where</span>                                             <span class="c">-- the two-way contract</span>
+  streamKey :: s -&gt; Text
+  parseKey  :: Text -&gt; Either StreamIdError s
+
+load   :: streams -&gt; s -&gt; IO ([e], StreamVersion v)
+append :: streams -&gt; s -&gt; ExpectedVersion v -&gt; [e]
+       -&gt; IO (Either (AppendError v err) (StreamVersion v))</code></pre>
+
+  <pre class="rs"><code><span class="lbl">integration surface · rust</span><span class="c">// epoch::stream — the two-way id contract (replaces WithFineGrainedStreamId + StreamIdFromEvent)</span>
+<span class="k">pub trait</span> <span class="t">StreamId</span>: Sized + Send + Sync {
+    <span class="k">fn</span> stream_key(&amp;self) -&gt; Cow&lt;'_, str&gt;;
+    <span class="k">fn</span> parse_key(key: &amp;str) -&gt; Result&lt;Self, <span class="t">StreamIdError</span>&gt;;
+}
+<span class="c">// blanket impl for String keeps tests terse</span>
+
+<span class="c">// epoch::version — one enum did two jobs; now split</span>
+<span class="k">pub enum</span> <span class="t">ExpectedVersion</span>&lt;V&gt; { Any, NoStream, StreamExists, Exact(V) }
+<span class="k">pub enum</span> <span class="t">StreamVersion</span>&lt;V&gt;   { Empty, At(V) }
+<span class="k">pub enum</span> <span class="t">AppendError</span>&lt;V, E&gt;  { Conflict(<span class="t">VersionDiff</span>&lt;V&gt;), Backend(E) }
+
+<span class="c">// epoch::repository — AFIT, no lifetime, no &amp;mut, no async_trait</span>
+#[trait_variant::make(Send)]
+<span class="k">pub trait</span> <span class="t">EventStreams</span>&lt;E: Event&gt; {
+    <span class="k">type</span> Id: <span class="t">StreamId</span>;
+    <span class="k">type</span> Version: Copy + Ord + Send + Sync;
+    <span class="k">type</span> Err: std::error::Error + Send + Sync;
+
+    <span class="k">async fn</span> load(&amp;self, id: &amp;Self::Id)
+        -&gt; Result&lt;(Vec&lt;E&gt;, <span class="t">StreamVersion</span>&lt;Self::Version&gt;), Self::Err&gt;;
+    <span class="k">async fn</span> load_from(&amp;self, id: &amp;Self::Id, from: Self::Version)
+        -&gt; Result&lt;(Vec&lt;E&gt;, <span class="t">StreamVersion</span>&lt;Self::Version&gt;), Self::Err&gt;;
+    <span class="k">async fn</span> append(&amp;self, id: &amp;Self::Id,
+                    expected: <span class="t">ExpectedVersion</span>&lt;Self::Version&gt;, events: &amp;[E])
+        -&gt; Result&lt;<span class="t">StreamVersion</span>&lt;Self::Version&gt;, <span class="t">AppendError</span>&lt;Self::Version, Self::Err&gt;&gt;;
+}</code></pre>
+
+  <p>Chore-lottery's bound collapses from the HRTB block to
+  <code>KS: EventStreams&lt;KidEvent, Id = KidStreamId&gt;</code> — the eight error-mapping
+  blocks become one <code>match</code> on <code>AppendError</code> per operation.</p>
+</section>
+
+<section>
+  <span class="eyebrow">Panel A · app coordinator</span>
+  <h2>A — no new Epoch surface; the app owns the gap</h2>
+  <pre class="hs"><code><span class="lbl">model · haskell-like</span><span class="c">-- ordering IS the design: reserve on the authority stream, then accept.</span>
+draw :: Kid -&gt; App DrawOutcome
+draw kid = <span class="k">do</span>
+  (chore, vc) &lt;- load chores card
+  reserve     &lt;- append chores card (Exact vc) [Assigned kid]   <span class="c">-- ① atomic alone</span>
+  <span class="c">-- ✂ orphan window: crash here leaves the card assigned, kid untouched</span>
+  accept      &lt;- append kids kid (Exact vk) [DrewChore card]    <span class="c">-- ② atomic alone</span>
+  pure (Drawn ...)
+<span class="c">-- compensation (parent return frees the orphan) is domain code, not library code</span></code></pre>
+  <p>Epoch ships nothing beyond the foundation. The ledger's F2/F3/F4 stay real and stay the
+  application's to repair. This is the fallback shape for any backend that can't do C —
+  and after the foundation lands it costs perhaps a third of today's coordinator bulk.</p>
+</section>
+
+<section>
+  <span class="eyebrow">Panel B · saga / event router</span>
+  <h2>B — Epoch grows a delivery control plane</h2>
+  <p>The saga itself is trivial; the honest cost is everything around it. Epoch would need a
+  consumer-offset feed over the <em>global</em> log — this is the piece Fmodel delegates to
+  <code>fstore-sql</code> and EvidentDB delegates to Kafka.</p>
+
+  <pre class="hs"><code><span class="lbl">model · haskell-like</span>react :: UpstreamEvent -&gt; [DownstreamCmd]        <span class="c">-- pure, stateless, dumb pipe</span>
+
+runner :: Feed -&gt; App ()
+runner feed = forever $ <span class="k">do</span>
+  batch &lt;- poll feed group                       <span class="c">-- at-least-once</span>
+  traverse_ (execute . react) batch              <span class="c">-- execute must be idempotent!</span>
+  ack feed group (cursor batch)                  <span class="c">-- nack ⇒ redelivery</span></code></pre>
+
+  <pre class="rs"><code><span class="lbl">integration surface · rust (new epoch items)</span><span class="c">// epoch::saga — the pure pipe (mirrors Fmodel/Calderwood React)</span>
+<span class="k">pub struct</span> <span class="t">Saga</span>&lt;Ar, A&gt; { <span class="k">pub</span> react: <span class="k">fn</span>(&amp;Ar) -&gt; Vec&lt;A&gt; }
+
+<span class="c">// epoch::feed — NEW capability: ordered, resumable delivery of committed events</span>
+#[trait_variant::make(Send)]
+<span class="k">pub trait</span> <span class="t">EventFeed</span>&lt;E: Event&gt; {
+    <span class="k">type</span> Cursor: Copy + Ord + Send + Sync;        <span class="c">// pg: global_sequence</span>
+    <span class="k">type</span> Err: std::error::Error + Send + Sync;
+
+    <span class="k">async fn</span> poll(&amp;self, group: &amp;<span class="t">ConsumerGroup</span>, after: Option&lt;Self::Cursor&gt;, max: usize)
+        -&gt; Result&lt;Vec&lt;<span class="t">Delivery</span>&lt;E, Self::Cursor&gt;&gt;, Self::Err&gt;;
+    <span class="k">async fn</span> ack(&amp;self, group: &amp;<span class="t">ConsumerGroup</span>, upto: Self::Cursor)
+        -&gt; Result&lt;(), Self::Err&gt;;                 <span class="c">// no ack ⇒ redelivered next poll</span>
+}
+
+<span class="c">// epoch::saga::runner — owns the retry loop so domain code never sees delivery</span>
+<span class="k">pub struct</span> <span class="t">SagaRunner</span>&lt;F, Exec&gt; { feed: F, exec: Exec, group: <span class="t">ConsumerGroup</span> }</code></pre>
+
+  <div class="aside">
+    <strong>Control plane, no transactor edition</strong>
+    Postgres already assigns <code>global_sequence</code> at commit; the feed is a
+    <code>consumer_offsets(group, last_seq)</code> table plus
+    <code>SELECT … WHERE global_sequence &gt; $1 ORDER BY global_sequence</code>, with
+    <code>LISTEN/NOTIFY</code> as a latency optimization over polling. At-least-once falls
+    out; <em>idempotent command execution becomes a domain obligation</em> — for chore-lottery
+    that's a new obligation the current deciders only partly meet (AlreadyHolds covers draw,
+    nothing covers double-MarkReturned).
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Panel C · atomic multi-stream batch</span>
+  <h2>C — one capability trait; the window stops existing</h2>
+  <p>The wrinkle EvidentDB never faces: it has one CloudEvent type, we have
+  <code>KidEvent</code> <em>and</em> <code>ChoreEvent</code>. Two honest answers: the
+  Fmodel answer (a consumer-side <code>Sum</code> event and a combined decider — one
+  repository, problem dissolved) or the store answer (heterogeneous writes erased at the
+  batch boundary, where events become rows anyway). The skeleton below is the store answer,
+  because it keeps chore-lottery's aggregates separate — but note the Fmodel answer needs
+  <em>zero</em> new Epoch surface.</p>
+
+  <pre class="hs"><code><span class="lbl">model · haskell-like</span><span class="c">-- the whole draw is one conditional commit; F2/F3/F4 are unrepresentable</span>
+draw :: Kid -&gt; Card -&gt; App DrawOutcome
+draw kid card = transact store
+  [ StreamAt (choreKey card) vc          <span class="c">-- constraints may cover streams…</span>
+  , StreamAt (kidKey kid)    vk ]        <span class="c">-- …the batch also writes, or not</span>
+  [ Write (choreKey card) [Assigned kid ...]
+  , Write (kidKey kid)    [DrewChore card ...] ]
+<span class="c">-- transact :: Store -&gt; [Constraint v] -&gt; [Write] -&gt; IO (Either (BatchConflict v) v)</span></code></pre>
+
+  <pre class="rs"><code><span class="lbl">integration surface · rust (new epoch items)</span><span class="c">// epoch::batch — constraint vocabulary, straight from EvidentDB minus Subject</span>
+<span class="k">pub enum</span> <span class="t">BatchConstraint</span>&lt;V&gt; {
+    StreamExists(<span class="t">StreamKey</span>),
+    StreamDoesNotExist(<span class="t">StreamKey</span>),
+    StreamAt(<span class="t">StreamKey</span>, <span class="t">ExpectedVersion</span>&lt;V&gt;),
+}
+
+<span class="c">// A write is type-erased AT THE BOUNDARY: events serialize to rows anyway,</span>
+<span class="c">// so heterogeneity (KidEvent + ChoreEvent) costs nothing here.</span>
+<span class="k">pub struct</span> <span class="t">Batch</span>&lt;V&gt; { writes: Vec&lt;<span class="t">ErasedWrite</span>&gt;, constraints: Vec&lt;<span class="t">BatchConstraint</span>&lt;V&gt;&gt; }
+
+<span class="k">impl</span>&lt;V&gt; <span class="t">Batch</span>&lt;V&gt; {
+    <span class="c">// typed on the way in; the repo contributes stream_type + serialization</span>
+    <span class="k">pub fn</span> write&lt;E&gt;(&amp;<span class="k">mut</span> self, streams: &amp;<span class="k">impl</span> <span class="t">EventStreams</span>&lt;E, Version = V&gt;,
+                    id: &amp;<span class="k">impl</span> <span class="t">StreamId</span>, expected: <span class="t">ExpectedVersion</span>&lt;V&gt;, events: &amp;[E])
+        -&gt; Result&lt;(), <span class="t">EncodeError</span>&gt;
+    <span class="k">where</span> E: Event + Serialize;
+}
+
+<span class="c">// the capability: postgres + in_memory implement it; ESDB simply doesn't.</span>
+<span class="c">// the type system, not documentation, tells you which panel a backend supports.</span>
+#[trait_variant::make(Send)]
+<span class="k">pub trait</span> <span class="t">AtomicStreams</span> {
+    <span class="k">type</span> Version: Copy + Ord + Send + Sync;
+    <span class="k">type</span> Err: std::error::Error + Send + Sync;
+
+    <span class="k">async fn</span> transact(&amp;self, batch: <span class="t">Batch</span>&lt;Self::Version&gt;)
+        -&gt; Result&lt;<span class="t">Committed</span>&lt;Self::Version&gt;, <span class="t">BatchError</span>&lt;Self::Version, Self::Err&gt;&gt;;
+}
+
+<span class="k">pub enum</span> <span class="t">BatchError</span>&lt;V, E&gt; {
+    Conflict { violated: <span class="t">BatchConstraint</span>&lt;V&gt;, actual: <span class="t">StreamVersion</span>&lt;V&gt; },
+    Backend(E),
+}</code></pre>
+</section>
+
+<section>
+  <span class="eyebrow">The control plane</span>
+  <h2>Coordination without a transactor</h2>
+  <p>
+    Datomic and EvidentDB serialize by construction: one writer per database, every batch
+    through one funnel. We don't have that — and don't need it, because the funnel's only
+    job is <em>mutual exclusion over the streams a batch touches</em>, and postgres sells
+    that à la carte:
+  </p>
+  <pre class="rs"><code><span class="lbl">pg transact — the whole control plane</span>BEGIN;
+<span class="c">-- ① lock every touched stream key, IN SORTED ORDER (sorted ⇒ no deadlock cycles)</span>
+SELECT pg_advisory_xact_lock(hashtext(k))
+  FROM unnest($sorted_stream_keys) AS k;
+<span class="c">-- ② evaluate every BatchConstraint against MAX(sequence) per stream — a consistent</span>
+<span class="c">--    snapshot, because ① serialized us against every writer that could move them</span>
+<span class="c">-- ③ any violation ⇒ ROLLBACK ⇒ BatchError::Conflict { violated, actual }</span>
+<span class="c">-- ④ insert all rows; global_sequence (bigserial) orders the committed log</span>
+COMMIT;   <span class="c">-- locks release with the transaction, even on async cancellation</span></code></pre>
+  <p>
+    This is <strong>strictly better than the single writer for our shape</strong>: batches
+    touching disjoint streams commit in parallel (the transactor would queue them), while
+    batches contending on a stream serialize exactly as EvidentDB's funnel would. What we
+    give up is a database-wide <code>basis_revision</code> — our constraints are per-stream,
+    not whole-database — which is precisely why <code>BatchConstraint</code> stays a
+    per-stream vocabulary. The existing single-stream <code>append</code> is the degenerate
+    one-write batch; it already takes this exact lock. In-memory implements
+    <code>transact</code> with its one store mutex (trivially serial); ESDB doesn't implement
+    it, and the missing impl is the documentation.
+  </p>
+</section>
+
+<section>
+  <span class="eyebrow">Side by side</span>
+  <h2>What each option costs and buys</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>A · coordinator</th><th>B · saga + feed</th><th>C · atomic batch</th></tr></thead>
+    <tbody>
+      <tr><td>New Epoch surface</td>
+        <td>none (foundation only)</td>
+        <td><code>Saga</code>, <code>EventFeed</code>, <code>ConsumerGroup</code>, <code>Delivery</code>, <code>SagaRunner</code></td>
+        <td><code>Batch</code>, <code>BatchConstraint</code>, <code>AtomicStreams</code>, <code>BatchError</code></td></tr>
+      <tr><td>Failure ledger</td>
+        <td>F1–F5 all remain</td>
+        <td>F2/F3/F4 become redelivery + idempotency obligations</td>
+        <td>F2/F3/F4 unrepresentable; F1 → <code>BatchError::Conflict</code>; F5 remains</td></tr>
+      <tr><td>New domain obligations</td>
+        <td>compensation paths (exists today)</td>
+        <td>idempotent command handling <em>everywhere</em></td>
+        <td>none beyond batch assembly</td></tr>
+      <tr><td>in_memory</td><td class="yes">yes</td><td class="partial">needs feed impl</td><td class="yes">yes — one mutex</td></tr>
+      <tr><td>postgres</td><td class="yes">yes</td><td class="yes">yes — offsets + NOTIFY</td><td class="yes">yes — advisory locks</td></tr>
+      <tr><td>esdb</td><td class="yes">yes</td><td class="partial">subscriptions exist; needs impl</td><td class="no">cannot implement</td></tr>
+      <tr><td>Runtime footprint</td><td>none</td><td>background runner task per saga</td><td>none</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="aside">
+    <strong>These compose rather than compete</strong>
+    C is the draw/return answer (shared invariant, one commit). B is the <em>integration</em>
+    answer chore-lottery already has queued up — integrations that export state to an
+    external task tracker and read-model projections are feed consumers rather than batch
+    writers. A is what C degrades to on a backend without
+    <code>AtomicStreams</code>. The phased plan can land the foundation first, C second
+    (it's small once the postgres <code>append</code> already holds the right locks), and B
+    when those integrations pull it.
+  </div>
+</section>
+</main>

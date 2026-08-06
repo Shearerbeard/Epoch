@@ -1,0 +1,215 @@
+<title>Coordinating Across Streams — Epoch Guide</title>
+<style>
+  /* Committed dark styling — matches the other design annexes. */
+  :root, :root[data-theme="dark"], :root[data-theme="light"] {
+    --paper: #171a19;
+    --ink: #e6ebe8;
+    --muted: #a4afa9;
+    --line: #333a37;
+    --card: #1e2321;
+    --kid: #7aa7d9;
+    --chore: #4dbd93;
+    --danger: #e08a72;
+    --warn: #d4b04a;
+    --warn-tint: rgba(207, 169, 63, 0.10);
+    --accent: #4dbd93;
+    --kw: #d4b04a;
+    --cm: #7d8a83;
+    --t: #7aa7d9;
+  }
+  html, body { background: var(--paper) !important; }
+  body { color: var(--ink); font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; }
+  main { max-width: 76ch; margin: 0 auto; padding: 3rem 1.25rem 6rem; background: var(--paper); color: var(--ink); }
+  h1, h2, h3 { font-family: ui-serif, "Iowan Old Style", Charter, Georgia, serif; line-height: 1.2; text-wrap: balance; margin: 0; }
+  h1 { font-size: 2rem; font-weight: 600; }
+  h2 { font-size: 1.35rem; font-weight: 600; margin-top: .3rem; }
+  h3 { font-size: 1.05rem; font-weight: 600; }
+  .crumb { font-size: .78rem; color: var(--muted); }
+  .crumb a { color: var(--muted); }
+  header.masthead { display: flex; flex-direction: column; gap: .55rem; margin-bottom: .5rem; padding-bottom: 1.2rem; border-bottom: 1px solid var(--line); }
+  section { margin-top: 2.6rem; display: flex; flex-direction: column; gap: .85rem; }
+  p, li { margin: 0; }
+  ul, ol { margin: 0; padding-left: 1.3rem; display: flex; flex-direction: column; gap: .45rem; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: #262c29; padding: .1em .35em; border-radius: 3px; font-size: .86em; }
+  pre { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1rem 1.15rem; overflow-x: auto; font-size: .8rem; line-height: 1.55; margin: 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .k { color: var(--kw); } .c { color: var(--cm); font-style: italic; } .t { color: var(--t); }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .tablewrap { overflow-x: auto; }
+  .callout { border-left: 3px solid var(--accent); background: rgba(77,189,147,.08); padding: .8rem 1rem; border-radius: 0 6px 6px 0; font-size: .92rem; }
+  .callout.warn { border-left-color: var(--warn); background: var(--warn-tint); }
+  .callout strong:first-child { display: block; margin-bottom: .25rem; }
+  a { color: var(--accent); }
+  .apilinks { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .apilinks span { border: 1px solid var(--line); border-radius: 999px; padding: .2em .8em; font-family: ui-monospace, Menlo, monospace; font-size: .78rem; color: var(--muted); }
+  .yes { color: var(--chore); font-weight: 600; }
+  .no { color: var(--danger); font-weight: 600; }
+</style>
+
+<main>
+<header class="masthead">
+  <span class="crumb">Epoch Documentation › Guides › <strong>Coordinating Across Streams</strong></span>
+  <h1>Coordinating Across Streams</h1>
+  <p style="color:var(--muted)">Most commands touch one stream. This guide is about the ones
+  that don't — and the two tools Epoch gives you for them: the <strong>atomic batch</strong>
+  and the <strong>saga</strong>.</p>
+</header>
+
+<div class="callout warn" style="margin-top: 1.2rem; font-size: .88rem;">
+  <strong>Northstar draft</strong>
+  This guide describes the intended shape of the batch and saga APIs; neither has shipped
+  yet.
+</div>
+
+<section>
+  <h2>The problem</h2>
+  <p>
+    In Epoch, every aggregate gets its own event stream, and every append is protected by an
+    optimistic version check: your write lands only if the stream is where you left it. That
+    single guarantee carries most applications a long way.
+  </p>
+  <p>
+    Then one day a command needs to change two facts in two streams. A player draws a card:
+    the card must become <em>taken</em> and the player must become <em>holding it</em>. A
+    transfer moves money: one account debits, another credits. A signup claims a username that
+    must be unique across all users. Two appends means two version checks — and a gap between
+    them where a crash or a concurrent writer leaves your system half-changed.
+  </p>
+  <p>
+    You could hand-order the appends and write repair code for every gap. Epoch's earlier
+    consumers did exactly that, and it works — but it's the most delicate code in the
+    application, and it's the same delicate code every time. This guide describes the two
+    patterns Epoch is adopting to replace that delicate code.
+  </p>
+</section>
+
+<section>
+  <h2>Tool one: the atomic batch — when facts must change together</h2>
+  <p>
+    If the facts belong to <strong>one invariant</strong> — the system is simply wrong if one
+    changes without the other — put both writes in one <code>Batch</code> and commit it with
+    <code>transact</code>. The whole batch lands or none of it does, and every version check
+    in it is evaluated at the same instant:
+  </p>
+  <pre><code><span class="k">let mut</span> batch = <span class="t">Batch</span>::new();
+batch.write(&amp;cards,   &amp;card,   card_version.into_exact(),   &amp;[<span class="t">CardTaken</span> { by: player }])?;
+batch.write(&amp;players, &amp;player, player_version.into_exact(), &amp;[<span class="t">CardDrawn</span> { card }])?;
+
+<span class="k">match</span> store.transact(batch).<span class="k">await</span> {
+    <span class="t">Ok</span>(committed) =&gt; { <span class="c">/* both facts are true */</span> }
+    <span class="t">Err</span>(<span class="t">BatchError</span>::Conflict { violated, actual }) =&gt; { <span class="c">/* neither is; reload and retry */</span> }
+    <span class="t">Err</span>(<span class="t">BatchError</span>::Backend(e)) =&gt; { <span class="c">/* infrastructure */</span> }
+}</code></pre>
+  <p>
+    A batch can also <em>pin</em> streams it never writes. Creating a user who must reference
+    an existing truck? Constrain the truck's stream and write only the user's — if the truck
+    is deleted concurrently, your batch conflicts instead of committing a dangling reference:
+  </p>
+  <pre><code>batch.constrain(<span class="t">BatchConstraint</span>::StreamExists(trucks.key(&amp;truck_id)));</code></pre>
+  <p>
+    Uniqueness works the same way. Give each claimed value its own tiny stream and assert it
+    doesn't exist yet — the first writer wins, and there's no read model to go stale:
+  </p>
+  <pre><code>batch.write(&amp;email_claims, &amp;claim_for(&amp;email), <span class="t">ExpectedVersion</span>::NoStream, &amp;[<span class="t">Claimed</span> { user }])?;</code></pre>
+  <p>
+    There is nothing to clean up after a batch. No compensation events, no repair jobs, no
+    "what if we crashed in the middle" — the middle doesn't exist.
+  </p>
+  <div class="callout warn">
+    <strong>Not every backend can do this</strong>
+    <code>transact</code> lives on the <code>AtomicStreams</code> trait, which a backend
+    implements only if its store can commit several streams under one consistency check. The
+    PostgreSQL and in-memory backends are slated to implement it. EventStoreDB cannot, and doesn't pretend
+    to — if your backend lacks <code>AtomicStreams</code>, the compiler tells you, and you
+    fall back to ordered single appends with explicit repair paths.
+  </div>
+</section>
+
+<section>
+  <h2>Tool two: the saga — when one thing follows from another</h2>
+  <p>
+    Not every relationship is an invariant. Often the second write isn't part of the command
+    at all — it's a <em>consequence</em>. When an order ships, the customer gets an email.
+    When a card is taken, the external task tracker gets updated. When a transfer is
+    requested, a debit should be attempted. These are reactions, and reactions want to happen
+    <em>eventually and reliably</em>, not atomically.
+  </p>
+  <p>
+    A saga is a pure routing function — an event in, commands out, no state, no I/O:
+  </p>
+  <pre><code><span class="k">fn</span> react(event: &amp;<span class="t">AppEvent</span>) -&gt; <span class="t">Vec</span>&lt;<span class="t">AppCommand</span>&gt; {
+    <span class="k">match</span> event {
+        <span class="t">TransferRequested</span> { from, amount, .. } =&gt; vec![<span class="t">DebitSender</span> { account: *from, amount: *amount }],
+        <span class="t">SenderDebited</span> { to, amount, .. }       =&gt; vec![<span class="t">CreditRecipient</span> { account: *to, amount: *amount }],
+        <span class="t">CreditRejected</span> { from, amount, .. }    =&gt; vec![<span class="t">RefundSender</span> { account: *from, amount: *amount }],
+        _ =&gt; vec![],
+    }
+}</code></pre>
+  <p>
+    You hand that function to a <code>SagaRunner</code>, and Epoch does the rest: it follows
+    the store's committed event log through an <code>EventFeed</code>, remembers how far your
+    saga has read, delivers each event at least once, and re-delivers anything whose handling
+    failed — through crashes, restarts, and redeploys. Your API handler just appends the
+    triggering event and returns; the saga carries the workflow from there.
+  </p>
+  <div class="callout warn">
+    <strong>The one thing the saga asks of you</strong>
+    "At least once" means your command handling must tolerate a repeat. Design each command so
+    running it twice is harmless — key it by an id the retry shares (the transfer id, the
+    order id), and let your decider answer a duplicate with "already done" instead of doing it
+    again. If a reaction can't be made repeat-safe, it isn't ready to be a saga.
+  </div>
+</section>
+
+<section>
+  <h2>Choosing</h2>
+  <p>One question does most of the work: <strong>if the second write never happened, would
+  the first one be a lie?</strong></p>
+  <ul>
+    <li><em>Yes</em> → it's an invariant. Use a <strong>batch</strong>. A card marked taken
+      with no holder is a lie; a debit with no credit is a lie.</li>
+    <li><em>No</em> → it's a reaction. Use a <strong>saga</strong>. An order with the
+      confirmation email still pending isn't a lie — it's just not finished yet.</li>
+  </ul>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>Atomic batch</th><th>Saga</th></tr></thead>
+    <tbody>
+      <tr><td>Relationship</td><td>shared invariant — together or not at all</td><td>cause and consequence — eventually, reliably</td></tr>
+      <tr><td>Consistency</td><td>strong, one commit</td><td>eventual, at-least-once</td></tr>
+      <tr><td>Failure story</td><td>typed conflict; reload and retry</td><td>redelivery until handled; compensations are domain events</td></tr>
+      <tr><td>What you must design</td><td>the batch (writes + constraints)</td><td>idempotent commands + compensations</td></tr>
+      <tr><td>Runtime footprint</td><td>none</td><td>a background runner per saga</td></tr>
+      <tr><td>Reaches beyond one store?</td><td class="no">no — one store, one commit</td><td class="yes">yes — email, webhooks, other services</td></tr>
+      <tr><td>Backends</td><td>postgres, in-memory</td><td>any backend with an <code>EventFeed</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    The two compose naturally, and most real features use both: the command commits its
+    invariant as one batch, and sagas fan the consequences out from the committed events. In
+    the card game: the draw is a batch (card + player move together); syncing the external
+    task board, notifying the parent's phone, and refreshing the leaderboard are three sagas
+    reading the same log. If you're staring at a transfer-like workflow that spans
+    <em>stores</em> or <em>services</em>, the batch is off the table — model each step as its
+    own aggregate and let a saga walk the chain, with explicit compensation events for the
+    steps that can be refused.
+  </p>
+</section>
+
+<section>
+  <h2>Planned companion documentation</h2>
+  <p style="color:var(--muted); font-size:.88rem">Reference pages this guide will link to once the APIs land:</p>
+  <div class="apilinks">
+    <span>api › AtomicStreams</span>
+    <span>api › Batch &amp; BatchConstraint</span>
+    <span>api › Saga &amp; SagaRunner</span>
+    <span>api › EventFeed &amp; ConsumerGroup</span>
+    <span>guide › Designing idempotent commands</span>
+    <span>guide › Claim streams &amp; parent aggregates</span>
+    <span>guide › Injected context and staleness</span>
+  </div>
+</section>
+</main>

@@ -1,0 +1,444 @@
+<title>Two-Stream Failure Atlas — chore-lottery on Epoch</title>
+<style>
+  /* Fixed dark palette: identical tokens in light and dark so the diagrams' semantic colors stay stable. */
+  :root, :root[data-theme="dark"], :root[data-theme="light"] {
+    --paper: #171a19;
+    --ink: #e6ebe8;
+    --muted: #a4afa9;
+    --line: #333a37;
+    --card: #1e2321;
+    --kid: #7aa7d9;
+    --chore: #4dbd93;
+    --pool: #b3a992;
+    --danger: #e08a72;
+    --danger-tint: rgba(217, 123, 98, 0.10);
+    --warn: #d4b04a;
+    --warn-tint: rgba(207, 169, 63, 0.10);
+    --accent: #4dbd93;
+    --code-bg: #262c29;
+  }
+  html, body {
+    background: var(--paper) !important;
+  }
+  body {
+    color: var(--ink);
+    font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0;
+  }
+  main {
+    max-width: 76ch; margin: 0 auto; padding: 3rem 1.25rem 6rem;
+    background: var(--paper); color: var(--ink);
+  }
+  h1, h2, h3 {
+    font-family: ui-serif, "Iowan Old Style", Charter, Georgia, serif;
+    line-height: 1.2; text-wrap: balance; margin: 0;
+  }
+  h1 { font-size: 2.1rem; font-weight: 600; }
+  h2 { font-size: 1.45rem; font-weight: 600; margin-top: .35rem; }
+  h3 { font-size: 1.08rem; font-weight: 600; }
+  .eyebrow {
+    font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+  }
+  header.masthead { display: flex; flex-direction: column; gap: .6rem; margin-bottom: 1rem; }
+  .masthead .meta { color: var(--muted); font-size: .88rem; }
+  section { margin-top: 3rem; display: flex; flex-direction: column; gap: .9rem; }
+  p { margin: 0; }
+  code, .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .875em;
+  }
+  code { background: var(--code-bg); padding: .1em .35em; border-radius: 3px; }
+  figure { margin: .5rem 0 0; }
+  .figwrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--card); padding: .75rem; }
+  figure svg { display: block; min-width: 720px; max-width: 100%; height: auto; margin: 0 auto; }
+  figcaption { color: var(--muted); font-size: .85rem; margin-top: .55rem; line-height: 1.5; }
+  .lanechip { display: inline-block; width: .7em; height: .7em; border-radius: 2px; vertical-align: baseline; margin-right: .25em; }
+  .aside {
+    border-left: 3px solid var(--warn); background: var(--warn-tint);
+    padding: .8rem 1rem; border-radius: 0 6px 6px 0; font-size: .92rem;
+  }
+  .aside.danger { border-left-color: var(--danger); background: var(--danger-tint); }
+  .aside strong:first-child { display: block; margin-bottom: .25rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+  th, td { text-align: left; padding: .55rem .65rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  td.fid { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 600; white-space: nowrap; }
+  .tablewrap { overflow-x: auto; }
+  ol.qs { margin: 0; padding-left: 1.3rem; display: flex; flex-direction: column; gap: .5rem; }
+  .streams { font-variant-numeric: tabular-nums; }
+  a { color: var(--accent); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<main>
+<header class="masthead">
+  <span class="eyebrow">chore-lottery × epoch · design annex · 2026-08</span>
+  <h1>Two-Stream Failure Atlas</h1>
+  <p class="meta">Every way a draw or return can die between the kid stream and the chore
+  stream, what state each death leaves behind, and who repairs it. Companion to the
+  Fmodel / EvidentDB research: the open question is <em>where the cross-stream
+  invariant should live</em> — app coordinator (today), saga/router, or atomic multi-stream
+  batch. The saga and batch designs shown here are proposals, not shipped API.</p>
+</header>
+
+<section>
+  <span class="eyebrow">The invariant</span>
+  <h2>One card, one kid — with no transaction that spans both facts</h2>
+  <p>
+    A draw must make two facts true in two different event streams:
+    the <span class="mono" style="color:var(--chore)">chore stream</span> records the card
+    <code>Assigned</code> to the kid, and the
+    <span class="mono" style="color:var(--kid)">kid stream</span> records the kid accepting it
+    (<code>DrewChore</code>). Epoch gives one primitive: a version-checked
+    <code>append</code> to a <em>single</em> stream. Nothing spans both. Chore-lottery's answer
+    today: order the writes so the failure modes are benign — <strong>chore-first on draw,
+    kid-first on return</strong> — and give every gap a named repair path. This document draws
+    each gap.
+  </p>
+</section>
+
+<section>
+  <span class="eyebrow">Figure 1 · the draw</span>
+  <h2>Chore-first draw, with its three failure windows</h2>
+  <figure>
+    <div class="figwrap">
+    <svg viewBox="0 0 880 640" role="img" aria-label="Sequence diagram of the draw operation: coordinator loads the kid stream, reads the pool, loads the chore stream, appends Assigned to the chore stream, appends DrewChore to the kid stream, then applies to the pool. Failure points F1, F2, F3 and F5 are marked at the two appends, the window between them, and the pool apply.">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g font-size="12.5" fill="currentColor">
+        <!-- lane headers -->
+        <g font-weight="600" text-anchor="middle">
+          <rect x="60" y="16" width="120" height="30" rx="4" fill="none" stroke="currentColor"/>
+          <text x="120" y="36">coordinator</text>
+          <rect x="290" y="16" width="130" height="30" rx="4" fill="none" stroke="var(--kid)"/>
+          <text x="355" y="36" fill="var(--kid)">kid stream</text>
+          <rect x="520" y="16" width="130" height="30" rx="4" fill="none" stroke="var(--chore)"/>
+          <text x="585" y="36" fill="var(--chore)">chore stream</text>
+          <rect x="730" y="16" width="120" height="30" rx="4" fill="none" stroke="var(--pool)"/>
+          <text x="790" y="36" fill="var(--pool)">ready pool</text>
+        </g>
+        <!-- lifelines -->
+        <line x1="120" y1="46" x2="120" y2="600" stroke="currentColor" stroke-opacity=".35"/>
+        <line x1="355" y1="46" x2="355" y2="600" stroke="var(--kid)" stroke-opacity=".45"/>
+        <line x1="585" y1="46" x2="585" y2="600" stroke="var(--chore)" stroke-opacity=".45"/>
+        <line x1="790" y1="46" x2="790" y2="600" stroke="var(--pool)" stroke-opacity=".45"/>
+
+        <!-- 1 load kid -->
+        <line x1="120" y1="86" x2="349" y2="86" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="132" y="80">load(kid)</text>
+        <line x1="355" y1="108" x2="126" y2="108" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+        <text x="132" y="126">events, v<tspan baseline-shift="sub" font-size="9">kid</tspan> · gate: Idle (else reconcile &#8594; AlreadyHolds)</text>
+
+        <!-- 2 pool read -->
+        <line x1="120" y1="156" x2="784" y2="156" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="132" y="150">ready_cards() &#8594; select(roll)</text>
+        <line x1="790" y1="178" x2="126" y2="178" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+        <text x="132" y="196">candidate card + pool digest</text>
+
+        <!-- 3 load chore -->
+        <line x1="120" y1="226" x2="579" y2="226" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="132" y="220">load(card)</text>
+        <line x1="585" y1="248" x2="126" y2="248" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+        <text x="132" y="266">events, v<tspan baseline-shift="sub" font-size="9">chore</tspan> · gate: Ready (else CardNotReady)</text>
+
+        <!-- 4 append chore (reserve) -->
+        <line x1="120" y1="306" x2="579" y2="306" stroke="var(--chore)" stroke-width="2.5" marker-end="url(#arr)"/>
+        <text x="132" y="300" fill="var(--chore)" font-weight="600">append(v&#8203;<tspan baseline-shift="sub" font-size="9">chore</tspan>, [Assigned]) — OCC reserve</text>
+        <circle cx="585" cy="306" r="9" fill="none" stroke="var(--danger)" stroke-width="1.5"/>
+        <text x="602" y="310" fill="var(--danger)" font-weight="600">F1 conflict &#8594; abort, nothing written</text>
+
+        <!-- W2 orphan window -->
+        <rect x="70" y="330" width="740" height="58" fill="var(--danger-tint)" stroke="var(--danger)" stroke-dasharray="5 4" rx="4"/>
+        <text x="86" y="354" fill="var(--danger)" font-weight="600">F2 · orphan window</text>
+        <text x="86" y="374" fill="var(--danger)">crash here: card is Assigned, kid stream untouched — no one holds it, card stuck InProgress</text>
+
+        <!-- 5 append kid (accept) -->
+        <line x1="120" y1="426" x2="349" y2="426" stroke="var(--kid)" stroke-width="2.5" marker-end="url(#arr)"/>
+        <text x="132" y="420" fill="var(--kid)" font-weight="600">append(v&#8203;<tspan baseline-shift="sub" font-size="9">kid</tspan>, [DrewChore]) — OCC accept</text>
+        <circle cx="355" cy="426" r="9" fill="none" stroke="var(--danger)" stroke-width="1.5"/>
+        <text x="372" y="430" fill="var(--danger)" font-weight="600">F3 conflict &#8594; same orphan as F2, surfaced as LostRace</text>
+
+        <!-- 6 pool apply -->
+        <line x1="120" y1="482" x2="784" y2="482" stroke="var(--pool)" stroke-width="2" marker-end="url(#arr)"/>
+        <text x="132" y="476" fill="var(--pool)" font-weight="600">apply(Assigned)</text>
+        <circle cx="790" cy="482" r="9" fill="none" stroke="var(--danger)" stroke-width="1.5"/>
+        <text x="640" y="504" fill="var(--danger)" font-weight="600">F5 fails &#8594; stale read model</text>
+
+        <!-- outcome -->
+        <rect x="60" y="540" width="330" height="34" rx="4" fill="none" stroke="var(--accent)"/>
+        <text x="76" y="562" fill="var(--accent)" font-weight="600">Ok(Drawn { assignment, pool digest })</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>
+      <span class="lanechip" style="background:var(--chore)"></span>Chore stream commits first,
+      so a lost race (<span class="mono">F1</span>) applies nothing anywhere and a double-assign is
+      impossible regardless of instance count. The price is the
+      <span class="mono" style="color:var(--danger)">F2/F3</span> orphan window: the reservation
+      landed but the acceptance didn't.
+    </figcaption>
+  </figure>
+  <p>
+    The orphan is <em>deliberately not repaired by the draw path</em>. The kid remains Idle, can
+    draw a different card, and the stuck card shows up in chore-lottery's parent-facing view of long-held cards; a
+    parent <strong>return</strong> is the compensation. <code>reconcile</code> only handles the
+    inverse retry: kid stream says Working, so re-read the card and hand back
+    <code>AlreadyHolds</code> instead of drawing twice.
+  </p>
+</section>
+
+<section>
+  <span class="eyebrow">Figure 2 · the return</span>
+  <h2>Kid-first return — the mirror image, with the mirror-image gap</h2>
+  <figure>
+    <div class="figwrap">
+    <svg viewBox="0 0 880 470" role="img" aria-label="Sequence diagram of return-to-pool: coordinator loads the chore stream to find the holder, loads the kid stream, appends MarkReturned to the kid stream, then appends ReturnedToPool to the chore stream, then applies to the pool. Failure window F4 sits between the two appends.">
+      <defs>
+        <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g font-size="12.5" fill="currentColor">
+        <g font-weight="600" text-anchor="middle">
+          <rect x="60" y="16" width="120" height="30" rx="4" fill="none" stroke="currentColor"/>
+          <text x="120" y="36">coordinator</text>
+          <rect x="290" y="16" width="130" height="30" rx="4" fill="none" stroke="var(--kid)"/>
+          <text x="355" y="36" fill="var(--kid)">kid stream</text>
+          <rect x="520" y="16" width="130" height="30" rx="4" fill="none" stroke="var(--chore)"/>
+          <text x="585" y="36" fill="var(--chore)">chore stream</text>
+          <rect x="730" y="16" width="120" height="30" rx="4" fill="none" stroke="var(--pool)"/>
+          <text x="790" y="36" fill="var(--pool)">ready pool</text>
+        </g>
+        <line x1="120" y1="46" x2="120" y2="430" stroke="currentColor" stroke-opacity=".35"/>
+        <line x1="355" y1="46" x2="355" y2="430" stroke="var(--kid)" stroke-opacity=".45"/>
+        <line x1="585" y1="46" x2="585" y2="430" stroke="var(--chore)" stroke-opacity=".45"/>
+        <line x1="790" y1="46" x2="790" y2="430" stroke="var(--pool)" stroke-opacity=".45"/>
+
+        <line x1="120" y1="86" x2="579" y2="86" stroke="currentColor" marker-end="url(#arr2)"/>
+        <text x="132" y="80">load(card) · gate: InProgress (else NotInProgress) &#8594; holder</text>
+
+        <line x1="120" y1="126" x2="349" y2="126" stroke="currentColor" marker-end="url(#arr2)"/>
+        <text x="132" y="120">load(holder) · does the kid actually hold this card?</text>
+
+        <line x1="120" y1="176" x2="349" y2="176" stroke="var(--kid)" stroke-width="2.5" marker-end="url(#arr2)"/>
+        <text x="132" y="170" fill="var(--kid)" font-weight="600">append(v&#8203;<tspan baseline-shift="sub" font-size="9">kid</tspan>, [MarkReturned]) — only if holding; else skip (freed_kid: None)</text>
+
+        <rect x="70" y="200" width="740" height="56" fill="var(--danger-tint)" stroke="var(--danger)" stroke-dasharray="5 4" rx="4"/>
+        <text x="86" y="224" fill="var(--danger)" font-weight="600">F4 · half-returned window</text>
+        <text x="86" y="244" fill="var(--danger)">crash here: kid already Idle, card still InProgress — a repeated parent return completes it</text>
+
+        <line x1="120" y1="296" x2="579" y2="296" stroke="var(--chore)" stroke-width="2.5" marker-end="url(#arr2)"/>
+        <text x="132" y="290" fill="var(--chore)" font-weight="600">append(v&#8203;<tspan baseline-shift="sub" font-size="9">chore</tspan>, [ReturnedToPool]) — OCC</text>
+
+        <line x1="120" y1="346" x2="784" y2="346" stroke="var(--pool)" stroke-width="2" marker-end="url(#arr2)"/>
+        <text x="132" y="340" fill="var(--pool)" font-weight="600">apply(ReturnedToPool)</text>
+        <circle cx="790" cy="346" r="9" fill="none" stroke="var(--danger)" stroke-width="1.5"/>
+        <text x="580" y="368" fill="var(--danger)" font-weight="600">F5&#8242; fails &#8594; return DID land; rebuild pool, don't retry</text>
+
+        <rect x="60" y="396" width="360" height="34" rx="4" fill="none" stroke="var(--accent)"/>
+        <text x="76" y="418" fill="var(--accent)" font-weight="600">Ok(ReturnOutcome { card, freed_kid: Option })</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>
+      Kid-first ordering means the kid is never left holding a card the pool thinks is Ready.
+      The <span class="mono" style="color:var(--danger)">F4</span> crash inverts the draw's
+      orphan — and the same repeated-parent-return repairs both, because the kid-side append is
+      skipped whenever the kid doesn't hold the card. Note
+      <span class="mono" style="color:var(--danger)">F5&#8242;</span>: after the events land, a
+      pool failure must <em>not</em> be retried as a command (a retry reports
+      <code>NotInProgress</code>); the repair is a projection rebuild.
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <span class="eyebrow">The ledger</span>
+  <h2>Failure ledger</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr>
+      <th>Case</th><th>Where it dies</th><th>State left behind</th><th>Repair</th><th>Caller signal</th>
+    </tr></thead>
+    <tbody class="streams">
+      <tr><td class="fid">F1</td><td>Chore reserve loses OCC race</td><td>Nothing written anywhere</td><td>None needed; retry the draw</td><td><code>LostRace { Chore }</code></td></tr>
+      <tr><td class="fid">F2</td><td>Crash between reserve and accept</td><td>Card <code>InProgress</code>, kid Idle (orphan)</td><td>Parent return; <code>freed_kid: None</code></td><td>None — process died</td></tr>
+      <tr><td class="fid">F3</td><td>Kid accept loses OCC race</td><td>Same orphan as F2</td><td>Parent return; kid may hold a different card by then</td><td><code>LostRace { Kid }</code></td></tr>
+      <tr><td class="fid">F4</td><td>Crash between free-kid and return-card</td><td>Kid Idle, card still <code>InProgress</code></td><td>Repeat the parent return (kid side skips)</td><td>None — process died</td></tr>
+      <tr><td class="fid">F5</td><td>Pool projection apply fails after events land</td><td>Streams correct, read model stale</td><td>Rebuild projection — never retry the command</td><td><code>DrawError::Pool</code> / <code>ReturnError::Pool</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="aside danger">
+    <strong>Caveat: the in-memory OCC hole</strong>
+    Every one of these guarantees rests on the version check. The in-memory backend tracks
+    <code>position = len − 1</code>, so an empty stream and a one-event stream are both
+    "version 0" — two racing <em>single-event</em> appends at <code>Exact(0)</code> both
+    succeed. Chore-lottery's deciders emit single-event batches, which means the race tests
+    that validated this atlas in memory were partly testing an OCC that wasn't there. The
+    postgres backend (1-based sequence, <code>NoStream</code> for empty) is correct. Unifying
+    version semantics on the postgres model is a prerequisite for trusting any multi-stream
+    story.
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Figure 3 · the actual question</span>
+  <h2>Three homes for the cross-stream invariant</h2>
+  <p>
+    The eight repeated error-mapping blocks and the two hand-ordered appends are symptoms.
+    The disease is that <em>somebody</em> has to own the in-between state (the orphan), and
+    today that somebody is the application. The three candidate designs differ in exactly one
+    thing: where the atomicity boundary sits, and therefore who carries the gap.
+  </p>
+  <figure>
+    <div class="figwrap">
+    <svg viewBox="0 0 880 360" role="img" aria-label="Three-panel comparison. Panel A, today: a coordinator writes two streams with two separate atomic appends, ordered 1 then 2, with a dashed compensation arrow labeled parent return repairs orphan. Panel B, saga: the coordinator writes only the chore stream; a saga reacts to the Assigned event and issues a command to the kid stream, at-least-once. Panel C, atomic batch: one boundary encloses both appends as a single conditional transaction.">
+      <defs>
+        <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g font-size="12" fill="currentColor">
+        <!-- panel dividers -->
+        <line x1="296" y1="20" x2="296" y2="340" stroke="currentColor" stroke-opacity=".18"/>
+        <line x1="590" y1="20" x2="590" y2="340" stroke="currentColor" stroke-opacity=".18"/>
+
+        <!-- ============ Panel A: today ============ -->
+        <text x="24" y="36" font-weight="700">A · app coordinator (today)</text>
+        <rect x="24" y="52" width="104" height="30" rx="4" fill="none" stroke="currentColor"/>
+        <text x="40" y="72">coordinator</text>
+        <!-- chore box with own boundary -->
+        <rect x="160" y="96" width="112" height="34" rx="4" fill="none" stroke="var(--chore)"/>
+        <text x="176" y="118" fill="var(--chore)">chore stream</text>
+        <rect x="152" y="88" width="128" height="50" rx="7" fill="none" stroke="var(--accent)" stroke-dasharray="5 4"/>
+        <rect x="160" y="196" width="112" height="34" rx="4" fill="none" stroke="var(--kid)"/>
+        <text x="176" y="218" fill="var(--kid)">kid stream</text>
+        <rect x="152" y="188" width="128" height="50" rx="7" fill="none" stroke="var(--accent)" stroke-dasharray="5 4"/>
+        <line x1="128" y1="76" x2="150" y2="104" stroke="var(--chore)" stroke-width="2" marker-end="url(#arr3)"/>
+        <text x="96" y="102" fill="var(--chore)" font-weight="600">&#9312; reserve</text>
+        <line x1="100" y1="82" x2="150" y2="208" stroke="var(--kid)" stroke-width="2" marker-end="url(#arr3)"/>
+        <text x="60" y="180" fill="var(--kid)" font-weight="600">&#9313; accept</text>
+        <path d="M 216 238 C 216 290, 120 300, 76 300" fill="none" stroke="var(--danger)" stroke-dasharray="4 3" marker-end="url(#arr3)"/>
+        <text x="24" y="322" fill="var(--danger)">gap owner: the app — parent return repairs the orphan</text>
+
+        <!-- ============ Panel B: saga / router ============ -->
+        <text x="318" y="36" font-weight="700">B · saga / event router</text>
+        <rect x="318" y="52" width="104" height="30" rx="4" fill="none" stroke="currentColor"/>
+        <text x="334" y="72">coordinator</text>
+        <rect x="454" y="96" width="112" height="34" rx="4" fill="none" stroke="var(--chore)"/>
+        <text x="470" y="118" fill="var(--chore)">chore stream</text>
+        <rect x="446" y="88" width="128" height="50" rx="7" fill="none" stroke="var(--accent)" stroke-dasharray="5 4"/>
+        <line x1="422" y1="76" x2="444" y2="104" stroke="var(--chore)" stroke-width="2" marker-end="url(#arr3)"/>
+        <text x="392" y="102" fill="var(--chore)" font-weight="600">&#9312;</text>
+        <!-- saga box -->
+        <rect x="330" y="160" width="120" height="34" rx="17" fill="none" stroke="currentColor"/>
+        <text x="352" y="182">saga reacts</text>
+        <path d="M 470 138 C 470 160, 452 172, 452 176" fill="none" stroke="currentColor" marker-end="url(#arr3)"/>
+        <text x="480" y="164">Assigned event</text>
+        <rect x="454" y="226" width="112" height="34" rx="4" fill="none" stroke="var(--kid)"/>
+        <text x="470" y="248" fill="var(--kid)">kid stream</text>
+        <rect x="446" y="218" width="128" height="50" rx="7" fill="none" stroke="var(--accent)" stroke-dasharray="5 4"/>
+        <path d="M 396 194 C 400 226, 430 238, 444 240" fill="none" stroke="var(--kid)" stroke-width="2" marker-end="url(#arr3)"/>
+        <text x="318" y="228" fill="var(--kid)" font-weight="600">&#9313; cmd, at-least-once</text>
+        <text x="318" y="322" fill="var(--danger)">gap owner: the saga — retries until accept lands;</text>
+        <text x="318" y="340" fill="var(--danger)">gap still exists, but it is machinery, not domain code</text>
+
+        <!-- ============ Panel C: atomic batch ============ -->
+        <text x="612" y="36" font-weight="700">C · atomic multi-stream batch</text>
+        <rect x="612" y="52" width="104" height="30" rx="4" fill="none" stroke="currentColor"/>
+        <text x="628" y="72">coordinator</text>
+        <rect x="748" y="96" width="112" height="34" rx="4" fill="none" stroke="var(--chore)"/>
+        <text x="764" y="118" fill="var(--chore)">chore stream</text>
+        <rect x="748" y="176" width="112" height="34" rx="4" fill="none" stroke="var(--kid)"/>
+        <text x="764" y="198" fill="var(--kid)">kid stream</text>
+        <!-- single boundary around both -->
+        <rect x="738" y="84" width="132" height="140" rx="9" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-dasharray="6 4"/>
+        <line x1="716" y1="70" x2="740" y2="110" stroke="var(--chore)" stroke-width="2" marker-end="url(#arr3)"/>
+        <line x1="700" y1="80" x2="740" y2="190" stroke="var(--kid)" stroke-width="2" marker-end="url(#arr3)"/>
+        <text x="640" y="146" font-weight="600">one batch,</text>
+        <text x="640" y="164" font-weight="600">one version check</text>
+        <text x="612" y="322" fill="var(--accent)">gap owner: nobody — the window does not exist;</text>
+        <text x="612" y="340" fill="var(--accent)">the store must support conditional multi-stream commit</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>
+      The dashed <span style="color:var(--accent)">accent boundary</span> is the unit of
+      atomicity. A and B keep single-stream appends and differ only in <em>who retries across
+      the gap</em>; C removes the gap by widening the boundary — which is a store capability
+      (postgres could do it in one transaction today; ESDB cannot).
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <span class="eyebrow">Research findings · fmodel (fraktalio)</span>
+  <h2>Fmodel: combine when invariants are shared, saga when they aren't</h2>
+  <p>
+    Fmodel ships no two-stream primitive. It ships a <strong>design axis</strong> with two
+    poles, and a rule for choosing (Dugalic, fmodel discussions #37 and #334):
+  </p>
+  <ol class="qs">
+    <li><strong><code>Decider::combine</code> — the strong pole.</strong> A monoid:
+      <code>Decider&lt;C1,S1,E1&gt; + Decider&lt;C2,S2,E2&gt; &#8594;
+      Decider&lt;Sum&lt;C1,C2&gt;, (S1,S2), Sum&lt;E1,E2&gt;&gt;</code>. The combined decider
+      handles a command in <em>one fetch &#8594; decide &#8594; save cycle</em>; if the
+      repository commits in one transaction (their sqlx demo does, even across
+      <code>decider_id</code> streams), the two former aggregates become one consistency
+      boundary. Rule: combine <em>only</em> deciders that share an invariant.</li>
+    <li><strong><code>Saga</code> — the eventual pole.</strong> Deliberately a stateless dumb
+      pipe: <code>react: Fn(&amp;Event) &#8594; Vec&lt;Command&gt;</code>. All retry and
+      at-least-once machinery lives in the event-streaming adapter (their
+      <code>fstore-sql</code>: a Postgres poll stream with ack/nack offsets), never in the
+      saga. Stateful process managers were <em>removed on purpose</em> — a workflow with state
+      should be its own Decider.</li>
+    <li><strong>Verdict for this atlas:</strong> "one card, one kid" <em>is</em> a shared
+      invariant, so Fmodel's answer to Figures 1–2 is blunt: the kid and chore deciders belong
+      in one consistency boundary for the draw — panel C — not in a hand-ordered panel A.
+      Compensation-by-parent-return would remain domain code either way.</li>
+  </ol>
+</section>
+
+<section>
+  <span class="eyebrow">Research findings · evidentdb (calderwood)</span>
+  <h2>EvidentDB: the multi-stream atomic batch is real; the "event router" description is not</h2>
+  <ol class="qs">
+    <li><strong>Confirmed — panel C exists in the wild.</strong> One
+      <code>transactBatch</code> carries events for <em>multiple streams</em> plus a list of
+      <code>BatchConstraint</code>s — <code>StreamExists</code> /
+      <code>StreamDoesNotExist</code> / <code>StreamMaxRevision</code>, and the same three
+      over <code>Subject</code> and <code>SubjectOnStream</code> — all evaluated against one
+      database-wide <code>basis_revision</code>. The whole batch commits or the whole batch
+      rejects. Constraints may reference streams the batch doesn't even write.</li>
+    <li><strong>The "event router" description is inaccurate.</strong> Cross-stream <em>automation</em>
+      in Calderwood's model is an application-side <code>React (AR) &#8594; List&lt;A&gt;</code>
+      function (same shape as Fmodel's saga), eventual by nature. The only literal router in
+      the codebase is Kafka topic plumbing. The database's own contribution to multi-stream
+      use cases is precisely the atomic constrained batch.</li>
+    <li><strong>The cost that bought it:</strong> a Datomic-style single writer per database
+      (Kafka Streams transactor, one partition per database log). Write throughput caps at
+      the database; scaling out means sharding databases and falling back to sagas across
+      them.</li>
+    <li><strong>Status:</strong> alpha, dormant since Jan 2024, canonical repo deleted
+      (a full mirror survives), Apache-2.0. A design source, not a dependency.</li>
+  </ol>
+  <div class="aside">
+    <strong>Convergent conclusion</strong>
+    Both reference designs agree: there is no missing "two-stream coordinator" abstraction.
+    Shared invariant &#8594; widen the atomic boundary (combine / constrained batch, panel C).
+    No shared invariant &#8594; stateless event-to-command pipe with at-least-once delivery
+    (panel B), retries owned by infrastructure. Panel A — today's hand-rolled ordering — is
+    what you build when the store can't do C and you won't run B. Epoch's postgres backend
+    sits on a store that <em>can</em> do C in one transaction with per-stream advisory locks;
+    ESDB genuinely cannot. That makes the honest library shape a <em>capability split</em>:
+    a batch-append trait postgres implements and ESDB doesn't — with EvidentDB's
+    <code>BatchConstraint</code> vocabulary (minus Subject) as the proven starting point for
+    its expected-version language.
+  </div>
+</section>
+</main>

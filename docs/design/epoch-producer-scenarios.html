@@ -1,0 +1,331 @@
+<title>Epoch Producer Scenarios — Saga &amp; Atomic Batch from the API</title>
+<style>
+  /* Committed dark styling — matches the atlas, skeletons, and flowcharts. */
+  :root, :root[data-theme="dark"], :root[data-theme="light"] {
+    --paper: #171a19;
+    --ink: #e6ebe8;
+    --muted: #a4afa9;
+    --line: #333a37;
+    --card: #1e2321;
+    --kid: #7aa7d9;
+    --chore: #4dbd93;
+    --danger: #e08a72;
+    --danger-tint: rgba(217, 123, 98, 0.10);
+    --warn: #d4b04a;
+    --warn-tint: rgba(207, 169, 63, 0.10);
+    --accent: #4dbd93;
+    --hask: #c9a3d9;
+    --kw: #d4b04a;
+    --cm: #7d8a83;
+    --t: #7aa7d9;
+  }
+  html, body { background: var(--paper) !important; }
+  body { color: var(--ink); font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; }
+  main { max-width: 86ch; margin: 0 auto; padding: 3rem 1.25rem 6rem; background: var(--paper); color: var(--ink); }
+  h1, h2 { font-family: ui-serif, "Iowan Old Style", Charter, Georgia, serif; line-height: 1.2; text-wrap: balance; margin: 0; }
+  h1 { font-size: 2.05rem; font-weight: 600; }
+  h2 { font-size: 1.32rem; font-weight: 600; margin-top: .3rem; }
+  .eyebrow { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  header.masthead { display: flex; flex-direction: column; gap: .6rem; margin-bottom: 1rem; }
+  .masthead .meta { color: var(--muted); font-size: .88rem; }
+  section { margin-top: 3.2rem; display: flex; flex-direction: column; gap: .9rem; }
+  p { margin: 0; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: #262c29; padding: .1em .35em; border-radius: 3px; font-size: .86em; }
+  pre { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--chore); border-radius: 6px; padding: 1rem 1.15rem; overflow-x: auto; font-size: .8rem; line-height: 1.55; margin: 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  pre.saga { border-left-color: var(--kid); }
+  pre.bad { border-left-color: var(--danger); }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .k { color: var(--kw); } .c { color: var(--cm); font-style: italic; } .t { color: var(--t); }
+  .tag { display: inline-block; font-family: ui-monospace, Menlo, monospace; font-size: .7rem; font-weight: 700; letter-spacing: .08em; padding: .15em .55em; border-radius: 999px; border: 1px solid; margin-right: .4rem; }
+  .tag.c3 { color: var(--chore); border-color: var(--chore); }
+  .tag.b2 { color: var(--kid); border-color: var(--kid); }
+  .tag.x  { color: var(--danger); border-color: var(--danger); }
+  .aside { border-left: 3px solid var(--warn); background: var(--warn-tint); padding: .8rem 1rem; border-radius: 0 6px 6px 0; font-size: .92rem; }
+  .aside.danger { border-left-color: var(--danger); background: var(--danger-tint); }
+  .aside strong:first-child { display: block; margin-bottom: .25rem; }
+</style>
+
+<main>
+<header class="masthead">
+  <span class="eyebrow">epoch redesign · producer scenarios · 2026-08</span>
+  <h1>Saga &amp; Atomic Batch from the API</h1>
+  <p class="meta">Producer-side Rust for eight scenarios: what an axum handler would write
+  under panel B (<span style="color:var(--kid)">saga + feed</span>) and panel C
+  (<span style="color:var(--chore)">atomic batch</span>). Every API shown here is proposed,
+  not shipped; see the ADRs for status. Internals glossed; the shape of the
+  call is the point. Shared setup assumed throughout:</p>
+  <pre><code><span class="k">struct</span> <span class="t">App</span> {
+    store:  <span class="t">PgEventStore</span>,                      <span class="c">// implements AtomicStreams + EventFeed</span>
+    kids:   <span class="t">PgStreams</span>&lt;<span class="t">KidEvent</span>&gt;,   chores: <span class="t">PgStreams</span>&lt;<span class="t">ChoreEvent</span>&gt;,
+    users:  <span class="t">PgStreams</span>&lt;<span class="t">UserEvent</span>&gt;,  trucks: <span class="t">PgStreams</span>&lt;<span class="t">TruckEvent</span>&gt;,
+    <span class="c">// every PgStreams is a typed view over the same store; load() returns (events, StreamVersion)</span>
+}
+<span class="c">// fold(events) → state; Decider::decide(&amp;state, &amp;cmd) → Result&lt;Vec&lt;E&gt;, DomainErr&gt; — glossed below</span></code></pre>
+</header>
+
+<section>
+  <span class="eyebrow">scenario 1</span>
+  <h2><span class="tag c3">C</span>Unique bounds without a read model — the claim stream</h2>
+  <p>"Username must be unique" is set validation: a single-entity write gated by a
+  multi-entity fact. Don't consult a read model in the decide path at all — make the fact a
+  <em>stream</em>, so it has an OCC handle. One claim stream per claimed value;
+  <code>NoStream</code> is the uniqueness check.</p>
+  <pre><code><span class="c">// POST /users { email }</span>
+<span class="k">async fn</span> register(<span class="t">State</span>(app): <span class="t">State</span>&lt;<span class="t">App</span>&gt;, <span class="t">Json</span>(req): <span class="t">Json</span>&lt;<span class="t">RegisterReq</span>&gt;) -&gt; <span class="t">ApiResult</span> {
+    <span class="k">let</span> user = <span class="t">UserId</span>::new();
+    <span class="k">let mut</span> batch = <span class="t">Batch</span>::new();
+
+    <span class="c">// the uniqueness invariant IS this line: first writer wins, forever</span>
+    batch.write(&amp;app.email_claims, &amp;<span class="t">EmailClaimId</span>::from(&amp;req.email),
+                <span class="t">ExpectedVersion</span>::NoStream, &amp;[<span class="t">EmailClaimed</span> { user }])?;
+    batch.write(&amp;app.users, &amp;<span class="t">UserStreamId</span>::from(user),
+                <span class="t">ExpectedVersion</span>::NoStream, &amp;[<span class="t">UserRegistered</span> { email: req.email }])?;
+
+    <span class="k">match</span> app.store.transact(batch).<span class="k">await</span> {
+        <span class="t">Ok</span>(_) =&gt; <span class="t">Ok</span>(<span class="t">Json</span>(user)),
+        <span class="t">Err</span>(<span class="t">BatchError</span>::Conflict { violated, .. }) =&gt; <span class="t">Err</span>(<span class="t">ApiError</span>::conflict(<span class="s">"email taken"</span>)),
+        <span class="t">Err</span>(<span class="t">BatchError</span>::Backend(e)) =&gt; <span class="t">Err</span>(<span class="t">ApiError</span>::internal(e)),
+    }
+}</code></pre>
+  <p class="meta" style="color:var(--muted)">Consistency: strong. No stale window exists because
+  nothing was read — the constraint carries the whole invariant. This is the pattern scenario 8
+  falls back to when versioned ctx is too coarse.</p>
+</section>
+
+<section>
+  <span class="eyebrow">scenario 2</span>
+  <h2><span class="tag c3">C</span>Kids / chores: chore-lottery's draw</h2>
+  <pre><code><span class="c">// POST /kids/:kid/draw</span>
+<span class="k">async fn</span> draw(<span class="t">State</span>(app): <span class="t">State</span>&lt;<span class="t">App</span>&gt;, <span class="t">Path</span>(kid): <span class="t">Path</span>&lt;<span class="t">KidId</span>&gt;) -&gt; <span class="t">ApiResult</span> {
+    <span class="k">let</span> (kid_ev, v_kid)     = app.kids.load(&amp;<span class="t">KidStreamId</span>::from(kid)).<span class="k">await</span>?;
+    <span class="k">let</span> kid_state           = fold(kid_ev);            <span class="c">// gate: Idle, else AlreadyHolds path</span>
+    <span class="k">let</span> card                = app.pool.select(roll)?;  <span class="c">// read model picks the candidate</span>
+    <span class="k">let</span> (chore_ev, v_chore) = app.chores.load(&amp;<span class="t">ChoreStreamId</span>::from(card)).<span class="k">await</span>?;
+
+    <span class="k">let</span> assigned = <span class="t">ChoreDecider</span>::decide(&amp;fold(chore_ev), &amp;<span class="t">Assign</span> { kid, .. })?;
+    <span class="k">let</span> drew     = <span class="t">KidDecider</span>::decide(&amp;kid_state, &amp;<span class="t">DrawChore</span> { card, .. })?;
+
+    <span class="k">let mut</span> batch = <span class="t">Batch</span>::new();
+    batch.write(&amp;app.chores, &amp;card, v_chore.into_exact(), &amp;assigned)?;
+    batch.write(&amp;app.kids,   &amp;kid,  v_kid.into_exact(),   &amp;drew)?;
+
+    <span class="k">match</span> app.store.transact(batch).<span class="k">await</span> {
+        <span class="t">Ok</span>(committed) =&gt; <span class="t">Ok</span>(<span class="t">Json</span>(<span class="t">DrawOutcome</span>::from(committed))),
+        <span class="t">Err</span>(<span class="t">BatchError</span>::Conflict { .. }) =&gt; <span class="t">Err</span>(<span class="t">ApiError</span>::retry_after_reload()),  <span class="c">// old F1; F2–F4 gone</span>
+        <span class="t">Err</span>(<span class="t">BatchError</span>::Backend(e)) =&gt; <span class="t">Err</span>(<span class="t">ApiError</span>::internal(e)),
+    }
+}</code></pre>
+  <p class="meta" style="color:var(--muted)">The pool read model still selects the candidate
+  (stale is fine — the batch is the truth check). The whole coordinator, reconcile machinery
+  aside, becomes this handler.</p>
+</section>
+
+<section>
+  <span class="eyebrow">scenario 3</span>
+  <h2><span class="tag c3">C</span>Trucker-buddy — write one stream, constrain another</h2>
+  <p>User creation requires the assigned truck to exist <em>at commit time</em>. The batch
+  never writes the truck stream — it only pins it. This is the EvidentDB move: constraints
+  range over streams the batch doesn't touch.</p>
+  <pre><code><span class="c">// POST /users { name, truck_id }</span>
+<span class="k">async fn</span> create_user(<span class="t">State</span>(app): <span class="t">State</span>&lt;<span class="t">App</span>&gt;, <span class="t">Json</span>(req): <span class="t">Json</span>&lt;<span class="t">CreateUser</span>&gt;) -&gt; <span class="t">ApiResult</span> {
+    <span class="k">let</span> user = <span class="t">UserId</span>::new();
+    <span class="k">let mut</span> batch = <span class="t">Batch</span>::new();
+
+    <span class="c">// existence pin: locked + checked in the same tx as the write — a truck</span>
+    <span class="c">// decommissioned concurrently makes this batch CONFLICT, not silently succeed</span>
+    batch.constrain(<span class="t">BatchConstraint</span>::StreamExists(app.trucks.key(&amp;req.truck_id)));
+
+    batch.write(&amp;app.users, &amp;<span class="t">UserStreamId</span>::from(user), <span class="t">ExpectedVersion</span>::NoStream,
+                &amp;[<span class="t">UserCreated</span> { name: req.name, truck: req.truck_id }])?;
+
+    respond(app.store.transact(batch).<span class="k">await</span>)
+}</code></pre>
+  <div class="aside">
+    <strong>Sharper variant</strong>
+    <code>StreamExists</code> asserts "was ever created." If the invariant is "exists and is
+    currently in service," existence isn't enough — either constrain
+    <code>StreamAt(trucks.key(id), Exact(v))</code> with the version you validated the truck's
+    state at (see scenario 8), or write a marker event to the truck stream and let its decider
+    reject when decommissioned. Choose by whether the truck aggregate should <em>know</em> about
+    assignments.
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">scenario 4</span>
+  <h2><span class="tag c3">C</span>Group vs individual — the parent stream as OCC anchor</h2>
+  <p>"users vs user/&lt;id&gt;" generalized: any invariant over a <em>set</em> (fleet cap,
+  members per family, open cards per board) gets a stream of its own — the group parent — so
+  the group state has a version you can hold. The category index (<code>load(None)</code>
+  today) is for reads; it is not an OCC handle.</p>
+  <pre><code><span class="c">// POST /companies/:id/trucks — cap: max 5 active trucks per company</span>
+<span class="k">async fn</span> register_truck(<span class="t">State</span>(app): <span class="t">State</span>&lt;<span class="t">App</span>&gt;, <span class="t">Path</span>(company): <span class="t">Path</span>&lt;<span class="t">CompanyId</span>&gt;) -&gt; <span class="t">ApiResult</span> {
+    <span class="k">let</span> (fleet_ev, v_fleet) = app.companies.load(&amp;<span class="t">CompanyStreamId</span>::from(company)).<span class="k">await</span>?;
+    <span class="k">let</span> truck = <span class="t">TruckId</span>::new();
+
+    <span class="c">// the CAP lives in the company decider — group state is first-class aggregate state</span>
+    <span class="k">let</span> fleet_events = <span class="t">CompanyDecider</span>::decide(&amp;fold(fleet_ev),
+                            &amp;<span class="t">RegisterTruck</span> { truck })?;   <span class="c">// Err(FleetFull) at 5</span>
+
+    <span class="k">let mut</span> batch = <span class="t">Batch</span>::new();
+    batch.write(&amp;app.companies, &amp;company, v_fleet.into_exact(), &amp;fleet_events)?;
+    batch.write(&amp;app.trucks, &amp;truck, <span class="t">ExpectedVersion</span>::NoStream,
+                &amp;[<span class="t">TruckRegistered</span> { company }])?;
+    respond(app.store.transact(batch).<span class="k">await</span>)   <span class="c">// two racers at 4/5 trucks: exactly one wins</span>
+}</code></pre>
+  <p class="meta" style="color:var(--muted)">Rule of thumb: a "many-stream" invariant is a
+  smell that a parent aggregate is missing. Scenario 1's claim stream is this pattern at its
+  smallest (a parent per claimed value); this is the same pattern with real state.</p>
+</section>
+
+<section>
+  <span class="eyebrow">scenario 5</span>
+  <h2><span class="tag c3">C</span><span class="tag b2">B</span>Canonical: account transfer — both primitives, honestly compared</h2>
+  <pre><code><span class="c">// POST /transfers { from, to, amount } — panel C: both-or-neither, now</span>
+<span class="k">let</span> (a_ev, v_a) = app.accounts.load(&amp;from).<span class="k">await</span>?;
+<span class="k">let</span> (b_ev, v_b) = app.accounts.load(&amp;to).<span class="k">await</span>?;
+<span class="k">let</span> debit  = <span class="t">AccountDecider</span>::decide(&amp;fold(a_ev), &amp;<span class="t">Debit</span>  { amount, transfer })?;  <span class="c">// Err(Insufficient)</span>
+<span class="k">let</span> credit = <span class="t">AccountDecider</span>::decide(&amp;fold(b_ev), &amp;<span class="t">Credit</span> { amount, transfer })?;
+
+<span class="k">let mut</span> batch = <span class="t">Batch</span>::new();
+batch.write(&amp;app.accounts, &amp;from, v_a.into_exact(), &amp;debit)?;
+batch.write(&amp;app.accounts, &amp;to,   v_b.into_exact(), &amp;credit)?;
+app.store.transact(batch).<span class="k">await</span>   <span class="c">// money is conserved by the transaction</span></code></pre>
+  <pre class="saga"><code><span class="c">// same domain, panel B: the transfer is its own aggregate; the saga moves it</span>
+<span class="c">// POST /transfers → one plain append; the API returns 202 Accepted</span>
+app.transfers.append(&amp;transfer_id, <span class="t">ExpectedVersion</span>::NoStream,
+                     &amp;[<span class="t">TransferRequested</span> { from, to, amount }]).<span class="k">await</span>?;
+
+<span class="c">// registered once at startup — pure routing, no state, no I/O:</span>
+<span class="k">fn</span> react(ev: &amp;<span class="t">AppEvent</span>) -&gt; <span class="t">Vec</span>&lt;<span class="t">AppCommand</span>&gt; {
+    <span class="k">match</span> ev {
+        <span class="t">TransferRequested</span> { from, amount, transfer, .. }
+            =&gt; vec![<span class="t">DebitSender</span>    { account: *from, amount: *amount, transfer: *transfer }],
+        <span class="t">SenderDebited</span>     { to, amount, transfer, .. }
+            =&gt; vec![<span class="t">CreditRecipient</span>{ account: *to,   amount: *amount, transfer: *transfer }],
+        <span class="t">DebitRejected</span>     { transfer, .. }                       <span class="c">// insufficient funds</span>
+            =&gt; vec![<span class="t">FailTransfer</span>   { transfer: *transfer }],
+        <span class="t">CreditRejected</span>    { transfer, from, amount, .. }         <span class="c">// account closed mid-flight</span>
+            =&gt; vec![<span class="t">RefundSender</span>   { account: *from, amount: *amount, transfer: *transfer }],
+        _ =&gt; vec![],
+    }
+}
+<span class="c">// SagaRunner::new(app.store.feed(), executor).run()  — at-least-once; every command idempotent by transfer id</span></code></pre>
+  <p class="meta" style="color:var(--muted)">C: one handler, conservation by transaction,
+  nothing to compensate. B: 202-style API, per-step aggregates, and the compensations
+  (<code>RefundSender</code>) are honest domain events — which is exactly what you want when
+  the two accounts live in different stores or services. Same domain, different deployment
+  truth.</p>
+</section>
+
+<section>
+  <span class="eyebrow">scenario 6</span>
+  <h2><span class="tag c3">C</span><span class="tag x">⚔</span>Antagonistic: the flash sale that wants to oversell</h2>
+  <p>Three units of stock, five hundred concurrent buyers, a client that retries on any
+  non-200, and a load balancer that duplicates requests. The design that survives this is the
+  one where <em>correctness never depends on politeness</em>.</p>
+  <pre><code><span class="c">// POST /items/:id/purchase  (idempotency_key from the client)</span>
+<span class="k">async fn</span> purchase(<span class="t">State</span>(app): <span class="t">State</span>&lt;<span class="t">App</span>&gt;, <span class="t">Path</span>(item): <span class="t">Path</span>&lt;<span class="t">ItemId</span>&gt;,
+                  <span class="t">Json</span>(req): <span class="t">Json</span>&lt;<span class="t">PurchaseReq</span>&gt;) -&gt; <span class="t">ApiResult</span> {
+    <span class="k">let</span> (ev, v) = app.items.load(&amp;item).<span class="k">await</span>?;
+    <span class="k">let</span> events  = <span class="t">ItemDecider</span>::decide(&amp;fold(ev),
+                     &amp;<span class="t">Purchase</span> { buyer: req.buyer, key: req.idempotency_key })?;
+                     <span class="c">// state knows remaining stock AND seen keys → Err(SoldOut) / Ok(already-yours)</span>
+
+    <span class="k">let mut</span> batch = <span class="t">Batch</span>::new();
+    batch.write(&amp;app.items, &amp;item, v.into_exact(), &amp;events)?;
+    <span class="c">// claim stream makes the duplicate-request case structural, not just state-checked:</span>
+    batch.write(&amp;app.purchase_claims, &amp;<span class="t">ClaimId</span>::from(req.idempotency_key),
+                <span class="t">ExpectedVersion</span>::NoStream, &amp;[<span class="t">PurchaseClaimed</span> { item }])?;
+
+    <span class="k">match</span> app.store.transact(batch).<span class="k">await</span> {
+        <span class="t">Ok</span>(_) =&gt; <span class="t">Ok</span>(<span class="t">Json</span>(<span class="t">Purchased</span>)),
+        <span class="t">Err</span>(<span class="t">BatchError</span>::Conflict { violated: <span class="t">StreamDoesNotExist</span>(_), .. })
+            =&gt; <span class="t">Ok</span>(<span class="t">Json</span>(<span class="t">Purchased</span>)),                     <span class="c">// duplicate of OUR OWN win: 200, idempotent</span>
+        <span class="t">Err</span>(<span class="t">BatchError</span>::Conflict { .. }) =&gt; <span class="t">Err</span>(<span class="t">ApiError</span>::retry_after_reload()),  <span class="c">// lost the race</span>
+        <span class="t">Err</span>(<span class="t">BatchError</span>::Backend(e)) =&gt; <span class="t">Err</span>(<span class="t">ApiError</span>::internal(e)),
+    }
+}</code></pre>
+  <div class="aside danger">
+    <strong>Why this is the antagonistic case, and why it matters here</strong>
+    Under the current in-memory backend this exact code oversells: single-event appends at
+    <code>Exact(0)</code> both succeed (the <code>len − 1</code> off-by-one), so 500 buyers ×
+    1-event batches = no OCC at all. The antagonist doesn't need to be clever — the arithmetic
+    is on their side. This scenario becomes the spec test that pins the unified version
+    semantics.
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">scenario 7</span>
+  <h2><span class="tag c3">C</span>OCC held across streams — blocking, then a typed loss</h2>
+  <p>Two batches with overlapping write-sets, fired concurrently. This is the smoke-test
+  shape, a consumer-shaped round-trip, and the clearest picture of what the advisory locks
+  actually do: <em>blocking is brief and invisible; conflict is typed and yours</em>.</p>
+  <pre><code><span class="c">// batch_1 writes {alice, bob};  batch_2 writes {bob, carol} — same instant</span>
+<span class="k">let</span> (r1, r2) = tokio::join!(
+    app.store.transact(batch_over(&amp;[&amp;alice, &amp;bob],  v_a1, v_b1)),
+    app.store.transact(batch_over(&amp;[&amp;bob,  &amp;carol], v_b2, v_c1)),
+);
+
+<span class="c">// timeline (locks taken in sorted key order: alice &lt; bob &lt; carol):</span>
+<span class="c">//   t0  b1: lock(alice) ✓  lock(bob) ✓          b2: lock(bob) …BLOCKS (held by b1)</span>
+<span class="c">//   t1  b1: constraints hold → insert → COMMIT  (bob is now at n+1; locks release)</span>
+<span class="c">//   t2  b2: lock(bob) ✓ lock(carol) ✓ → check Exact(n) vs MAX(seq)=n+1 → ROLLBACK</span>
+<span class="c">//   t3  b2 returns Err(Conflict { violated: StreamAt(bob, Exact(n)), actual: At(n+1) })</span>
+
+assert!(r1.is_ok());
+assert!(matches!(r2, <span class="t">Err</span>(<span class="t">BatchError</span>::Conflict { .. })));   <span class="c">// exactly one winner, deterministically</span></code></pre>
+  <p class="meta" style="color:var(--muted)">The blocking window is the length of b1's insert
+  — milliseconds, bounded, deadlock-free by sorted acquisition. No caller ever observes
+  "blocked" as a state; they observe either <code>Committed</code> or
+  <code>Conflict</code>-with-evidence. Batches touching disjoint streams (alice+bob vs
+  carol+dave) never block each other at all — the parallelism Datomic's funnel gives up.</p>
+</section>
+
+<section>
+  <span class="eyebrow">scenario 8</span>
+  <h2><span class="tag x">⚠</span>The injected-context hazard and its two disarms</h2>
+  <p><strong>Stated precisely:</strong>
+  <code>DeciderWithContext::decide(ctx, state, cmd)</code> gives <code>ctx</code> no OCC
+  handle. The append's version check covers <em>only the target stream</em> — the store
+  verifies the data you <em>fold</em>, never the data you <em>inject</em>. Any decision that
+  ctx can veto is being made against unverifiable staleness:</p>
+  <pre class="bad"><code><span class="c">// TODAY — the hazard in the open</span>
+<span class="k">let</span> users_view = app.users_view.snapshot();          <span class="c">// built from the users category… when?</span>
+<span class="k">let</span> events = <span class="t">UserDecider</span>::decide(&amp;users_view, &amp;state, &amp;<span class="t">Register</span> { email })?;
+                                  <span class="c">// ctx says email is free — as of an unknowable moment</span>
+app.users.append(&amp;user, v.into_exact(), &amp;events).<span class="k">await</span>?;
+   <span class="c">// OCC checks user/&lt;id&gt; only. A racing Register on a DIFFERENT user stream</span>
+   <span class="c">// invalidated ctx and nothing here can ever notice. Commit succeeds; invariant broken.</span></code></pre>
+  <p>Two disarms, by weight of the invariant:</p>
+  <pre><code><span class="c">// Disarm A — give ctx the OCC handle it's missing: a basis the batch re-asserts.</span>
+<span class="k">pub struct</span> <span class="t">Versioned</span>&lt;C, V&gt; {
+    <span class="k">pub</span> value: C,
+    <span class="k">pub</span> basis: <span class="t">Vec</span>&lt;(<span class="t">StreamKey</span>, <span class="t">StreamVersion</span>&lt;V&gt;)&gt;,   <span class="c">// the streams this ctx was read AT</span>
+}
+
+<span class="k">let</span> fleet: <span class="t">Versioned</span>&lt;<span class="t">FleetView</span>, _&gt; = app.fleet_view.load_versioned(&amp;company).<span class="k">await</span>?;
+<span class="k">let</span> events = <span class="t">TruckDecider</span>::decide(&amp;fleet.value, &amp;state, &amp;cmd)?;
+
+<span class="k">let mut</span> batch = <span class="t">Batch</span>::new();
+batch.constrain_basis(&amp;fleet.basis);   <span class="c">// StreamAt(k, Exact(v)) for every source stream</span>
+batch.write(&amp;app.trucks, &amp;truck, v.into_exact(), &amp;events)?;
+app.store.transact(batch).<span class="k">await</span>       <span class="c">// stale ctx is now a typed Conflict, not a silent lie</span></code></pre>
+  <p>Disarm A is honest but has a scaling cliff: if ctx derives from a whole <em>category</em>
+  ("all users"), the basis is a high-water mark over it, and any unrelated user registration
+  conflicts you — correct, but hot. That cliff is the signal the invariant was never really
+  "about the whole category": shrink the basis by <strong>restructuring</strong> — scenario 1's
+  claim stream (basis = one claim) or scenario 4's parent aggregate (basis = one group
+  stream). Then the constrained streams are exactly the invariant's true participants and
+  contention matches real contention.</p>
+  <div class="aside">
+    <strong>The resulting rule for Epoch's docs</strong>
+    <code>ctx</code> is for <em>enrichment</em> (ids, clocks, config, data that shapes events
+    but never gates acceptance). The moment ctx can turn an accept into a reject, it must be
+    either <strong>constrained</strong> (Versioned + basis, disarm A) or
+    <strong>reified into streams</strong> (claim / parent aggregate, disarm B). Free-floating
+    veto-ctx is the one shape we now know to be unsound.
+  </div>
+</section>
+</main>
