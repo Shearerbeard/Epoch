@@ -33,7 +33,7 @@ impl<E> ESDBEventRepository<E> {
         Self {
             client: client.to_owned(),
             stream_name: stream_name.to_owned(),
-            _hidden: PhantomData::default(),
+            _hidden: PhantomData,
         }
     }
 

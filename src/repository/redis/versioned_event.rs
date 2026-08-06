@@ -41,7 +41,7 @@ where
     pub fn new(client: &Client) -> Self {
         Self {
             client: client.to_owned(),
-            _sm: PhantomData::default(),
+            _sm: PhantomData,
         }
     }
 

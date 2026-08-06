@@ -52,7 +52,7 @@ where
     }
 
     fn get_stream_or_new(&mut self, key: &str) -> &Arc<Mutex<InMemoryEventRepositoryState<E>>> {
-        if self.state.get(key).is_none() {
+        if !self.state.contains_key(key) {
             self.state.insert(
                 key.to_owned(),
                 Arc::new(Mutex::new(InMemoryEventRepositoryState::new())),

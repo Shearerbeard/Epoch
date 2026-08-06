@@ -78,15 +78,14 @@ where
         Self {
             client: client.clone(),
             snapshot_expiry: None,
-            _st: PhantomData::default(),
-            _jm: PhantomData::default(),
+            _st: PhantomData,
+            _jm: PhantomData,
         }
     }
 }
 
 #[async_trait]
-impl<'a, State, JM> VersionedStreamSnapshotRepository<State>
-    for RedisJSONSnapshotRepository<State, JM>
+impl<State, JM> VersionedStreamSnapshotRepository<State> for RedisJSONSnapshotRepository<State, JM>
 where
     State: Send
         + Sync
@@ -131,7 +130,7 @@ where
         let mut conn = self.get_connection().await?;
 
         state
-            .to_dto(version.clone())
+            .to_dto(*version)
             .save(&mut conn)
             .await
             .map_err(RedisRepositoryError::SaveError)

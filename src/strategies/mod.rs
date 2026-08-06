@@ -136,11 +136,11 @@ where
             match event_repository.append(&version, &stream, &new_evts).await {
                 Ok((appended_evts, _)) => return Ok(appended_evts),
                 Err(VersionedRepositoryError::RepoErr(e)) => {
-                    println!("Max Retries for {:?}!!", &cmd);
+                    println!("Max Retries for {:?}!!", cmd);
                     return Err(LoadDecideAppendError::RepositoryErr(e));
                 }
                 Err(VersionedRepositoryError::VersionConflict(_)) => {
-                    println!("RETRY #{} for {:?}!!", &r, &cmd);
+                    println!("RETRY #{} for {:?}!!", r, cmd);
                     thread::sleep(time::Duration::new(0, 100000000 * r));
                     let (mut catchup_evts, new_version) = event_repository
                         .load_from_version(&version, Some(&stream))
@@ -214,7 +214,7 @@ where
                     return Err(ReifyDecideSaveError::RepositoryErr(e))
                 }
                 Err(VersionedRepositoryError::VersionConflict(_)) => {
-                    println!("Retry #{} for {:?} - Reload State", &r, &cmd);
+                    println!("Retry #{} for {:?} - Reload State", r, cmd);
                     (state, version) = state_repository
                         .reify()
                         .await
@@ -230,7 +230,10 @@ where
 #[derive(Debug)]
 pub struct CommandResponse<E: Debug, S: Debug, D: DeciderWithContext<State = S, Evt = E>>(
     <D as DeciderWithContext>::Cmd,
-    Vec<<D as Evolver>::Evt>,
+    // Never read in-crate, but it is response payload the derived Debug
+    // carries; removing it would change the response contract of the
+    // legacy surface, which is outside E8's style-only scope.
+    #[allow(dead_code)] Vec<<D as Evolver>::Evt>,
     <D as Evolver>::State,
 );
 

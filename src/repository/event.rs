@@ -11,6 +11,10 @@ where
     E: Event + Sync + Send,
 {
     async fn load(&self) -> Result<Vec<E>, Err>;
+    // &Vec stays: these signatures are the public trait contract of the
+    // legacy surface; &[E] would be a breaking change outside E8's scope,
+    // and the redesigned streams surface replaces these traits.
+    #[allow(clippy::ptr_arg)]
     async fn append(&mut self, events: &Vec<E>) -> Result<Vec<E>, Err>;
 }
 
@@ -23,6 +27,7 @@ where
 
     async fn load(&self) -> Result<(Vec<E>, &Self::Version), Err>;
     async fn load_from_version(&self) -> Result<(Vec<E>, Option<&Self::Version>), Err>;
+    #[allow(clippy::ptr_arg)] // see EventRepository::append
     async fn append(
         &mut self,
         version: &Self::Version,
@@ -61,6 +66,7 @@ where
         VersionedRepositoryError<Err, Self::Version>,
     >;
 
+    #[allow(clippy::ptr_arg)] // see EventRepository::append
     async fn append(
         &mut self,
         version: &RepositoryVersion<Self::Version>,
