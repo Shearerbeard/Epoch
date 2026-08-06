@@ -1,6 +1,6 @@
 # Split RepositoryVersion into ExpectedVersion and StreamVersion, unified on 1-based sequence semantics
 
-- Status: proposed
+- Status: accepted (2026-08-06, at the E2 plan's Stage 0 user gate)
 - Date: 2026-08
 - Deciders: Mike Shearer
 
