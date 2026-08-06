@@ -5,8 +5,9 @@ Layer-1 typed-holes skeleton for the redesigned core stream surface,
 ADRs 0001-0005. Revision 3, after the two-seat design panel (ledger in
 the board's `reviews/e1/`; Gate A PASS over d9d532b..abe1c82).
 
-Anchor stamp: claims verified against `card/e1` commit `abe1c82`
-(2026-08-05 Gate D audit). Re-verifying bumps this stamp.
+Anchor stamp: claims verified against `card/e2` commit `694c31c`
+(2026-08-06 Gate D audit; previously `card/e1` `abe1c82`,
+2026-08-05). Re-verifying bumps this stamp.
 
 ## Type-to-ADR and business-rule map
 
