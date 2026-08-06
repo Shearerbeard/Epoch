@@ -142,10 +142,13 @@ pub(crate) async fn single_event_occ_race_on_seeded_stream<S, E>(
 /// reached the stock, otherwise append one sale at the observed version
 /// and stop on `Ok`, reloading on version conflict. The first attempt
 /// of every contender releases on a shared barrier so the opening round
-/// collides deterministically; retries contend naturally. Exactly K
-/// sale appends succeed and the final stream holds exactly K + 1 events
-/// (the seed plus K sales): a lost-update implementation overshoots, a
-/// spurious-conflict implementation undershoots.
+/// collides deterministically; retries contend naturally, capped per
+/// contender so a conflict-happy implementation fails loudly instead of
+/// hanging the suite. Exactly K sale appends succeed and the final
+/// stream holds exactly K + 1 events (the seed plus K sales): a
+/// lost-update implementation overshoots, an append that stores its
+/// event while reporting a conflict undershoots, and an implementation
+/// that conflicts on a correct expectation exhausts the retry cap.
 pub(crate) async fn flash_sale_sells_exactly_the_stock<S, E>(
     store: S,
     make_id: impl Fn(&str) -> S::Id,
@@ -184,6 +187,12 @@ pub(crate) async fn flash_sale_sells_exactly_the_stock<S, E>(
                 let make_event = make_event.clone();
                 tokio::spawn(async move {
                     let mut first_attempt = true;
+                    // A correct implementation conflicts a contender at
+                    // most once per rival sale, so K + 1 retries is
+                    // already generous; past this cap the backend is
+                    // conflicting on correct expectations and the case
+                    // fails loudly rather than spinning.
+                    let mut retries_left = FLASH_SALE_STOCK + 2;
                     loop {
                         let observed = observed_sequence(&store, &id).await;
                         // Sold count: events beyond the non-sale seed.
@@ -207,7 +216,12 @@ pub(crate) async fn flash_sale_sells_exactly_the_stock<S, E>(
                             .await
                         {
                             Ok(_) => return true,
-                            Err(AppendError::Conflict(_)) => {}
+                            Err(AppendError::Conflict(_)) => {
+                                retries_left = retries_left.checked_sub(1).expect(
+                                    "retry cap exhausted: the implementation \
+                                     conflicts on correct expectations",
+                                );
+                            }
                             Err(AppendError::Backend(error)) => {
                                 panic!("backend failure mid-sale: {error:?}")
                             }
@@ -301,6 +315,18 @@ mod tests {
     use super::*;
     use crate::streams::in_memory::InMemoryEventStreams;
 
+    /// Every case runs under a deadline so a hang - a contender parked
+    /// on the barrier after a rival panicked, or a retry loop that a
+    /// broken backend refuses to release - fails with a diagnosis
+    /// instead of stalling the suite.
+    const CASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    async fn under_deadline(case: impl std::future::Future<Output = ()>) {
+        tokio::time::timeout(CASE_DEADLINE, case)
+            .await
+            .expect("spec case must finish under the deadline");
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct SomethingHappened;
 
@@ -317,18 +343,33 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn in_memory_single_event_occ_race_on_empty_stream() {
         let store = InMemoryEventStreams::<SomethingHappened>::new();
-        single_event_occ_race_on_empty_stream(store, str::to_owned, || SomethingHappened).await;
+        under_deadline(single_event_occ_race_on_empty_stream(
+            store,
+            str::to_owned,
+            || SomethingHappened,
+        ))
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn in_memory_single_event_occ_race_on_seeded_stream() {
         let store = InMemoryEventStreams::<SomethingHappened>::new();
-        single_event_occ_race_on_seeded_stream(store, str::to_owned, || SomethingHappened).await;
+        under_deadline(single_event_occ_race_on_seeded_stream(
+            store,
+            str::to_owned,
+            || SomethingHappened,
+        ))
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn in_memory_flash_sale_sells_exactly_the_stock() {
         let store = InMemoryEventStreams::<SomethingHappened>::new();
-        flash_sale_sells_exactly_the_stock(store, str::to_owned, || SomethingHappened).await;
+        under_deadline(flash_sale_sells_exactly_the_stock(
+            store,
+            str::to_owned,
+            || SomethingHappened,
+        ))
+        .await;
     }
 }
