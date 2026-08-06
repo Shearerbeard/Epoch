@@ -15,9 +15,14 @@ round (ledger in the board's `reviews/e1/`).
 | `ExpectedVersion` | 0003 | A writer's append-time assertion about stream state | A load reporting `Any`/`StreamExists`; a zero position in `Exact` |
 | `StreamVersion` | 0003 | The store's observed position | An observation of `Any`/`StreamExists`; zero positions |
 | `EventBatch<E>` | 0003, 0005 | An append carries at least one event | The well-typed empty append |
-| `StreamState<E>` | 0003 | A stream is missing, or present with events and a position | Present-but-empty; missing-with-a-position |
-| `StreamSlice<E>` | 0003 | An incremental read returns events at-or-after a cursor plus the observed position | Conflating "no events in range" with "no stream" |
-| `CategoryEvent<Id, E>` | 0004 | A category read pairs each event with its typed stream id | Category results a consumer cannot address by typed id |
+| `StreamState<E>` | 0003 | A full load's version IS its event count; `version()` derives it | Present-but-empty; missing-with-a-position; a history whose length disagrees with its position |
+| `StreamSlice<E>` | 0003 | An incremental read returns events at-or-after a cursor plus the observed position; construction validates the pair | Conflating "no events in range" with "no stream"; events claimed from a `NoStream` observation |
+| `CategoryEvent<Id, E>` | 0004 | A category read pairs each event with its typed stream id (bounds on the type) | Category results a consumer cannot address by typed id; `CategoryEvent<(), E>` |
+| `ZeroSequence` | 0003 | Zero is not a 1-based position | (error carrier for `StreamSequence::new`) |
+| `EmptyBatch` | 0003, 0005 | An append carries at least one event | (error carrier for `EventBatch::new`) |
+| `NotAConflict` | 0003 | Only failed checks are conflicts | (error carrier for `VersionConflict::new`) |
+| `MisshapenSlice` | 0003 | A slice's events must be consistent with its observation | (error carrier for `StreamSlice::new`) |
+| `From<StreamVersion> for ExpectedVersion` | 0003 | An observed position is a valid next-append expectation | Hand-mapping between the vocabularies at call sites |
 | `VersionConflict` | 0003 | A conflict is an assertion that failed against an observation | `Any` as a failed expectation; pairs the check would satisfy |
 | `AppendError<E>` | 0003 | Append fails as a version conflict or a backend error, nothing else | A third failure class; conflict payloads in impossible shapes |
 | `LoadError<B, P>` | 0004 | Category reads fail as backend faults or unparseable stored keys, which callers treat differently | Collapsing a data defect into a retryable backend error |
@@ -32,9 +37,10 @@ round (ledger in the board's `reviews/e1/`).
 - No test-only accessors; no `#[cfg(test)]` surface yet (E2 owns the
   spec tests).
 - Hole inventory (`grep -n 'todo!()' src/streams.rs`, code sites only):
-  11 holes - `String::stream_key`, `String::parse_key`,
+  16 holes - `String::stream_key`, `String::parse_key`,
   `StreamSequence::{new, get}`, `From<StreamVersion>::from`,
-  `EventBatch::{new, as_slice, into_vec}`,
+  `EventBatch::{new, as_slice, into_vec}`, `StreamState::version`,
+  `StreamSlice::{new, events, at, into_parts}`,
   `VersionConflict::{new, expected, actual}`. Trait methods carry no
   bodies. Trivial accessors are held open with the rest: the card's
   acceptance says no filled bodies until the panel passes, which

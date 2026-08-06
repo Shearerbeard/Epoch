@@ -130,35 +130,76 @@ impl<E> EventBatch<E> {
 pub struct EmptyBatch;
 
 /// A full stream load: either the stream does not exist, or it has at
-/// least one event and a position. "Present but empty" and "missing
-/// with a position" are unrepresentable.
+/// least one event. Under ADR 0003's semantics a full load's version
+/// IS its event count, so `Present` carries no separate position: the
+/// one-event-at-sequence-99 state is structurally unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamState<E> {
     /// The stream has no events; loads answer this, never an error
     /// (ADR 0003).
     Missing,
-    /// The stream exists: its events, oldest first, and its position.
-    Present {
-        events: EventBatch<E>,
-        version: StreamSequence,
-    },
+    /// The stream exists: its full history, oldest first.
+    Present(EventBatch<E>),
+}
+
+impl<E> StreamState<E> {
+    /// The stream's position: `NoStream` when missing, otherwise the
+    /// 1-based count of its history.
+    pub fn version(&self) -> StreamVersion {
+        todo!()
+    }
 }
 
 /// An incremental read: the events at or after the requested position
 /// (inclusive, matching the existing PostgreSQL and ESDB contract) and
 /// the stream's observed position. Empty `events` with an `Exact`
-/// position is a valid state here: a cursor past the tail reads
-/// nothing.
+/// position is valid (a cursor past the tail reads nothing); nonempty
+/// events on a `NoStream` observation is rejected at construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamSlice<E> {
-    pub events: Vec<E>,
-    pub at: StreamVersion,
+    events: Vec<E>,
+    at: StreamVersion,
 }
 
+impl<E> StreamSlice<E> {
+    /// Assemble a slice; rejects events claimed from a stream the
+    /// observation says does not exist.
+    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
+    pub fn new(events: Vec<E>, at: StreamVersion) -> Result<Self, MisshapenSlice> {
+        todo!()
+    }
+
+    /// The events in the requested range, oldest first.
+    pub fn events(&self) -> &[E] {
+        todo!()
+    }
+
+    /// The stream position observed by the read.
+    pub fn at(&self) -> StreamVersion {
+        todo!()
+    }
+
+    /// Consume the slice.
+    pub fn into_parts(self) -> (Vec<E>, StreamVersion) {
+        todo!()
+    }
+}
+
+/// Events were claimed from a stream whose observation says it does
+/// not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("a slice cannot carry events from a stream observed as NoStream")]
+pub struct MisshapenSlice;
+
 /// One event of a category read, carrying the typed id of the stream
-/// it belongs to (ADR 0004: category reads return typed ids).
+/// it belongs to (ADR 0004: category reads return typed ids). The
+/// bounds are on the type so an unaddressable record cannot be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CategoryEvent<Id, E> {
+pub struct CategoryEvent<Id, E>
+where
+    Id: StreamId,
+    E: Event,
+{
     pub id: Id,
     pub event: E,
 }
