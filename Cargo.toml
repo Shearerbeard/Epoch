@@ -28,6 +28,7 @@ bb8-postgres = { version = "0.8", optional = true }
 
 [dev-dependencies]
 actix-rt = "2.7.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 assert_matches = "1.5.0"
 const-random = "0.1.15"
 autoincrement = "1"

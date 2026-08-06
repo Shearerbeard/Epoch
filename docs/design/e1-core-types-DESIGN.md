@@ -40,14 +40,24 @@ Anchor stamp: claims verified against `card/e1` commit `abe1c82`
 - No test-only accessors; no `#[cfg(test)]` surface yet (E2 owns the
   spec tests).
 - Hole inventory (`grep -n 'todo!()' src/streams.rs`, code sites only):
-  16 holes - `String::stream_key`, `String::parse_key`,
-  `StreamSequence::{new, get}`, `From<StreamVersion>::from`,
-  `EventBatch::{new, as_slice, into_vec}`, `StreamState::version`,
-  `StreamSlice::{new, events, at, into_parts}`,
+  16 holes at the skeleton commit - `String::stream_key`,
+  `String::parse_key`, `StreamSequence::{new, get}`,
+  `From<StreamVersion>::from`, `EventBatch::{new, as_slice, into_vec}`,
+  `StreamState::version`, `StreamSlice::{new, events, at, into_parts}`,
   `VersionConflict::{new, expected, actual}`. Trait methods carry no
   bodies. Trivial accessors are held open with the rest: the card's
   acceptance says no filled bodies until the panel passes, which
   overrides the typed-holes preference for landing them.
+- E2 fills (stage 1, per its hole-fill bound; `#[expect]` markers swept
+  with each fill): `String::stream_key`, `String::parse_key`,
+  `StreamSequence::new`, `StreamSequence::get`. 12 holes remain -
+  `From<StreamVersion>::from`, `EventBatch::{new, as_slice, into_vec}`,
+  `StreamState::version`, `StreamSlice::{new, events, at, into_parts}`,
+  `VersionConflict::{new, expected, actual}`. Where the E2 in-memory
+  implementation and spec suite (child modules of `streams`) need a
+  still-open constructor or accessor, they use crate-internal field
+  access with the invariant upheld at the site and a comment naming the
+  hole, rather than filling outside the bound.
   `clippy::todo` is not enabled (no lint table in this repo; warn would
   fail the `-D warnings` fill gate); the grep inventory is the route.
 
