@@ -4,8 +4,8 @@
 //! bodies, pending the E1 design panel. No behavior lands here until
 //! the panel passes.
 
-use std::convert::Infallible;
 use std::fmt::Debug;
+use std::num::NonZeroU64;
 
 use thiserror::Error;
 
@@ -13,7 +13,9 @@ use crate::decider::Event;
 
 /// Two-way typed contract between a consumer's stream id types and the
 /// stored stream key (ADR 0004). The repository owns namespacing; an id
-/// renders only its own identity.
+/// renders only its own identity. Round-tripping (`parse_key` accepts
+/// what `stream_key` rendered) is a behavioral law on implementations,
+/// pinned by the universal spec suite rather than the types.
 pub trait StreamId: Sized + Send + Sync {
     /// Error for keys that do not round-trip into this id type.
     type ParseError: std::error::Error + Send + Sync + 'static;
@@ -28,7 +30,7 @@ pub trait StreamId: Sized + Send + Sync {
 
 /// `String` keeps working for tests and simple consumers (ADR 0004).
 impl StreamId for String {
-    type ParseError = Infallible;
+    type ParseError = std::convert::Infallible;
 
     fn stream_key(&self) -> String {
         todo!()
@@ -40,102 +42,239 @@ impl StreamId for String {
     }
 }
 
+/// A stream position under the 1-based sequence semantics every backend
+/// shares (ADR 0003): a stream's version after N events is sequence N.
+/// Zero is unrepresentable, so the 0-based empty/one-event ambiguity
+/// that let two racers both win at `Exact(0)` cannot be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StreamSequence(NonZeroU64);
+
+impl StreamSequence {
+    /// Parse a raw backend position; zero is not a position.
+    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
+    pub fn new(raw: u64) -> Result<Self, ZeroSequence> {
+        todo!()
+    }
+
+    /// The raw 1-based sequence number.
+    pub fn get(self) -> u64 {
+        todo!()
+    }
+}
+
+/// Zero arrived where a 1-based stream position was required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("zero is not a 1-based stream position")]
+pub struct ZeroSequence;
+
 /// What a writer asserts about a stream's state on append (ADR 0003).
 /// Write-side vocabulary only: a load can never report `Any` or
 /// `StreamExists`, so those states are unrepresentable in
 /// [`StreamVersion`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExpectedVersion<V> {
+pub enum ExpectedVersion {
     /// No assertion; append regardless of stream state.
     Any,
     /// Assert the stream does not exist yet.
     NoStream,
     /// Assert the stream exists, at any version.
     StreamExists,
-    /// Assert the stream is exactly at this version.
-    Exact(V),
+    /// Assert the stream is exactly at this position.
+    Exact(StreamSequence),
 }
 
 /// What the store reports about a stream's position (ADR 0003).
-/// 1-based sequence semantics in every backend: an empty stream is
-/// `NoStream`, and a stream's version after N events is sequence N.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum StreamVersion<V> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamVersion {
     /// The stream has no events.
     NoStream,
-    /// The stream's last event sits at this 1-based sequence.
-    Exact(V),
+    /// The stream's last event sits at this position.
+    Exact(StreamSequence),
 }
 
 /// An observed position is usable as the expectation for the next
 /// append: `NoStream` maps to `NoStream`, `Exact` to `Exact`.
-impl<V> From<StreamVersion<V>> for ExpectedVersion<V> {
+impl From<StreamVersion> for ExpectedVersion {
     #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
-    fn from(observed: StreamVersion<V>) -> Self {
+    fn from(observed: StreamVersion) -> Self {
         todo!()
     }
 }
 
+/// One or more events to append. An empty append is meaningless, so it
+/// is rejected at construction rather than reaching a backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventBatch<E>(Vec<E>);
+
+impl<E> EventBatch<E> {
+    /// Reject an empty batch at the boundary.
+    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
+    pub fn new(events: Vec<E>) -> Result<Self, EmptyBatch> {
+        todo!()
+    }
+
+    /// The batched events, oldest first.
+    pub fn as_slice(&self) -> &[E] {
+        todo!()
+    }
+
+    /// Consume the batch.
+    pub fn into_vec(self) -> Vec<E> {
+        todo!()
+    }
+}
+
+/// An append was requested with no events in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("an event batch must contain at least one event")]
+pub struct EmptyBatch;
+
+/// A full stream load: either the stream does not exist, or it has at
+/// least one event and a position. "Present but empty" and "missing
+/// with a position" are unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamState<E> {
+    /// The stream has no events; loads answer this, never an error
+    /// (ADR 0003).
+    Missing,
+    /// The stream exists: its events, oldest first, and its position.
+    Present {
+        events: EventBatch<E>,
+        version: StreamSequence,
+    },
+}
+
+/// An incremental read: the events at or after the requested position
+/// (inclusive, matching the existing PostgreSQL and ESDB contract) and
+/// the stream's observed position. Empty `events` with an `Exact`
+/// position is a valid state here: a cursor past the tail reads
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamSlice<E> {
+    pub events: Vec<E>,
+    pub at: StreamVersion,
+}
+
+/// One event of a category read, carrying the typed id of the stream
+/// it belongs to (ADR 0004: category reads return typed ids).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoryEvent<Id, E> {
+    pub id: Id,
+    pub event: E,
+}
+
+/// A failed optimistic version check: the writer's assertion against
+/// the stream's observed position, in the shapes that can actually
+/// conflict. Construction validates the pair, so impossible conflicts
+/// (`Any` as the expectation, or an expectation the observation
+/// satisfies) are rejected rather than represented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionConflict {
+    expected: ExpectedVersion,
+    actual: StreamVersion,
+}
+
+impl VersionConflict {
+    /// Build a conflict from a failed check; rejects pairs that are
+    /// not conflicts.
+    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
+    pub fn new(expected: ExpectedVersion, actual: StreamVersion) -> Result<Self, NotAConflict> {
+        todo!()
+    }
+
+    /// The writer's failed assertion.
+    pub fn expected(self) -> ExpectedVersion {
+        todo!()
+    }
+
+    /// The stream position the store observed.
+    pub fn actual(self) -> StreamVersion {
+        todo!()
+    }
+}
+
+/// The expectation/observation pair satisfies the check; there is no
+/// conflict to represent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("the expectation is satisfied by the observed position; not a conflict")]
+pub struct NotAConflict;
+
 /// The single error surface for append outcomes (ADR 0003).
 #[derive(Debug, Error)]
-pub enum AppendError<V, E>
+pub enum AppendError<E>
 where
-    V: Debug,
     E: std::error::Error,
 {
-    /// The optimistic version check failed: the writer's assertion did
-    /// not hold against the stream's observed position.
-    #[error("version conflict: expected {expected:?}, stream at {actual:?}")]
-    VersionConflict {
-        expected: ExpectedVersion<V>,
-        actual: StreamVersion<V>,
-    },
+    /// The optimistic version check failed.
+    #[error("version conflict: {0:?}")]
+    Conflict(VersionConflict),
     /// The backend failed before the version check could decide.
     #[error(transparent)]
     Backend(#[from] E),
 }
 
+/// Failure surface for category reads, which parse stored keys back
+/// into typed ids and so can fail two distinct ways a caller handles
+/// differently: a backend fault (retryable) or a stored key that does
+/// not round-trip (data/config defect).
+#[derive(Debug, Error)]
+pub enum LoadError<B, P>
+where
+    B: std::error::Error,
+    P: std::error::Error,
+{
+    /// The backend failed.
+    #[error(transparent)]
+    Backend(B),
+    /// A stored key did not parse into the typed id.
+    #[error("stored stream key did not parse into the typed id: {0}")]
+    InvalidKey(P),
+}
+
 /// Versioned event streams over a typed id (ADRs 0002, 0003, 0004,
-/// 0005). Native async-fn-in-trait; the attribute supplies the `Send`
-/// bound generic consumers need to spawn futures. `append` takes
-/// `&self`: the version check, not the receiver, is the concurrency
-/// contract.
+/// 0005). Native async-fn-in-trait; the attribute rewrites the trait
+/// so its futures carry the `Send` bound generic consumers need to
+/// spawn them (no second trait is emitted). `append` takes `&self`:
+/// the version check, not the receiver, is the concurrency contract.
 #[trait_variant::make(Send)]
 pub trait EventStreams<E>
 where
     E: Event + Send + Sync + Debug,
 {
-    /// Typed stream id; `String` works via its blanket [`StreamId`]
+    /// Typed stream id; `String` works via its concrete [`StreamId`]
     /// impl.
     type Id: StreamId;
-    /// Backend position type carried by [`StreamVersion`] and
-    /// [`ExpectedVersion`].
-    type Version: Send + Sync + Eq + Ord + Debug;
-    /// Backend failure type wrapped by [`AppendError::Backend`].
+    /// Backend failure type wrapped by [`AppendError::Backend`] and
+    /// [`LoadError::Backend`].
     type Error: std::error::Error + Send + Sync;
 
-    /// Load a stream's events and its observed position. `None` loads
-    /// the repository's whole category. A missing stream answers
-    /// `NoStream`, never an error.
-    async fn load(
-        &self,
-        id: Option<&Self::Id>,
-    ) -> Result<(Vec<E>, StreamVersion<Self::Version>), Self::Error>;
+    /// Load one stream in full. A missing stream is
+    /// [`StreamState::Missing`], never an error.
+    async fn load_stream(&self, id: &Self::Id) -> Result<StreamState<E>, Self::Error>;
 
-    /// Load events at positions after `from`, with the stream's
-    /// observed position.
-    async fn load_from_version(
+    /// Load one stream's events at or after `from` (inclusive), with
+    /// the stream's observed position. `None` reads from the start.
+    async fn load_stream_from(
         &self,
-        from: &StreamVersion<Self::Version>,
-        id: Option<&Self::Id>,
-    ) -> Result<(Vec<E>, StreamVersion<Self::Version>), Self::Error>;
+        id: &Self::Id,
+        from: Option<StreamSequence>,
+    ) -> Result<StreamSlice<E>, Self::Error>;
 
-    /// Append `events` if `expected` holds, returning the appended
-    /// events and the stream's new position.
+    /// Load every event in this repository's category, oldest first,
+    /// each carrying its typed stream id.
+    async fn load_category(
+        &self,
+    ) -> Result<
+        Vec<CategoryEvent<Self::Id, E>>,
+        LoadError<Self::Error, <Self::Id as StreamId>::ParseError>,
+    >;
+
+    /// Append the batch if `expected` holds, returning the stream's
+    /// new position.
     async fn append(
         &self,
-        expected: ExpectedVersion<Self::Version>,
+        expected: ExpectedVersion,
         stream: &Self::Id,
-        events: &[E],
-    ) -> Result<(Vec<E>, StreamVersion<Self::Version>), AppendError<Self::Version, Self::Error>>;
+        events: &EventBatch<E>,
+    ) -> Result<StreamSequence, AppendError<Self::Error>>;
 }
