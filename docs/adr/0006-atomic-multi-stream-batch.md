@@ -206,7 +206,14 @@ Constraints stay per-stream, and that is stated in the docs.
 
 ## Links
 
-- Design annexes:
+- Design annexes, as research-era inputs drawn before the contract
+  above was pinned - historical evidence for the decision, not
+  implementation references. Where a sketch diverges from the pinned
+  contract, this record governs; the integration skeletons in
+  particular predate it on three points (a store value passed per
+  write, `ExpectedVersion` admitted inside constraints, and a
+  one-key advisory lock that would not serialize with the landed
+  two-key append lock) and must not be implemented from:
   [failure atlas](../design/two-stream-failure-atlas.html),
   [integration skeletons](../design/epoch-integration-skeletons.html),
   [runtime flowcharts](../design/epoch-b-c-flowcharts.html),
@@ -290,4 +297,17 @@ one new MINOR. Dispositions, applied in this second revision:
 5. New MINOR, head versus count wording: fixed; constraint
    satisfaction now speaks only of the stream head.
 
-Round 3 verdict: pending; recorded here when the re-review returns.
+Round 3, 2026-08-07. Same author and reviewer families, fresh
+context. Verdict: FAIL. Every round-2 disposition verified (the ADR
+0005 lifecycle item confirmed correctly open for the acceptance
+gate), one new BLOCKING: the linked integration-skeletons annex,
+drawn before the contract was pinned, contradicts it on the
+ownership seam, the constraint vocabulary, and the lock identity -
+implementing from it would defeat the contract. Disposition, applied
+in this third
+revision: the annex links are re-scoped as research-era inputs with
+the three divergences named inline and an explicit
+must-not-implement-from instruction; the record governs. The annexes
+themselves are historical evidence and stay unedited.
+
+Round 4 verdict: pending; recorded here when the re-review returns.
