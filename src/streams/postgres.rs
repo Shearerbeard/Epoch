@@ -36,6 +36,10 @@ use super::{
     StreamSequence, StreamSlice, StreamState, StreamVersion, VersionConflict,
 };
 
+mod batch;
+
+pub use batch::{EncodedEvent, PgBatch, PgBatchBuilder, PgDatabase, PgWriteError};
+
 const SCHEMA: &str = include_str!("postgres/schema.sql");
 
 /// The connection pool every store in this module runs on.

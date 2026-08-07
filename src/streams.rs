@@ -11,12 +11,19 @@ use thiserror::Error;
 
 use crate::decider::Event;
 
+mod batch;
 #[cfg(feature = "in_memory")]
 pub mod in_memory;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(test)]
 pub(crate) mod spec;
+
+pub use batch::{
+    AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchConstraint, BatchWrite,
+    ConstraintViolation, DuplicateWrite, StreamConstraint, StreamRef, TransactError,
+    WritelessBatch,
+};
 
 /// Two-way typed contract between a consumer's stream id types and the
 /// stored stream key (ADR 0004). The repository owns namespacing; an id
