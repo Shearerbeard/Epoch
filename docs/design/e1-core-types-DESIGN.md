@@ -5,9 +5,9 @@ Layer-1 typed-holes skeleton for the redesigned core stream surface,
 ADRs 0001-0005. Revision 3, after the two-seat design panel (ledger in
 the board's `reviews/e1/`; Gate A PASS over d9d532b..abe1c82).
 
-Anchor stamp: claims verified against `card/e2` commit `694c31c`
-(2026-08-06 Gate D audit; previously `card/e1` `abe1c82`,
-2026-08-05). Re-verifying bumps this stamp.
+Anchor stamp: claims verified against `card/e10` commit `29bcaab`
+(2026-08-07 serde-bound amendment at the E10 Gate U; previously
+`card/e2` `694c31c`, 2026-08-06). Re-verifying bumps this stamp.
 
 ## Type-to-ADR and business-rule map
 
@@ -73,7 +73,16 @@ Anchor stamp: claims verified against `card/e2` commit `694c31c`
   returns an empty slice with the observed position, not an error. ADR
   0003 should say this explicitly - flagged for the user gate.
 - serde derives are intentionally absent from every type here. A
-  backend that needs a wire form owns a DTO and converts fallibly.
+  backend that needs a wire form constrains its own impl instead:
+  the postgres backend (E10) bounds `E: Serialize + DeserializeOwned`
+  at its `EventStreams` impl and stores payloads as JSONB directly.
+  This amends the original line, which required a backend-owned DTO
+  with fallible conversion; the E10 Gate A review escalated the
+  departure and the user accepted it at that card's Gate U
+  (2026-08-07): a DTO over `serde_json::Value` here would convert
+  nothing. The E1 core types themselves still carry no derives, and a
+  backend whose wire form differs from the event's serde output still
+  owns a DTO.
 - `StreamVersion` no longer derives `Ord`; `StreamSequence` keeps it
   (positions in one stream are ordered by definition). No cross-variant
   ordering is invented.
