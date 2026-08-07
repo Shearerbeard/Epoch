@@ -9,16 +9,18 @@ services:
       - redis:/data
   postgres:
     image: postgres:16-alpine
-    restart: always
     environment:
       - POSTGRES_USER=epoch
       - POSTGRES_PASSWORD=epoch
       - POSTGRES_DB=epoch
     # Published on 54321 rather than 5432 so a system postgres, or
-    # another project's container, does not collide with it. The
-    # postgres backend migrates its own schema on first use.
+    # another project's container, does not collide with it, and bound
+    # to the loopback address because the credentials are throwaway and
+    # this database is only ever a test fixture. No restart policy for
+    # the same reason: it comes up with `docker compose up` and should
+    # not survive a reboot on its own.
     ports:
-      - '54321:5432'
+      - '127.0.0.1:54321:5432'
     volumes:
       - postgres:/var/lib/postgresql/data
   eventstore.db:

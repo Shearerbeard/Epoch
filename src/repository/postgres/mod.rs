@@ -308,6 +308,11 @@ mod tests {
     const BASE_STREAM: u32 = const_random!(u32);
 
     async fn repo_from_environment(stream_type: &str) -> PgEventRepository<UserEvent> {
+        // Load .env the way the other backends do. Without this the
+        // variable below is only ever read from the ambient environment,
+        // so a connection string set in .env is silently ignored and the
+        // fallback runs instead - against whatever database that names.
+        let _ = dotenv::dotenv();
         let conn_str = std::env::var("EPOCH_PG_TEST_URL")
             .unwrap_or_else(|_| "postgres://vikunja:devpass@localhost:54320/vikunja".to_string());
         let pool = PgEventRepository::<UserEvent>::pool_from_conn_str(&conn_str)
