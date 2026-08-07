@@ -7,6 +7,7 @@
 //! makes a rejected batch leave the log untouched.
 
 use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::decider::Event;
@@ -106,11 +107,23 @@ impl AtomicStreams for InMemoryDatabase {
     }
 }
 
-/// No write may contradict the event type its category already holds.
+/// No write may contradict the event type its category already holds,
+/// nor the type another write in the same batch puts in that category.
+/// The second half matters for a category nothing has claimed yet:
+/// checking only against the root would pass both writes, and the
+/// commit loop would then append the first and reject the second.
 fn admits_every_write(root: &Root, batch: &InMemoryBatch) -> Result<(), CategoryTypeMismatch> {
+    let mut batch_types: HashMap<&str, TypeId> = HashMap::new();
     for write in batch.writes() {
+        let category = write.stream().category();
         for event in write.events() {
-            root.admits(write.stream().category(), event.event_type)?;
+            root.admits(category, event.event_type)?;
+            let agreed = batch_types.insert(category, event.event_type);
+            if agreed.is_some_and(|other| other != event.event_type) {
+                return Err(CategoryTypeMismatch {
+                    category: category.to_owned(),
+                });
+            }
         }
     }
     Ok(())
@@ -328,5 +341,45 @@ mod tests {
             Err(TransactError::Backend(CategoryTypeMismatch { .. }))
         ));
         assert_eq!(head(&db, KIDS, "kid-x").await, StreamVersion::NoStream);
+    }
+
+    /// Two writes disagreeing over a category nothing has claimed yet.
+    /// Neither contradicts the root, so only the writes' agreement with
+    /// each other can catch this - and it has to be caught before the
+    /// first append, or the first write lands and the second aborts a
+    /// batch that has already stored something.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_writes_cannot_disagree_over_an_unclaimed_category() {
+        let db = InMemoryDatabase::new();
+
+        let mut builder = db.batch();
+        builder
+            .write(
+                KIDS,
+                &"kid-first".to_owned(),
+                ExpectedVersion::NoStream,
+                &kid_event(),
+            )
+            .expect("one write per stream");
+        builder
+            .write(
+                KIDS,
+                &"kid-second".to_owned(),
+                ExpectedVersion::NoStream,
+                &chore_event(),
+            )
+            .expect("a different stream in the same category");
+
+        assert!(matches!(
+            db.transact(builder.build().expect("the batch has writes"))
+                .await,
+            Err(TransactError::Backend(CategoryTypeMismatch { .. }))
+        ));
+        assert_eq!(head(&db, KIDS, "kid-first").await, StreamVersion::NoStream);
+        assert_eq!(
+            head(&db, KIDS, "kid-second").await,
+            StreamVersion::NoStream,
+            "the rejected batch stored neither write"
+        );
     }
 }

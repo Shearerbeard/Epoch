@@ -153,9 +153,12 @@ fn lock_order(mut tuples: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
 }
 
 /// Lock-timeout expiry is a distinct retryable outcome, never a version
-/// conflict (ADR 0006). Everything else from an acquisition is a
-/// backend fault.
-fn acquisition_error(
+/// conflict (ADR 0006), and the bound is transaction-scoped: it applies
+/// to the advisory locks the batch takes by name and equally to the row
+/// and index locks the inserts and the commit take on their own. Every
+/// statement inside a transact routes its failure through here so an
+/// expiry is classified the same wherever it arises.
+fn statement_error(
     error: tokio_postgres::Error,
     lock_timeout: Duration,
 ) -> TransactError<PgStreamsError> {
@@ -166,16 +169,13 @@ fn acquisition_error(
     }
 }
 
-fn backend_error(error: tokio_postgres::Error) -> TransactError<PgStreamsError> {
-    TransactError::Backend(PgStreamsError::Connection(error))
-}
-
 /// Hash every addressed stream to its lock tuple in one round trip, so
 /// the client can sort them into the acquisition order.
 async fn lock_tuples(
     tx: &Transaction<'_>,
     categories: &[String],
     keys: &[String],
+    lock_timeout: Duration,
 ) -> Result<Vec<(i32, i32)>, TransactError<PgStreamsError>> {
     let rows = tx
         .query(
@@ -185,7 +185,7 @@ async fn lock_tuples(
             &[&categories, &keys],
         )
         .await
-        .map_err(backend_error)?;
+        .map_err(|error| statement_error(error, lock_timeout))?;
     Ok(lock_order(
         rows.iter()
             .map(|row| (row.get("category_hash"), row.get("key_hash")))
@@ -199,6 +199,7 @@ async fn locked_heads(
     tx: &Transaction<'_>,
     categories: &[String],
     keys: &[String],
+    lock_timeout: Duration,
 ) -> Result<HashMap<(String, String), StreamVersion>, TransactError<PgStreamsError>> {
     let rows = tx
         .query(
@@ -211,7 +212,7 @@ async fn locked_heads(
             &[&categories, &keys],
         )
         .await
-        .map_err(backend_error)?;
+        .map_err(|error| statement_error(error, lock_timeout))?;
 
     Ok(rows
         .iter()
@@ -244,7 +245,10 @@ impl AtomicStreams for PgDatabase {
             .unzip();
 
         let mut conn = self.pool.get().await.map_err(PgStreamsError::Pool)?;
-        let tx = conn.transaction().await.map_err(backend_error)?;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|error| statement_error(error, self.lock_timeout))?;
 
         // Bound every acquisition below. The value is milliseconds from
         // a `Duration`, so there is nothing here a caller can inject;
@@ -255,18 +259,20 @@ impl AtomicStreams for PgDatabase {
             .max(1);
         tx.batch_execute(&format!("SET LOCAL lock_timeout = '{bound_ms}ms'"))
             .await
-            .map_err(backend_error)?;
+            .map_err(|error| statement_error(error, self.lock_timeout))?;
 
-        for (category_hash, key_hash) in lock_tuples(&tx, &categories, &keys).await? {
+        for (category_hash, key_hash) in
+            lock_tuples(&tx, &categories, &keys, self.lock_timeout).await?
+        {
             tx.execute(
                 "SELECT pg_advisory_xact_lock($1, $2)",
                 &[&category_hash, &key_hash],
             )
             .await
-            .map_err(|error| acquisition_error(error, self.lock_timeout))?;
+            .map_err(|error| statement_error(error, self.lock_timeout))?;
         }
 
-        let heads = locked_heads(&tx, &categories, &keys).await?;
+        let heads = locked_heads(&tx, &categories, &keys, self.lock_timeout).await?;
 
         for constrained in batch.constraints() {
             let observed = head_of(&heads, constrained.stream());
@@ -312,11 +318,13 @@ impl AtomicStreams for PgDatabase {
                     ],
                 )
                 .await
-                .map_err(backend_error)?;
+                .map_err(|error| statement_error(error, self.lock_timeout))?;
             }
         }
 
-        tx.commit().await.map_err(backend_error)?;
+        tx.commit()
+            .await
+            .map_err(|error| statement_error(error, self.lock_timeout))?;
         Ok(())
     }
 }
@@ -344,13 +352,16 @@ mod tests {
 
 #[cfg(all(test, feature = "postgres"))]
 mod postgres_tests {
+    use std::sync::Arc;
+
     use serde::{Deserialize, Serialize};
+    use tokio::sync::Barrier;
 
     use super::*;
     use crate::streams::batch::BatchConstraint;
     use crate::streams::postgres::{pool_from_conn_str, PgEventStreams};
     use crate::streams::spec::under_deadline;
-    use crate::streams::{EventStreams, StreamState};
+    use crate::streams::{AppendError, EventStreams, StreamState};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct KidHoldsCard;
@@ -388,6 +399,7 @@ mod postgres_tests {
     /// through, all on one migrated pool.
     struct Fixture {
         db: PgDatabase,
+        pool: PgPool,
         kids: PgEventStreams<String, KidHoldsCard>,
         chores: PgEventStreams<String, CardAssigned>,
     }
@@ -409,6 +421,7 @@ mod postgres_tests {
         kids.migrate().await.expect("schema migrates");
         Fixture {
             db: PgDatabase::new(pool.clone()),
+            pool: pool.clone(),
             kids,
             chores: PgEventStreams::new(pool, CHORES),
         }
@@ -486,6 +499,12 @@ mod postgres_tests {
     /// streams and declare them in opposite orders: the sorted
     /// acquisition is what keeps them from deadlocking, and the shared
     /// pre-batch head is what makes exactly one of them lose.
+    ///
+    /// Both batches are built before either transacts and the two tasks
+    /// release together on a barrier, so the transactions genuinely
+    /// overlap in lock acquisition rather than one finishing before the
+    /// other begins - which is the only arrangement in which an
+    /// unsorted acquisition could deadlock.
     #[tokio::test(flavor = "multi_thread")]
     async fn overlapping_batches_leave_exactly_one_winner() {
         under_deadline(async {
@@ -496,7 +515,19 @@ mod postgres_tests {
                 let first = draw(&fixture.db, &kid, &chore, false);
                 let second = draw(&fixture.db, &kid, &chore, true);
 
-                let (a, b) = tokio::join!(fixture.db.transact(first), fixture.db.transact(second));
+                let barrier = Arc::new(Barrier::new(2));
+                let racer = |batch: PgBatch| {
+                    let db = fixture.db.clone();
+                    let barrier = Arc::clone(&barrier);
+                    tokio::spawn(async move {
+                        barrier.wait().await;
+                        db.transact(batch).await
+                    })
+                };
+
+                let (a, b) = tokio::join!(racer(first), racer(second));
+                let a = a.expect("racer task must not panic");
+                let b = b.expect("racer task must not panic");
                 match (a, b) {
                     (Ok(()), Err(TransactError::Conflict(_)))
                     | (Err(TransactError::Conflict(_)), Ok(())) => {}
@@ -586,6 +617,113 @@ mod postgres_tests {
                 chore_state(&fixture, &chore).await,
                 StreamState::Missing,
                 "the batch's other write rolled back with it"
+            );
+        })
+        .await;
+    }
+
+    /// The same parity under a genuine race, which is what pins the
+    /// lock identity rather than just the check: a batch and a plain
+    /// append go for one stream released together on a barrier. Either
+    /// may win - they are contending for the same physical advisory
+    /// lock - but exactly one does, and the batch's second stream
+    /// follows its own outcome.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_and_an_append_race_for_one_stream() {
+        under_deadline(async {
+            let fixture = fixture().await;
+            for _ in 0..10 {
+                let (kid, chore) = (unique("kid"), unique("chore"));
+                let batch = draw(&fixture.db, &kid, &chore, false);
+                let barrier = Arc::new(Barrier::new(2));
+
+                let batch_side = {
+                    let db = fixture.db.clone();
+                    let barrier = Arc::clone(&barrier);
+                    tokio::spawn(async move {
+                        barrier.wait().await;
+                        db.transact(batch).await
+                    })
+                };
+                let append_side = {
+                    let kids = fixture.kids.clone();
+                    let barrier = Arc::clone(&barrier);
+                    let kid = kid.clone();
+                    tokio::spawn(async move {
+                        barrier.wait().await;
+                        kids.append(ExpectedVersion::NoStream, &kid, &kid_event())
+                            .await
+                    })
+                };
+
+                let (batched, appended) = tokio::join!(batch_side, append_side);
+                let batched = batched.expect("batch task must not panic");
+                let appended = appended.expect("append task must not panic");
+
+                match (batched, appended) {
+                    (Ok(()), Err(AppendError::Conflict(_))) => assert_eq!(
+                        chore_state(&fixture, &chore).await,
+                        StreamState::Present(EventBatch(vec![CardAssigned])),
+                        "the batch won, so both its writes are stored"
+                    ),
+                    (Err(TransactError::Conflict(_)), Ok(_)) => assert_eq!(
+                        chore_state(&fixture, &chore).await,
+                        StreamState::Missing,
+                        "the batch lost, so neither of its writes is stored"
+                    ),
+                    (batched, appended) => panic!(
+                        "expected exactly one winner on the shared stream: \
+                         {batched:?}, {appended:?}"
+                    ),
+                }
+
+                // Whoever won, the contested stream holds one event: the
+                // two writers took the same lock and read the same head.
+                assert_eq!(
+                    kid_state(&fixture, &kid).await,
+                    StreamState::Present(EventBatch(vec![KidHoldsCard]))
+                );
+            }
+        })
+        .await;
+    }
+
+    /// A lock the batch cannot take inside its bound is a retryable
+    /// timeout, not a conflict. A second connection holds the stream's
+    /// advisory lock in an open transaction; the batch's `SET LOCAL
+    /// lock_timeout` expires against it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unavailable_lock_is_a_retryable_timeout() {
+        under_deadline(async {
+            let fixture = fixture().await;
+            let (kid, chore) = (unique("kid"), unique("chore"));
+            let bound = Duration::from_millis(100);
+
+            let mut holder = fixture.pool.get().await.expect("a second connection");
+            let held = holder.transaction().await.expect("holder transaction");
+            held.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+                &[&KIDS, &kid],
+            )
+            .await
+            .expect("the holder takes the stream's lock");
+
+            let outcome = fixture
+                .db
+                .clone()
+                .with_lock_timeout(bound)
+                .transact(draw(&fixture.db, &kid, &chore, false))
+                .await;
+            assert!(
+                matches!(outcome, Err(TransactError::LockTimeout(reported)) if reported == bound),
+                "expected a retryable lock timeout, got {outcome:?}"
+            );
+
+            held.rollback().await.expect("the holder releases");
+            assert_eq!(
+                kid_state(&fixture, &kid).await,
+                StreamState::Missing,
+                "a timed-out batch stores nothing"
             );
         })
         .await;
