@@ -30,6 +30,19 @@ const FLASH_SALE_CONTENDERS: usize = 8;
 /// Flash-sale stock: strictly less than the contender count.
 const FLASH_SALE_STOCK: usize = 3;
 
+/// Every case runs under a deadline so a hang - a contender parked
+/// on the barrier after a rival panicked, or a retry loop that a
+/// broken backend refuses to release - fails with a diagnosis
+/// instead of stalling the suite.
+const CASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Deadline wrapper for every backend's wiring of the cases below.
+pub(crate) async fn under_deadline(case: impl std::future::Future<Output = ()>) {
+    tokio::time::timeout(CASE_DEADLINE, case)
+        .await
+        .expect("spec case must finish under the deadline");
+}
+
 /// Two contenders observe the same never-used stream, release together,
 /// and each appends one event expecting the empty stream: exactly one
 /// wins at sequence 1 and one gets the version conflict. A post-race
@@ -314,18 +327,6 @@ fn assert_exactly_one_winner<B>(
 mod tests {
     use super::*;
     use crate::streams::in_memory::InMemoryEventStreams;
-
-    /// Every case runs under a deadline so a hang - a contender parked
-    /// on the barrier after a rival panicked, or a retry loop that a
-    /// broken backend refuses to release - fails with a diagnosis
-    /// instead of stalling the suite.
-    const CASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
-
-    async fn under_deadline(case: impl std::future::Future<Output = ()>) {
-        tokio::time::timeout(CASE_DEADLINE, case)
-            .await
-            .expect("spec case must finish under the deadline");
-    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct SomethingHappened;
