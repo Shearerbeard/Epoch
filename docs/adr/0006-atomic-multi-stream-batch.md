@@ -111,21 +111,28 @@ decided here, not left to the diff.
   impossible; sorting stream keys as text within one category would
   not be.
 - Bounded waiting: `transact` sets a transaction-scoped
-  `lock_timeout` (`SET LOCAL`), so a contender blocked on a rival's
-  lock waits at most that bound. Expiry surfaces as a distinct,
-  retryable timeout error, never as a version conflict; the
-  transaction rolls back whole, and the xact-scoped locks release
-  with it. The default bound and its configuration surface are E3
-  implementation decisions; that waiting is bounded and how expiry
-  is classified are decided here.
+  `lock_timeout` (`SET LOCAL`). Postgres applies that bound to each
+  lock acquisition separately, so the batch's worst-case wait is the
+  bound times its number of distinct locks - finite, and capped by
+  the batch's own size, but not a single per-batch deadline, and the
+  record says so rather than promising one. Expiry surfaces as a
+  distinct, retryable timeout error, never as a version conflict;
+  the transaction rolls back whole, and the xact-scoped locks
+  release with it. The default bound and its configuration surface
+  are E3 implementation decisions; that waiting is bounded per
+  acquisition and how expiry is classified are decided here.
 - Ownership seam: `AtomicStreams` is implemented by the backend's
-  database handle, the value that owns the pool and from which
-  per-category stores are derived; it is not implemented by a single
-  per-category store, whose scope is too narrow for a cross-category
-  batch. A `Batch` is built from stream handles derived from the same
-  database handle, so combining streams from different databases or
-  pools is unrepresentable by construction. The in-memory equivalent
-  is the shared store root (ADR 0005 clones share it).
+  database handle, the value that owns the pool; it is not
+  implemented by a single per-category store, whose scope is too
+  narrow for a cross-category batch. A batch write is a contribution
+  naming a category and a typed stream id with its events - data,
+  not a store value - collected by the handle's own batch builder.
+  No store or pool rides along with a write, so the only pool a
+  transact can touch is the handle's own, and mixing databases is
+  structurally impossible without any branding of the existing
+  per-category stores, which stay independently constructible for
+  the append path exactly as landed. The in-memory equivalent is the
+  shared store root (ADR 0005 clones share it).
 - Erasure contract: `Batch` is backend-scoped, not backend-neutral.
   Each capable backend owns its batch builder, and the builder's push
   method is typed per write; erasure to the backend's wire form
@@ -138,12 +145,23 @@ decided here, not left to the diff.
   `StreamDoesNotExist`, or `StreamAt(sequence)` with an exact 1-based
   `StreamSequence`; the wider `ExpectedVersion` vocabulary is not
   admitted, so a constraint cannot restate `Any`. Satisfaction is
-  evaluated against the same observation single append uses,
-  `COALESCE(MAX(sequence), 0)` under the held lock: exists means a
-  positive count, does-not-exist means zero, at(n) means exactly n. A
+  evaluated against the same observation single append uses, the
+  stream's head `COALESCE(MAX(sequence), 0)` under the held lock:
+  exists means a positive head, does-not-exist means a zero head,
+  at(n) means the head is exactly n. A
   violated constraint rolls the whole batch back and reports which
   constraint failed against which observed `StreamVersion`, the same
   expected-versus-actual shape as the append conflict.
+- Write-side check: every write in a batch carries its own
+  `ExpectedVersion` - the full append vocabulary, unlike the
+  constraint language - evaluated under the held lock against the
+  stream's pre-batch head, exactly as single append evaluates it. A
+  batch admits at most one write per stream; pushing a second write
+  for a stream already in the batch is a build-time error, which is
+  what makes "pre-batch head" the only head there is (no write can
+  observe another write of the same batch). A failed expectation is
+  the same `VersionConflict` shape as append, naming its stream, and
+  rolls the whole batch back.
 - Append parity: single-stream append is semantically the degenerate
   one-write batch, meaning identical lock identity and identical
   check semantics, and the spec suite pins that parity. It remains
@@ -247,4 +265,29 @@ revision:
     is surfaced at this record's acceptance gate rather than done
     silently.
 
-Round 2 verdict: pending; recorded below when the re-review returns.
+Round 2, 2026-08-07. Same author and reviewer families, fresh
+context, over the round-1 revision. Verdict: FAIL. Eight of eleven
+dispositions verified; three stood, joined by one new BLOCKING and
+one new MINOR. Dispositions, applied in this second revision:
+
+1. Round-1 item 1 NOT RESOLVED as worded: `lock_timeout` bounds each
+   acquisition, not the batch. Fixed: the bounded-waiting point now
+   states the per-acquisition bound and the finite worst case, and
+   promises no single per-batch deadline.
+2. Round-1 item 3 NOT RESOLVED as worded: the unrepresentability
+   claim did not hold against the landed public store constructor.
+   Fixed: the ownership seam now makes writes data-only
+   contributions (category plus typed id plus events) to the
+   handle's builder, so no foreign pool can enter a transact and the
+   landed stores stay as they are.
+3. Round-1 item 11 stays open by design: flipping ADR 0005 is the
+   user's lifecycle decision, surfaced at this record's acceptance
+   gate; the reviewer is correct that it is unresolved until then.
+4. New BLOCKING, the write-side OCC contract was unpinned: fixed;
+   the outcome now pins per-write `ExpectedVersion` against the
+   pre-batch head, at most one write per stream with the duplicate a
+   build-time error, and the append-shaped conflict payload.
+5. New MINOR, head versus count wording: fixed; constraint
+   satisfaction now speaks only of the stream head.
+
+Round 3 verdict: pending; recorded here when the re-review returns.
