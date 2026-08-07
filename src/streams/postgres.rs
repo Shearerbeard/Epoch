@@ -190,38 +190,46 @@ where
         from: Option<StreamSequence>,
     ) -> Result<StreamSlice<E>, Self::Error> {
         let key = id.stream_key();
+        // `from` is 1-based and inclusive, and the decisive comparison
+        // is in `u64`: a cursor past the tail - any tail, including one
+        // beyond what postgres can store - reads nothing.
+        let cursor = from.map_or(1, StreamSequence::get);
+        let lower_bound = i64::try_from(cursor).unwrap_or(i64::MAX);
 
-        // One statement, so the observed position and the events in
-        // range derive from one snapshot: a rival append committing
-        // mid-read cannot produce a slice whose events disagree with
-        // its observation.
+        // One statement, so the head and the joined rows derive from one
+        // snapshot: a rival append committing mid-read cannot produce a
+        // slice whose events disagree with its observation. Only the
+        // in-range rows cross the wire; the outer join carries the head
+        // on a row with null event columns when nothing is in range.
         let conn = self.pool.get().await?;
         let rows = conn
             .query(
-                "SELECT sequence, event_data FROM stream_events \
-                 WHERE category = $1 AND stream_key = $2 \
-                 ORDER BY sequence ASC",
-                &[&self.category, &key],
+                "SELECT s.head, e.sequence, e.event_data \
+                 FROM (SELECT COALESCE(MAX(sequence), 0) AS head \
+                         FROM stream_events \
+                        WHERE category = $1 AND stream_key = $2) s \
+                 LEFT JOIN stream_events e \
+                   ON e.category = $1 AND e.stream_key = $2 AND e.sequence >= $3 \
+                 ORDER BY e.sequence ASC",
+                &[&self.category, &key, &lower_bound],
             )
             .await?;
 
-        let at = rows.last().map_or(StreamVersion::NoStream, |row| {
-            version_of(stored_position(row.get("sequence")))
+        let head: i64 = rows
+            .first()
+            .expect("the outer join always reports the head")
+            .get("head");
+        let in_range = rows.iter().filter(|row| {
+            row.get::<_, Option<i64>>("sequence")
+                .is_some_and(|sequence| stored_position(sequence) >= cursor)
         });
-        // `from` is 1-based and inclusive, and the comparison is in
-        // `u64`: a cursor past the tail - any tail, including one beyond
-        // what postgres can store - reads nothing.
-        let cursor = from.map_or(1, StreamSequence::get);
-        let in_range = rows
-            .iter()
-            .filter(|row| stored_position(row.get("sequence")) >= cursor);
 
         // `StreamSlice::new` is an E1 hole outside this card's fill
         // bound; the pair is consistent by construction, since rows only
         // exist for a stream whose observation is `Exact`.
         Ok(StreamSlice {
             events: decode_events(in_range)?,
-            at,
+            at: version_of(stored_position(head)),
         })
     }
 
