@@ -325,6 +325,7 @@ fn assert_exactly_one_winner<B>(
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::streams::in_memory::InMemoryEventStreams;
