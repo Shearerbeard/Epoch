@@ -13,6 +13,8 @@ use crate::decider::Event;
 
 #[cfg(feature = "in_memory")]
 pub mod in_memory;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 #[cfg(test)]
 pub(crate) mod spec;
 
