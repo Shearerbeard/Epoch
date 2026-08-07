@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   redis:
     image: "redislabs/rejson:latest"
@@ -8,6 +7,20 @@ services:
     command: redis-server --save 120 1 --appendonly yes --loglevel warning --loadmodule /usr/lib/redis/modules/rejson.so
     volumes:
       - redis:/data
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=epoch
+      - POSTGRES_PASSWORD=epoch
+      - POSTGRES_DB=epoch
+    # Published on 54321 rather than 5432 so a system postgres, or
+    # another project's container, does not collide with it. The
+    # postgres backend migrates its own schema on first use.
+    ports:
+      - '54321:5432'
+    volumes:
+      - postgres:/var/lib/postgresql/data
   eventstore.db:
     image: eventstore/eventstore:20.10.2-buster-slim
     environment:
@@ -32,6 +45,8 @@ services:
 
 volumes:
   redis:
+    driver: local
+  postgres:
     driver: local
   eventstore-volume-data:
     driver: local
