@@ -159,7 +159,11 @@ decided here, not left to the diff.
   batch admits at most one write per stream; pushing a second write
   for a stream already in the batch is a build-time error, which is
   what makes "pre-batch head" the only head there is (no write can
-  observe another write of the same batch). A failed expectation is
+  observe another write of the same batch). A batch carries at least
+  one write: a constraints-only batch is not admitted, since an
+  atomic assertion with nothing to commit is a read, and admitting
+  writeless batches later would be an additive change rather than a
+  breaking one. A failed expectation is
   the same `VersionConflict` shape as append, naming its stream, and
   rolls the whole batch back.
 - Append parity: single-stream append is semantically the degenerate
@@ -318,3 +322,19 @@ unedited), and the ADR 0005 lifecycle item confirmed correctly open
 for the acceptance gate. The reviewer's remaining unverified checks
 are external-repo counts and runtime behavior of the not-yet-built
 implementation, which E3's own gates will execute.
+
+Round 5, 2026-08-07, second reviewer family at the user's direction.
+Reviewer: Kimi K3 on the OpenCode fireworks route (Moonshot family),
+fresh context, over a staged packet including the landed backend
+source; author Claude family throughout. Verdict: PASS, one MINOR.
+The reviewer attacked every pinned concurrency claim against actual
+postgres advisory-lock and READ COMMITTED behavior and reported each
+one sound (lock identity, total lock order and its deadlock-freedom
+argument including the append and unique-index paths, per-acquisition
+timeout semantics, pre-batch-head evaluation, the ownership seam, and
+the conflict payload described as a shape rather than the type).
+Finding and disposition: (1) MINOR, the contract admitted neither a
+minimum batch content nor a constraints-only batch, leaving E3 to
+invent the admission rule - fixed; the write-side point now requires
+at least one write and records that admitting writeless batches later
+is additive, not breaking.
