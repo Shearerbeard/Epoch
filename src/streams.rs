@@ -107,9 +107,11 @@ pub enum StreamVersion {
 /// An observed position is usable as the expectation for the next
 /// append: `NoStream` maps to `NoStream`, `Exact` to `Exact`.
 impl From<StreamVersion> for ExpectedVersion {
-    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
     fn from(observed: StreamVersion) -> Self {
-        todo!()
+        match observed {
+            StreamVersion::NoStream => ExpectedVersion::NoStream,
+            StreamVersion::Exact(s) => ExpectedVersion::Exact(s),
+        }
     }
 }
 
@@ -120,19 +122,22 @@ pub struct EventBatch<E>(Vec<E>);
 
 impl<E> EventBatch<E> {
     /// Reject an empty batch at the boundary.
-    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
     pub fn new(events: Vec<E>) -> Result<Self, EmptyBatch> {
-        todo!()
+        if events.is_empty() {
+            Err(EmptyBatch)
+        } else {
+            Ok(Self(events))
+        }
     }
 
     /// The batched events, oldest first.
     pub fn as_slice(&self) -> &[E] {
-        todo!()
+        &self.0
     }
 
     /// Consume the batch.
     pub fn into_vec(self) -> Vec<E> {
-        todo!()
+        self.0
     }
 }
 
@@ -158,7 +163,18 @@ impl<E> StreamState<E> {
     /// The stream's position: `NoStream` when missing, otherwise the
     /// 1-based count of its history.
     pub fn version(&self) -> StreamVersion {
-        todo!()
+        match self {
+            StreamState::Missing => StreamVersion::NoStream,
+            StreamState::Present(batch) => {
+                // EventBatch::new rejects empty batches, so a present
+                // stream always holds at least one event and its count
+                // is a valid 1-based sequence; the Err arm is unreachable.
+                match StreamSequence::new(batch.0.len() as u64) {
+                    Ok(seq) => StreamVersion::Exact(seq),
+                    Err(ZeroSequence) => StreamVersion::NoStream,
+                }
+            }
+        }
     }
 }
 
@@ -176,24 +192,27 @@ pub struct StreamSlice<E> {
 impl<E> StreamSlice<E> {
     /// Assemble a slice; rejects events claimed from a stream the
     /// observation says does not exist.
-    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
     pub fn new(events: Vec<E>, at: StreamVersion) -> Result<Self, MisshapenSlice> {
-        todo!()
+        if matches!(at, StreamVersion::NoStream) && !events.is_empty() {
+            Err(MisshapenSlice)
+        } else {
+            Ok(Self { events, at })
+        }
     }
 
     /// The events in the requested range, oldest first.
     pub fn events(&self) -> &[E] {
-        todo!()
+        &self.events
     }
 
     /// The stream position observed by the read.
     pub fn at(&self) -> StreamVersion {
-        todo!()
+        self.at
     }
 
     /// Consume the slice.
     pub fn into_parts(self) -> (Vec<E>, StreamVersion) {
-        todo!()
+        (self.events, self.at)
     }
 }
 
@@ -230,19 +249,29 @@ pub struct VersionConflict {
 impl VersionConflict {
     /// Build a conflict from a failed check; rejects pairs that are
     /// not conflicts.
-    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
     pub fn new(expected: ExpectedVersion, actual: StreamVersion) -> Result<Self, NotAConflict> {
-        todo!()
+        let satisfied = match (expected, actual) {
+            (ExpectedVersion::Any, _) => true,
+            (ExpectedVersion::NoStream, StreamVersion::NoStream) => true,
+            (ExpectedVersion::StreamExists, StreamVersion::Exact(_)) => true,
+            (ExpectedVersion::Exact(a), StreamVersion::Exact(b)) => a == b,
+            _ => false,
+        };
+        if satisfied {
+            Err(NotAConflict)
+        } else {
+            Ok(Self { expected, actual })
+        }
     }
 
     /// The writer's failed assertion.
     pub fn expected(self) -> ExpectedVersion {
-        todo!()
+        self.expected
     }
 
     /// The stream position the store observed.
     pub fn actual(self) -> StreamVersion {
-        todo!()
+        self.actual
     }
 }
 
