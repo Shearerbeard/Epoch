@@ -12,7 +12,13 @@
 //! instead of overwriting. The lock is transaction-scoped, so a
 //! cancelled future releases it at rollback rather than leaking a
 //! session-level lock. The unique position constraint in `schema.sql`
-//! backstops the same invariant at the storage layer.
+//! backstops the same invariant at the storage layer, alongside a check
+//! constraint that keeps positions 1-based.
+//!
+//! Read consistency. Each load is a single statement, which is its own
+//! snapshot: a rival append committing mid-read cannot split a read
+//! across two views and hand back events that disagree with the
+//! position reported with them.
 
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -136,11 +142,13 @@ fn stored_position(raw: i64) -> u64 {
     u64::try_from(raw).expect("stored sequences are non-negative")
 }
 
-fn decode_events<E>(rows: &[Row]) -> Result<Vec<E>, serde_json::Error>
+fn decode_events<'a, E>(
+    rows: impl IntoIterator<Item = &'a Row>,
+) -> Result<Vec<E>, serde_json::Error>
 where
     E: DeserializeOwned,
 {
-    rows.iter()
+    rows.into_iter()
         .map(|row| serde_json::from_value(row.get("event_data")))
         .collect()
 }
@@ -182,40 +190,38 @@ where
         from: Option<StreamSequence>,
     ) -> Result<StreamSlice<E>, Self::Error> {
         let key = id.stream_key();
-        // `from` is 1-based and inclusive; a cursor beyond `i64` is past
-        // any storable tail, so it reads nothing.
-        let lower_bound = from.map_or(1, |sequence| {
-            i64::try_from(sequence.get()).unwrap_or(i64::MAX)
-        });
 
-        // One transaction, so the observed position and the events in
-        // range come from one consistent view of the stream.
-        let mut conn = self.pool.get().await?;
-        let tx = conn.transaction().await?;
-        let position: i64 = tx
-            .query_one(
-                "SELECT COALESCE(MAX(sequence), 0) AS position FROM stream_events \
-                 WHERE category = $1 AND stream_key = $2",
+        // One statement, so the observed position and the events in
+        // range derive from one snapshot: a rival append committing
+        // mid-read cannot produce a slice whose events disagree with
+        // its observation.
+        let conn = self.pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT sequence, event_data FROM stream_events \
+                 WHERE category = $1 AND stream_key = $2 \
+                 ORDER BY sequence ASC",
                 &[&self.category, &key],
             )
-            .await?
-            .get("position");
-        let rows = tx
-            .query(
-                "SELECT event_data FROM stream_events \
-                 WHERE category = $1 AND stream_key = $2 AND sequence >= $3 \
-                 ORDER BY sequence ASC",
-                &[&self.category, &key, &lower_bound],
-            )
             .await?;
-        tx.commit().await?;
+
+        let at = rows.last().map_or(StreamVersion::NoStream, |row| {
+            version_of(stored_position(row.get("sequence")))
+        });
+        // `from` is 1-based and inclusive, and the comparison is in
+        // `u64`: a cursor past the tail - any tail, including one beyond
+        // what postgres can store - reads nothing.
+        let cursor = from.map_or(1, StreamSequence::get);
+        let in_range = rows
+            .iter()
+            .filter(|row| stored_position(row.get("sequence")) >= cursor);
 
         // `StreamSlice::new` is an E1 hole outside this card's fill
         // bound; the pair is consistent by construction, since rows only
         // exist for a stream whose observation is `Exact`.
         Ok(StreamSlice {
-            events: decode_events(&rows)?,
-            at: version_of(stored_position(position)),
+            events: decode_events(in_range)?,
+            at,
         })
     }
 

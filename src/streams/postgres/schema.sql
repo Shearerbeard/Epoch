@@ -17,10 +17,11 @@ CREATE TABLE IF NOT EXISTS stream_events (
 
     event_type VARCHAR(255) NOT NULL,
 
-    -- 1-based per-stream position (ADR 0003). The unique constraint is
-    -- the backstop behind the append path's advisory lock: a lost update
-    -- would have to write a position that is already taken.
-    sequence BIGINT NOT NULL,
+    -- 1-based per-stream position (ADR 0003), enforced in storage so a
+    -- zero or negative position cannot be written at all. The unique
+    -- constraint is the backstop behind the append path's advisory
+    -- lock: a lost update would have to write a position already taken.
+    sequence BIGINT NOT NULL CHECK (sequence > 0),
 
     event_data JSONB NOT NULL,
 
