@@ -310,4 +310,11 @@ the three divergences named inline and an explicit
 must-not-implement-from instruction; the record governs. The annexes
 themselves are historical evidence and stay unedited.
 
-Round 4 verdict: pending; recorded here when the re-review returns.
+Round 4, 2026-08-07. Same author and reviewer families, fresh
+context. Verdict: PASS, zero new findings. The round-3 annex scoping
+verified against the skeleton file itself (the three named
+divergences match its actual contents, and the annex stayed
+unedited), and the ADR 0005 lifecycle item confirmed correctly open
+for the acceptance gate. The reviewer's remaining unverified checks
+are external-repo counts and runtime behavior of the not-yet-built
+implementation, which E3's own gates will execute.
