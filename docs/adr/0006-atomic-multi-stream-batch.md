@@ -1,6 +1,6 @@
 # Cross-stream invariants commit through an AtomicStreams batch capability, not a two-stream coordinator
 
-- Status: proposed
+- Status: accepted (2026-08-07 at the remote acceptance gate, after the five-round two-family review the ledger records)
 - Date: 2026-08 (revised 2026-08-07 after adversarial review; ledger below)
 - Deciders: Mike Shearer
 
