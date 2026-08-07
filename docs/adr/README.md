@@ -18,7 +18,7 @@ options are recorded inside each record.
 | [0002](0002-native-async-fn-in-trait.md) | Native async fn in trait; drop async_trait and the lifetime parameter | proposed |
 | [0003](0003-split-expected-and-stream-version.md) | Split ExpectedVersion/StreamVersion; unify on 1-based sequence semantics | accepted |
 | [0004](0004-typed-two-way-stream-ids.md) | Stream ids are a two-way typed contract owned by the repository | proposed |
-| [0005](0005-shared-reference-append.md) | append takes &self; the version check is the concurrency contract | proposed |
+| [0005](0005-shared-reference-append.md) | append takes &self; the version check is the concurrency contract | accepted |
 | [0006](0006-atomic-multi-stream-batch.md) | Cross-stream invariants commit through an AtomicStreams batch capability | accepted |
 | [0007](0007-saga-and-feed-deferred-until-pulled.md) | Saga and event feed ship when a consumer pulls them | proposed |
 | [0008](0008-decider-context-constrained-or-reified.md) | Injected decider context must be constrained or reified when it gates acceptance | proposed |

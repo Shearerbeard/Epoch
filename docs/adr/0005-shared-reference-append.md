@@ -1,6 +1,8 @@
 # append takes &self; the version check, not the receiver, is the concurrency contract
 
-- Status: proposed
+- Status: accepted (2026-08-07, on the maintainer's read at the
+  E3 close; the decision was effectively rendered at E1's design
+  panel and Gate U, and both shipped backends implement it)
 - Date: 2026-08
 - Deciders: Mike Shearer
 
