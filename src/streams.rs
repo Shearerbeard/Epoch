@@ -11,6 +11,11 @@ use thiserror::Error;
 
 use crate::decider::Event;
 
+#[cfg(feature = "in_memory")]
+pub mod in_memory;
+#[cfg(test)]
+pub(crate) mod spec;
+
 /// Two-way typed contract between a consumer's stream id types and the
 /// stored stream key (ADR 0004). The repository owns namespacing; an id
 /// renders only its own identity. Round-tripping (`parse_key` accepts
@@ -33,12 +38,11 @@ impl StreamId for String {
     type ParseError = std::convert::Infallible;
 
     fn stream_key(&self) -> String {
-        todo!()
+        self.clone()
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
     fn parse_key(key: &str) -> Result<Self, Self::ParseError> {
-        todo!()
+        Ok(key.to_owned())
     }
 }
 
@@ -51,14 +55,13 @@ pub struct StreamSequence(NonZeroU64);
 
 impl StreamSequence {
     /// Parse a raw backend position; zero is not a position.
-    #[expect(unused_variables, reason = "todo!() body; filled by E1 post-panel")]
     pub fn new(raw: u64) -> Result<Self, ZeroSequence> {
-        todo!()
+        NonZeroU64::new(raw).map(Self).ok_or(ZeroSequence)
     }
 
     /// The raw 1-based sequence number.
     pub fn get(self) -> u64 {
-        todo!()
+        self.0.get()
     }
 }
 

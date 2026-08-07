@@ -5,8 +5,9 @@ Layer-1 typed-holes skeleton for the redesigned core stream surface,
 ADRs 0001-0005. Revision 3, after the two-seat design panel (ledger in
 the board's `reviews/e1/`; Gate A PASS over d9d532b..abe1c82).
 
-Anchor stamp: claims verified against `card/e1` commit `abe1c82`
-(2026-08-05 Gate D audit). Re-verifying bumps this stamp.
+Anchor stamp: claims verified against `card/e2` commit `694c31c`
+(2026-08-06 Gate D audit; previously `card/e1` `abe1c82`,
+2026-08-05). Re-verifying bumps this stamp.
 
 ## Type-to-ADR and business-rule map
 
@@ -40,14 +41,24 @@ Anchor stamp: claims verified against `card/e1` commit `abe1c82`
 - No test-only accessors; no `#[cfg(test)]` surface yet (E2 owns the
   spec tests).
 - Hole inventory (`grep -n 'todo!()' src/streams.rs`, code sites only):
-  16 holes - `String::stream_key`, `String::parse_key`,
-  `StreamSequence::{new, get}`, `From<StreamVersion>::from`,
-  `EventBatch::{new, as_slice, into_vec}`, `StreamState::version`,
-  `StreamSlice::{new, events, at, into_parts}`,
+  16 holes at the skeleton commit - `String::stream_key`,
+  `String::parse_key`, `StreamSequence::{new, get}`,
+  `From<StreamVersion>::from`, `EventBatch::{new, as_slice, into_vec}`,
+  `StreamState::version`, `StreamSlice::{new, events, at, into_parts}`,
   `VersionConflict::{new, expected, actual}`. Trait methods carry no
   bodies. Trivial accessors are held open with the rest: the card's
   acceptance says no filled bodies until the panel passes, which
   overrides the typed-holes preference for landing them.
+- E2 fills (stage 1, per its hole-fill bound; `#[expect]` markers swept
+  with each fill): `String::stream_key`, `String::parse_key`,
+  `StreamSequence::new`, `StreamSequence::get`. 12 holes remain -
+  `From<StreamVersion>::from`, `EventBatch::{new, as_slice, into_vec}`,
+  `StreamState::version`, `StreamSlice::{new, events, at, into_parts}`,
+  `VersionConflict::{new, expected, actual}`. Where the E2 in-memory
+  implementation and spec suite (child modules of `streams`) need a
+  still-open constructor or accessor, they use crate-internal field
+  access with the invariant upheld at the site and a comment naming the
+  hole, rather than filling outside the bound.
   `clippy::todo` is not enabled (no lint table in this repo; warn would
   fail the `-D warnings` fill gate); the grep inventory is the route.
 
