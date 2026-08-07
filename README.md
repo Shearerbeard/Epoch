@@ -5,6 +5,29 @@ Event Sourcing + CQRS Framework
 This project is a collection of event sourcing and cqrs types to support some small personal projects heavily inluenced by [Thalo](https://github.com/thalo-rs/thalo) but borrowing (or will be borrowing in the future) ideas from Haskell [Eventful](https://github.com/jdreaver/eventful), F# [Equinox](https://github.com/jet/equinox), and Kotlin [f(model)](https://github.com/fraktalio/fmodel).
 
 
+### Running the tests
+
+The in-memory backend needs nothing. Every other backend talks to a real
+service, so bring the services up and give the suite their connection
+strings:
+
+```sh
+cp .env.example .env
+docker compose up -d
+cargo test
+```
+
+`cargo test` covers the default features (in-memory, EventStoreDB,
+Redis). The postgres backend is behind a non-default feature and
+migrates its own schema on first use:
+
+```sh
+cargo test --features postgres
+```
+
+Without a `.env` the service-backed tests panic with `File .env or Env
+Vars not found`; `.env.example` documents every variable they read.
+
 ### Example
 ```rust
 use epoch::{event_store::ESDBEventStore, EventEnvelope, EventStore, EventContext};
