@@ -17,7 +17,7 @@ pub mod in_memory;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(test)]
-pub(crate) mod spec;
+pub mod spec;
 
 pub use batch::{
     AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchConstraint, BatchWrite,

@@ -1,6 +1,7 @@
 //! Generic spec suite over any [`EventStreams`] implementation
-//! (ADR 0003). E3's postgres implementation runs these cases unchanged
-//! by wiring its own test module through them.
+//! (ADR 0003). Backends wire their own test modules through these
+//! cases unchanged; the suite is public so consumers can pin their own
+//! wiring (chore-lottery's gate-M test) against the same contract.
 //!
 //! Every case generates a unique stream id per configuration and per
 //! iteration (a ULID nonce in the id), so preconditions hold on any
@@ -37,7 +38,7 @@ const FLASH_SALE_STOCK: usize = 3;
 const CASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Deadline wrapper for every backend's wiring of the cases below.
-pub(crate) async fn under_deadline(case: impl std::future::Future<Output = ()>) {
+pub async fn under_deadline(case: impl std::future::Future<Output = ()>) {
     tokio::time::timeout(CASE_DEADLINE, case)
         .await
         .expect("spec case must finish under the deadline");
@@ -47,7 +48,7 @@ pub(crate) async fn under_deadline(case: impl std::future::Future<Output = ()>) 
 /// and each appends one event expecting the empty stream: exactly one
 /// wins at sequence 1 and one gets the version conflict. A post-race
 /// load pins the stored state: exactly one event, so version 1.
-pub(crate) async fn single_event_occ_race_on_empty_stream<S, E>(
+pub async fn single_event_occ_race_on_empty_stream<S, E>(
     store: S,
     make_id: impl Fn(&str) -> S::Id,
     make_event: impl Fn() -> E + Clone + Send + Sync + 'static,
@@ -96,7 +97,7 @@ pub(crate) async fn single_event_occ_race_on_empty_stream<S, E>(
 /// conflict. This is the other side of the old backend's defect, where
 /// an empty stream and a one-event stream shared version 0. A post-race
 /// load pins the stored state: exactly two events, so version 2.
-pub(crate) async fn single_event_occ_race_on_seeded_stream<S, E>(
+pub async fn single_event_occ_race_on_seeded_stream<S, E>(
     store: S,
     make_id: impl Fn(&str) -> S::Id,
     make_event: impl Fn() -> E + Clone + Send + Sync + 'static,
@@ -162,7 +163,7 @@ pub(crate) async fn single_event_occ_race_on_seeded_stream<S, E>(
 /// lost-update implementation overshoots, an append that stores its
 /// event while reporting a conflict undershoots, and an implementation
 /// that conflicts on a correct expectation exhausts the retry cap.
-pub(crate) async fn flash_sale_sells_exactly_the_stock<S, E>(
+pub async fn flash_sale_sells_exactly_the_stock<S, E>(
     store: S,
     make_id: impl Fn(&str) -> S::Id,
     make_event: impl Fn() -> E + Clone + Send + Sync + 'static,
