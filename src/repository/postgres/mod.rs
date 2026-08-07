@@ -308,13 +308,16 @@ mod tests {
     const BASE_STREAM: u32 = const_random!(u32);
 
     async fn repo_from_environment(stream_type: &str) -> PgEventRepository<UserEvent> {
-        // Load .env the way the other backends do. Without this the
-        // variable below is only ever read from the ambient environment,
-        // so a connection string set in .env is silently ignored and the
-        // fallback runs instead - against whatever database that names.
+        // Load .env the way the other backends do, then require the
+        // variable. These tests migrate schema and write events into
+        // whatever database they are pointed at, so there is no safe
+        // default to fall back on: an unset or misspelled variable must
+        // stop the run rather than silently pick a database.
         let _ = dotenv::dotenv();
-        let conn_str = std::env::var("EPOCH_PG_TEST_URL")
-            .unwrap_or_else(|_| "postgres://vikunja:devpass@localhost:54320/vikunja".to_string());
+        let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect(
+            "EPOCH_PG_TEST_URL must be set (see .env.example; \
+             `cp .env.example .env && docker compose up -d`)",
+        );
         let pool = PgEventRepository::<UserEvent>::pool_from_conn_str(&conn_str)
             .await
             .expect("pg pool from EPOCH_PG_TEST_URL");
