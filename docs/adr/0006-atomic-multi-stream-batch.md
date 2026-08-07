@@ -1,27 +1,33 @@
 # Cross-stream invariants commit through an AtomicStreams batch capability, not a two-stream coordinator
 
 - Status: proposed
-- Date: 2026-08
+- Date: 2026-08 (revised 2026-08-07 after adversarial review; ledger below)
 - Deciders: Mike Shearer
 
 ## Context and problem statement
 
-Chore-lottery's draw must make two facts true in two streams (card
-assigned, kid holding). With single-stream append as the only
-primitive, its coordinator hand-orders the version-checked appends and
-carries a five-case failure ledger covering race losses, orphan and
-half-return windows, and stale-projection repair. Roughly a
+Chore-lottery's draw needs two facts made true in two streams: card
+assigned, kid holding. Single-stream append is the only primitive, so
+the coordinator hand-orders the version-checked appends behind a
+five-case failure ledger: race losses, orphan and half-return
+windows, stale-projection repair. Roughly a
 tenth of the coordinator is this boundary machinery, and the error
-mapping repeats eight times. The question was whether Epoch should
-ship a two-stream primitive.
+mapping repeats ten times (recounted 2026-08-07 against the current
+coordinator source; the ledger and the source are unchanged since the
+cited retro). The question was whether Epoch should ship a two-stream
+primitive.
 
 Reference research (Fmodel by Fraktalio; EvidentDB by Evident Systems)
 converged on a different framing: there is no two-stream coordinator
 abstraction in either design. Deciders sharing an invariant get one
 atomic boundary (Fmodel `combine`, one fetch/decide/save;
-EvidentDB `transactBatch` with multi-stream `BatchConstraint`s);
-independent deciders connect through stateless sagas with
-infrastructure-owned delivery. EvidentDB buys its batch with a
+EvidentDB `transactBatch` with multi-stream `BatchConstraint`s).
+At research time Fmodel connected independent deciders through
+stateless sagas with infrastructure-owned delivery; current upstream
+also ships stateful process types alongside atomic batch execution,
+which changes the saga half of that picture but not the premise this
+record rests on: one atomic boundary per shared invariant.
+EvidentDB buys its batch with a
 Datomic-style single writer per database. Postgres does not need that
 funnel: transaction-scoped advisory locks give per-batch mutual
 exclusion over exactly the touched streams.
@@ -37,24 +43,31 @@ exclusion over exactly the touched streams.
   provide it (ESDB) simply does not implement it, and the missing impl
   is the compatibility statement.
 - The batch MUST accept events of different types (KidEvent plus
-  ChoreEvent), which EvidentDB's single CloudEvent type never faces.
-- Blocking between contending batches MUST be bounded and deadlock-free.
+  ChoreEvent). This reflects a constraint of the ported consumers, not
+  a preference: chore-lottery's kid and chore streams pre-exist as
+  separately read streams in separate categories, so an invariant that
+  spans them must span streams as they are. EvidentDB's single
+  CloudEvent type never faces this.
+- Blocking between contending batches MUST be bounded and
+  deadlock-free. Sorted acquisition addresses deadlock; a wait bound
+  addresses blocking, and both are specified in the outcome below.
 
 ## Considered options
 
-1. `AtomicStreams::transact(Batch)` capability trait. `Batch` collects
-   type-erased writes (events serialize at the boundary, where they
-   become rows regardless) plus `BatchConstraint`s (StreamExists,
-   StreamDoesNotExist, StreamAt). Postgres implements it with one
-   transaction: advisory-lock every touched and constrained stream key
-   in sorted order, evaluate constraints against MAX(sequence), insert
-   all rows or roll back. In-memory implements it under its store
-   mutex. Single-stream append remains the degenerate one-write batch.
+1. `AtomicStreams::transact(Batch)` capability trait, specified in the
+   outcome below. Postgres implements it with one transaction:
+   advisory-lock every touched and constrained stream in sorted order,
+   evaluate constraints, insert all rows or roll back. In-memory
+   implements it under its store mutex.
 2. A blessed two-stream combinator (ordered reserve-then-accept with
    pluggable compensation).
 3. Saga-first: no atomic capability; all cross-stream flows go through
    the event feed (ADR 0007) with idempotent commands.
 4. Status quo: consumers hand-order appends and own the repair paths.
+5. Combine the deciders behind a sum event in one stream (the Fmodel
+   `combine` shape with no new Epoch surface): the invariant's
+   aggregates share a single stream whose event type is the sum of
+   both, and ordinary single-stream append is the atomic boundary.
 
 ## Decision outcome
 
@@ -69,6 +82,73 @@ strictly more consumer machinery than the invariant needs; it remains
 the right tool for reactions (ADR 0007). Option 4 remains the fallback
 shape on backends without the capability and keeps working; the
 failure-ledger analysis documents its cost (see the design annexes).
+Option 5 is the simplest researched shape and needs nothing from
+Epoch, and it remains available to any consumer whose domain tolerates
+it. It was rejected as this record's answer because it relocates the
+cost into the consumer's domain model: the pre-existing kid and chore
+streams collapse into one stream and one category - a rebuild of
+every projection and category read over them - and stream identity
+from then on encodes the invariant rather than the entity. The
+ported consumers' invariants span streams that must remain separately
+readable, which is the mixed-event-type driver above.
+
+### The contract, pinned
+
+E3's implementation and its gates rest on these points; they are
+decided here, not left to the diff.
+
+- Lock identity: a stream's batch lock is the same physical advisory
+  lock its single append takes today, the two-key
+  `pg_advisory_xact_lock(hashtext(category), hashtext(stream_key))`
+  the landed backend uses. So batches and ordinary appends
+  serialize against each other on every stream they share; a
+  one-argument lock or any second identity would let a batch race an
+  append on the same stream.
+- Lock order: the batch derives the lock tuple for every touched and
+  constrained stream, deduplicates, and acquires in lexicographic
+  order over the two-integer tuples. That order is total across
+  categories, which is what makes cross-category deadlock cycles
+  impossible; sorting stream keys as text within one category would
+  not be.
+- Bounded waiting: `transact` sets a transaction-scoped
+  `lock_timeout` (`SET LOCAL`), so a contender blocked on a rival's
+  lock waits at most that bound. Expiry surfaces as a distinct,
+  retryable timeout error, never as a version conflict; the
+  transaction rolls back whole, and the xact-scoped locks release
+  with it. The default bound and its configuration surface are E3
+  implementation decisions; that waiting is bounded and how expiry
+  is classified are decided here.
+- Ownership seam: `AtomicStreams` is implemented by the backend's
+  database handle, the value that owns the pool and from which
+  per-category stores are derived; it is not implemented by a single
+  per-category store, whose scope is too narrow for a cross-category
+  batch. A `Batch` is built from stream handles derived from the same
+  database handle, so combining streams from different databases or
+  pools is unrepresentable by construction. The in-memory equivalent
+  is the shared store root (ADR 0005 clones share it).
+- Erasure contract: `Batch` is backend-scoped, not backend-neutral.
+  Each capable backend owns its batch builder, and the builder's push
+  method is typed per write; erasure to the backend's wire form
+  happens at push, under the backend's own bound (for postgres, the
+  serde bound the E1 design record records for that backend, to JSONB
+  rows), and a failed encoding is a build-time error before any
+  transaction starts. No universal serialization contract is imposed
+  on the E1 types, which keeps the design record's rule intact.
+- Constraint semantics: `BatchConstraint` is `StreamExists`,
+  `StreamDoesNotExist`, or `StreamAt(sequence)` with an exact 1-based
+  `StreamSequence`; the wider `ExpectedVersion` vocabulary is not
+  admitted, so a constraint cannot restate `Any`. Satisfaction is
+  evaluated against the same observation single append uses,
+  `COALESCE(MAX(sequence), 0)` under the held lock: exists means a
+  positive count, does-not-exist means zero, at(n) means exactly n. A
+  violated constraint rolls the whole batch back and reports which
+  constraint failed against which observed `StreamVersion`, the same
+  expected-versus-actual shape as the append conflict.
+- Append parity: single-stream append is semantically the degenerate
+  one-write batch, meaning identical lock identity and identical
+  check semantics, and the spec suite pins that parity. It remains
+  its own code path; the second-write-path cost is recorded in the
+  consequences.
 
 Sorted lock acquisition makes deadlock cycles impossible; batches over
 disjoint streams proceed in parallel, which the single-writer designs
@@ -83,15 +163,28 @@ Constraints stay per-stream, and that is stated in the docs.
 - Positive: set-validation patterns (claim streams, parent aggregates)
   and existence pins become one-line constraints.
 - Negative: a second write path exists in each capable backend; the
-  spec suite must cover transact with the same rigor as append
-  (the implementation plan includes a raced-batches smoke test).
+  spec suite must cover transact with the same rigor as append and
+  pin the append-parity point above (the implementation plan includes
+  a raced-batches smoke test).
 - Negative: consumers targeting ESDB cannot use the capability and
   keep the hand-ordered shape; portability across backends is now a
   design-time choice the type system surfaces.
-- Negative: type erasure in `Batch` moves a class of mistakes
-  (mismatched event/stream pairing) from compile time to batch-build
-  time errors. Accepted: the write method is still typed at its
-  entrance.
+- Negative: a batch holds every one of its locks for the life of its
+  transaction, so contending writers on any shared stream serialize
+  for longer than a single append would hold them; and the hashed
+  lock identity means unrelated streams that collide under
+  `hashtext` serialize with each other too, a correctness-preserving
+  contention cost inherited from the landed append path.
+- Negative: the lock timeout is a new failure mode consumers must
+  handle: a busy system surfaces retryable timeouts where the
+  hand-ordered shape surfaced version conflicts. Cancellation
+  mid-transact is safe by construction (rollback releases the
+  xact-scoped locks) but is also a path the smoke test exercises.
+- Negative: building a batch moves one class of mistake (a write
+  encoded for the wrong backend, a mispaired event and stream) from
+  the trait's typed method signature to batch-build time. The push
+  API is still typed per write; what is given up is the single
+  method signature covering the whole batch shape at once.
 
 ## Links
 
@@ -108,3 +201,50 @@ Constraints stay per-stream, and that is stated in the docs.
   [evidentdb-atomic-batch](../research/evidentdb-atomic-batch.md)
 - Vocabulary from ADR 0003; ids from ADR 0004; reactions split off to
   ADR 0007; ctx rule in ADR 0008
+- Landed lock identity and check semantics this record pins to:
+  `src/streams/postgres.rs` (E10, the postgres event streams backend)
+
+## Adversarial review ledger
+
+Round 1, 2026-08-07. Author of the reviewed revision: Claude family
+(drafted under the board owner). Reviewer: the codex route (GPT
+family), fresh context, read-only. Verdict over the pre-revision text:
+FAIL, six BLOCKING and five MINOR. Dispositions, applied in this
+revision:
+
+1. BLOCKING, bounded blocking unspecified: fixed; the outcome pins a
+   transaction-scoped `lock_timeout` with expiry as a distinct
+   retryable error.
+2. BLOCKING, lock identity and cross-category order undefined: fixed;
+   the outcome pins the landed two-key lock identity and a total
+   lexicographic order over deduplicated lock tuples.
+3. BLOCKING, ownership seam absent: fixed; the outcome pins
+   `AtomicStreams` to the database handle with same-handle batch
+   construction.
+4. BLOCKING, erasure contract unresolved against the design record:
+   fixed; batches are backend-scoped and erase under the backend's
+   own bound at push, imposing nothing on the E1 types.
+5. BLOCKING, constraint semantics undefined: fixed; the outcome pins
+   the three-variant constraint language, append-identical
+   satisfaction rules, and the conflict payload shape.
+6. BLOCKING, the Fmodel combine alternative missing from the options:
+   fixed; added as option 5 with an honest rejection tied to the
+   mixed-event-type driver, which now states its business constraint.
+7. MINOR, consequences omitted operational costs and contradicted the
+   degenerate-batch line: fixed; lock-hold, collision, timeout, and
+   cancellation costs added, and append parity restated as semantic
+   with its own code path.
+8. MINOR, stale error-mapping count: fixed; recounted at ten.
+9. MINOR, stale Fmodel saga framing: fixed; the context now dates the
+   research view and states the surviving premise.
+10. MINOR, ADR 0007's commit-ordered `global_sequence` claim vs the
+    landed BIGSERIAL: recorded as an erratum note on ADR 0007 this
+    revision; the feed card owns visibility and cursor semantics
+    before adopting the column.
+11. MINOR, index status drift: the README index row for ADR 0003 now
+    matches its accepted file. ADR 0005's file still reads proposed
+    while its surface landed through E1's accepted gates; flipping it
+    is surfaced at this record's acceptance gate rather than done
+    silently.
+
+Round 2 verdict: pending; recorded below when the re-review returns.

@@ -53,7 +53,13 @@ treat it as platform.
 
 The postgres schema already satisfies the forward-compatibility
 driver: `global_sequence` is commit-ordered and is the feed cursor
-unchanged. The deferred work is tracked on the maintainer's
+unchanged. Erratum (2026-08-07, from ADR 0006's adversarial review):
+the landed E10 schema implements `global_sequence` as `BIGSERIAL`,
+which allocates before commit, so concurrent transactions can commit
+in the opposite order of their sequence values. The column is not
+commit-ordered as written, and the feed card must define visibility
+and cursor semantics (gap and reorder handling) before adopting it.
+The deferred work is tracked on the maintainer's
 redesign board with a do-not-pull-until-needed note.
 
 ## Consequences
