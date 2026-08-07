@@ -1,6 +1,6 @@
 # Stream ids are a two-way typed contract owned by the repository
 
-- Status: proposed
+- Status: accepted (2026-08-07, user decision at the E4 port's pre-flight gate)
 - Date: 2026-08
 - Deciders: Mike Shearer
 
