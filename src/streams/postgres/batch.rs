@@ -114,10 +114,8 @@ impl PgBatchBuilder {
         Id: StreamId,
         E: Event + Serialize,
     {
-        // `EventBatch::as_slice` is an E1 hole outside this card's fill
-        // bound; the batch's own invariant makes this nonempty.
         let encoded = events
-            .0
+            .as_slice()
             .iter()
             .map(|event| {
                 Ok(EncodedEvent {
@@ -434,13 +432,13 @@ mod postgres_tests {
     }
 
     fn kid_event() -> EventBatch<KidHoldsCard> {
-        // `EventBatch::new` is an E1 hole outside this card's fill
-        // bound; crate-internal construction here is trivially nonempty.
-        EventBatch(vec![KidHoldsCard])
+        // A single-element batch is trivially nonempty, so the
+        // empty-batch error is unreachable.
+        EventBatch::new(vec![KidHoldsCard]).expect("a single event is nonempty")
     }
 
     fn chore_event() -> EventBatch<CardAssigned> {
-        EventBatch(vec![CardAssigned])
+        EventBatch::new(vec![CardAssigned]).expect("a single event is nonempty")
     }
 
     /// A draw: one write in each of two categories, both expecting the
@@ -544,7 +542,9 @@ mod postgres_tests {
                 );
                 assert_eq!(
                     chore_state(&fixture, &chore).await,
-                    StreamState::Present(EventBatch(vec![CardAssigned]))
+                    StreamState::Present(
+                        EventBatch::new(vec![CardAssigned]).expect("a single event is nonempty")
+                    )
                 );
             }
         })
@@ -663,7 +663,10 @@ mod postgres_tests {
                 match (batched, appended) {
                     (Ok(()), Err(AppendError::Conflict(_))) => assert_eq!(
                         chore_state(&fixture, &chore).await,
-                        StreamState::Present(EventBatch(vec![CardAssigned])),
+                        StreamState::Present(
+                            EventBatch::new(vec![CardAssigned])
+                                .expect("a single event is nonempty")
+                        ),
                         "the batch won, so both its writes are stored"
                     ),
                     (Err(TransactError::Conflict(_)), Ok(_)) => assert_eq!(
@@ -771,7 +774,9 @@ mod postgres_tests {
             );
             assert_eq!(
                 chore_state(&fixture, &chore).await,
-                StreamState::Present(EventBatch(vec![CardAssigned]))
+                StreamState::Present(
+                    EventBatch::new(vec![CardAssigned]).expect("a single event is nonempty")
+                )
             );
         })
         .await;

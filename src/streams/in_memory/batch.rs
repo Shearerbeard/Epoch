@@ -48,10 +48,8 @@ impl InMemoryBatchBuilder {
         Id: StreamId,
         E: Event + Clone + Send + Sync + 'static,
     {
-        // `EventBatch::as_slice` is an E1 hole outside this card's fill
-        // bound; the batch's own invariant makes this nonempty.
         let erased = events
-            .0
+            .as_slice()
             .iter()
             .map(|event| MemoryEvent {
                 payload: Arc::new(event.clone()) as Arc<dyn Any + Send + Sync>,
@@ -167,13 +165,13 @@ mod tests {
     const CHORES: &str = "chores";
 
     fn kid_event() -> EventBatch<KidHoldsCard> {
-        // `EventBatch::new` is an E1 hole outside this card's fill
-        // bound; crate-internal construction here is trivially nonempty.
-        EventBatch(vec![KidHoldsCard])
+        // A single-element batch is trivially nonempty, so the
+        // empty-batch error is unreachable.
+        EventBatch::new(vec![KidHoldsCard]).expect("a single event is nonempty")
     }
 
     fn chore_event() -> EventBatch<CardAssigned> {
-        EventBatch(vec![CardAssigned])
+        EventBatch::new(vec![CardAssigned]).expect("a single event is nonempty")
     }
 
     /// A draw: one write in each of two categories, at the heads both
@@ -243,7 +241,9 @@ mod tests {
                     .load_stream(&chore)
                     .await
                     .expect("load succeeds"),
-                StreamState::Present(EventBatch(vec![CardAssigned]))
+                StreamState::Present(
+                    EventBatch::new(vec![CardAssigned]).expect("a single event is nonempty")
+                )
             );
         }
     }

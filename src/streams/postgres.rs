@@ -181,10 +181,11 @@ where
         if events.is_empty() {
             Ok(StreamState::Missing)
         } else {
-            // `EventBatch::new` is an E1 hole outside this card's fill
-            // bound; crate-internal construction is valid here because
-            // the nonempty invariant was just checked.
-            Ok(StreamState::Present(EventBatch(events)))
+            // The nonempty invariant was just checked above, so the
+            // empty-batch error is unreachable.
+            Ok(StreamState::Present(
+                EventBatch::new(events).expect("events were checked nonempty"),
+            ))
         }
     }
 
@@ -228,13 +229,13 @@ where
                 .is_some_and(|sequence| stored_position(sequence) >= cursor)
         });
 
-        // `StreamSlice::new` is an E1 hole outside this card's fill
-        // bound; the pair is consistent by construction, since rows only
-        // exist for a stream whose observation is `Exact`.
-        Ok(StreamSlice {
-            events: decode_events(in_range)?,
-            at: version_of(stored_position(head)),
-        })
+        // The pair is consistent by construction: rows only exist for a
+        // stream whose observation is `Exact`, so the misshapen-slice
+        // error is unreachable.
+        Ok(
+            StreamSlice::new(decode_events(in_range)?, version_of(stored_position(head)))
+                .expect("in-range rows imply an Exact observation"),
+        )
     }
 
     async fn load_category(
@@ -297,19 +298,17 @@ where
             ExpectedVersion::Exact(sequence) => observed == StreamVersion::Exact(sequence),
         };
         if !satisfied {
-            // `VersionConflict::new` is an E1 hole outside this card's
-            // fill bound; the pair is a genuine conflict because it is
-            // only built when the check just failed.
-            return Err(AppendError::Conflict(VersionConflict {
-                expected,
-                actual: observed,
-            }));
+            // The pair is a genuine conflict because it is only built
+            // when the check just failed, so the not-a-conflict error
+            // is unreachable.
+            return Err(AppendError::Conflict(
+                VersionConflict::new(expected, observed)
+                    .expect("the expectation just failed against the observation"),
+            ));
         }
 
-        // `EventBatch::as_slice` is an E1 hole outside this card's fill
-        // bound; the batch's own invariant makes this nonempty.
         let mut next = position;
-        for event in &events.0 {
+        for event in events.as_slice() {
             next += 1;
             let event_type = event.event_type();
             let event_data = serde_json::to_value(event).map_err(PgStreamsError::Serialization)?;

@@ -259,10 +259,11 @@ where
         if events.is_empty() {
             Ok(StreamState::Missing)
         } else {
-            // `EventBatch::new` is an E1 hole outside E2's fill bound;
-            // crate-internal construction is valid here because the
-            // nonempty invariant was just checked.
-            Ok(StreamState::Present(EventBatch(events)))
+            // The nonempty invariant was just checked above, so the
+            // empty-batch error is unreachable.
+            Ok(StreamState::Present(
+                EventBatch::new(events).expect("events were checked nonempty"),
+            ))
         }
     }
 
@@ -290,10 +291,10 @@ where
             history[start..].to_vec()
         };
 
-        // `StreamSlice::new` is an E1 hole outside E2's fill bound; the
-        // pair is consistent by construction (events only come from a
-        // nonempty history, whose observation is `Exact`).
-        Ok(StreamSlice { events, at })
+        // The pair is consistent by construction: nonempty events only
+        // come from a nonempty history, whose observation is `Exact`,
+        // so the misshapen-slice error is unreachable.
+        Ok(StreamSlice::new(events, at).expect("nonempty events imply an Exact observation"))
     }
 
     async fn load_category(
@@ -327,23 +328,23 @@ where
         let observed = root.head(&self.category, &key);
 
         if !super::batch::expectation_satisfied(expected, observed) {
-            // `VersionConflict::new` is an E1 hole outside E2's fill
-            // bound; the pair is a genuine conflict because it is only
-            // built when the check just failed.
-            return Err(AppendError::Conflict(VersionConflict {
-                expected,
-                actual: observed,
-            }));
+            // The pair is a genuine conflict because it is only built
+            // when the check just failed, so the not-a-conflict error
+            // is unreachable.
+            return Err(AppendError::Conflict(
+                VersionConflict::new(expected, observed)
+                    .expect("the expectation just failed against the observation"),
+            ));
         }
 
         let count = match observed {
             StreamVersion::NoStream => 0,
             StreamVersion::Exact(sequence) => sequence.get(),
         };
-        for event in &events.0 {
+        for event in events.as_slice() {
             root.append_erased(&self.category, &key, Arc::new(event.clone()));
         }
-        let position = count + events.0.len() as u64;
+        let position = count + events.as_slice().len() as u64;
         Ok(StreamSequence::new(position).expect("a batch holds at least one event"))
     }
 }

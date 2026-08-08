@@ -327,14 +327,11 @@ impl BatchConflict {
     /// The failed assertion and the head it was checked against, in the
     /// append conflict's shape.
     ///
-    /// `VersionConflict::new` is an E1 hole outside this card's fill
-    /// bound; the pair is a genuine conflict because a `BatchConflict`
-    /// is only built when the check just failed.
+    /// A `BatchConflict` is only built when the check just failed, so
+    /// the pair is a genuine conflict and the error is unreachable.
     pub fn as_version_conflict(&self) -> VersionConflict {
-        VersionConflict {
-            expected: self.expected,
-            actual: self.observed,
-        }
+        VersionConflict::new(self.expected, self.observed)
+            .expect("a BatchConflict is built only from a failed check")
     }
 }
 

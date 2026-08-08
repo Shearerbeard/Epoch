@@ -21,7 +21,10 @@ use tokio::sync::Barrier;
 
 use crate::decider::Event;
 
-use super::{AppendError, EventBatch, EventStreams, ExpectedVersion, StreamSequence, StreamState};
+use super::{
+    AppendError, EventBatch, EventStreams, ExpectedVersion, StreamSequence, StreamState,
+    StreamVersion,
+};
 
 const RACE_ITERATIONS: usize = 20;
 
@@ -267,9 +270,9 @@ fn unique_stream_id(configuration: &str, iteration: usize) -> String {
 }
 
 fn one_event_batch<E>(event: E) -> EventBatch<E> {
-    // `EventBatch::new` is an E1 hole outside E2's fill bound;
-    // crate-internal construction here is trivially nonempty.
-    EventBatch(vec![event])
+    // A single-event batch is trivially nonempty, so the empty-batch
+    // error is unreachable.
+    EventBatch::new(vec![event]).expect("a single event is nonempty")
 }
 
 /// Load a stream that must be present and report its observed position.
@@ -279,12 +282,10 @@ where
     E: Event + Send + Sync + Debug,
 {
     let state = store.load_stream(id).await.expect("load succeeds");
-    match &state {
-        // `StreamState::version` is an E1 hole outside E2's fill
-        // bound; a present stream's version is its event count.
-        StreamState::Present(batch) => StreamSequence::new(batch.0.len() as u64)
-            .expect("a present stream has at least one event"),
-        StreamState::Missing => panic!("the stream must be present at this point"),
+    match state.version() {
+        // A present stream's version is its event count.
+        StreamVersion::Exact(sequence) => sequence,
+        StreamVersion::NoStream => panic!("the stream must be present at this point"),
     }
 }
 
