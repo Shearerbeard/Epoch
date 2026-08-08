@@ -538,7 +538,9 @@ mod postgres_tests {
                 // neither, so no partial rows survived.
                 assert_eq!(
                     kid_state(&fixture, &kid).await,
-                    StreamState::Present(EventBatch(vec![KidHoldsCard]))
+                    StreamState::Present(
+                        EventBatch::new(vec![KidHoldsCard]).expect("a single event is nonempty")
+                    )
                 );
                 assert_eq!(
                     chore_state(&fixture, &chore).await,
@@ -684,7 +686,9 @@ mod postgres_tests {
                 // two writers took the same lock and read the same head.
                 assert_eq!(
                     kid_state(&fixture, &kid).await,
-                    StreamState::Present(EventBatch(vec![KidHoldsCard]))
+                    StreamState::Present(
+                        EventBatch::new(vec![KidHoldsCard]).expect("a single event is nonempty")
+                    )
                 );
             }
         })
@@ -770,7 +774,10 @@ mod postgres_tests {
 
             assert_eq!(
                 kid_state(&fixture, &kid).await,
-                StreamState::Present(EventBatch(vec![KidHoldsCard, KidHoldsCard]))
+                StreamState::Present(
+                    EventBatch::new(vec![KidHoldsCard, KidHoldsCard])
+                        .expect("two events are nonempty")
+                )
             );
             assert_eq!(
                 chore_state(&fixture, &chore).await,

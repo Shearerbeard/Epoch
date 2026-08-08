@@ -203,7 +203,9 @@ mod tests {
             .expect("the category holds kid events");
         match store.load_stream(&key.to_owned()).await {
             Ok(StreamState::Missing) => StreamVersion::NoStream,
-            Ok(StreamState::Present(events)) => super::super::version_of(events.0.len() as u64),
+            Ok(StreamState::Present(events)) => {
+                super::super::version_of(events.as_slice().len() as u64)
+            }
             Err(error) => match error {},
         }
     }
@@ -234,7 +236,9 @@ mod tests {
             let chore_store = db.category::<CardAssigned>(CHORES).expect("chore category");
             assert_eq!(
                 kid_store.load_stream(&kid).await.expect("load succeeds"),
-                StreamState::Present(EventBatch(vec![KidHoldsCard]))
+                StreamState::Present(
+                    EventBatch::new(vec![KidHoldsCard]).expect("a single event is nonempty")
+                )
             );
             assert_eq!(
                 chore_store
