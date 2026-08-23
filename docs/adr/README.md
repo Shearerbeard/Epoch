@@ -23,6 +23,7 @@ options are recorded inside each record.
 | [0007](0007-saga-and-feed-deferred-until-pulled.md) | Saga and event feed ship when a consumer pulls them | proposed |
 | [0008](0008-decider-context-constrained-or-reified.md) | Injected decider context must be constrained or reified when it gates acceptance | proposed |
 | [0009](0009-private-tooling-seam.md) | Development coordination lives outside this repo | proposed |
+| [0010](0010-allocation-ledger-honest-cursor.md) | The event feed's cursor runs on an allocation ledger, not on sequence adjacency | proposed |
 
 ## Provenance
 
