@@ -11,9 +11,9 @@
 //! committed and observes the winner's rows, so the loser conflicts
 //! instead of overwriting. The lock is transaction-scoped, so a
 //! cancelled future releases it at rollback rather than leaking a
-//! session-level lock. The unique position constraint in `schema.sql`
-//! backstops the same invariant at the storage layer, alongside a check
-//! constraint that keeps positions 1-based.
+//! session-level lock. The unique position constraint in the first
+//! migration step backstops the same invariant at the storage layer,
+//! alongside a check constraint that keeps positions 1-based.
 //!
 //! Read consistency. Each load is a single statement, which is its own
 //! snapshot: a rival append committing mid-read cannot split a read

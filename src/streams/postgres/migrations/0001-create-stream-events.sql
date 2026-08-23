@@ -1,11 +1,11 @@
--- Schema for Epoch's PostgreSQL `EventStreams` backend (ADR 0003).
+-- Migration step 1: the original stream_events table (ADR 0003).
 --
--- Applied as versioned migration step 1 (the streams migrations
--- module); still the canonical current-shape reference, and later
--- steps amend databases created at earlier shapes. Namespaced away
--- from the old repository surface's `events` table so both can
--- coexist until teardown is assigned. Events are immutable: no
--- update or delete paths exist.
+-- IMMUTABLE once any database has applied it: this file is frozen as
+-- step 1 of the versioned migrations (the migrations module embeds it
+-- verbatim), and every schema change lands as a NEW numbered step,
+-- never as an edit here. Namespaced away from the old repository
+-- surface's `events` table so both can coexist until teardown is
+-- assigned. Events are immutable: no update or delete paths exist.
 
 CREATE TABLE IF NOT EXISTS stream_events (
     global_sequence BIGSERIAL PRIMARY KEY,

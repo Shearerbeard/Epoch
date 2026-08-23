@@ -287,8 +287,8 @@ its gate A before anything is accepted.
 - [Saga delivery semantics - the upstream survey](../research/saga-delivery-upstream.md)
   (Axon token stores, one poller per group, the outbox school)
 - The BIGSERIAL column and the write paths the rewrite touches:
-  `src/streams/postgres/schema.sql`, `src/streams/postgres.rs`,
-  `src/streams/postgres/batch.rs`
+  `src/streams/postgres/migrations/0001-create-stream-events.sql`,
+  `src/streams/postgres.rs`, `src/streams/postgres/batch.rs`
 - The race figure's original:
   [epoch-saga-ledger-infographic](https://shearerbeard.github.io/artifacts/epoch-saga-ledger-infographic)
   (rev 2, 2026-08-22)

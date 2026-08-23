@@ -1,16 +1,25 @@
 //! Versioned schema migrations for the streams tables.
 //!
-//! Steps are ordered, named, and recorded in an applied ledger
-//! (`epoch_schema_migrations`) inside the database, replacing the
+//! Steps are ordered, named SQL files under `migrations/`, embedded
+//! verbatim, and recorded in an applied ledger
+//! (`epoch_schema_migrations`) inside the database - replacing the
 //! single CREATE-IF-NOT-EXISTS batch that could never amend an
 //! existing table. A database created at any earlier shape reaches
-//! the current schema through [`apply`] alone.
+//! the current schema through [`PgEventStreams::migrate`] alone.
+//!
+//! A step file is IMMUTABLE once any database has applied it: editing
+//! an applied step retroactively changes what fresh databases get
+//! while applied ones keep the old shape, and the two diverge under
+//! an identical ledger. Every schema change lands as a new numbered
+//! step file, never as an edit to an existing one; the current shape
+//! of the schema is the composition of the steps, readable in order.
 //!
 //! The whole run - lock, ledger read, pending steps, ledger writes -
 //! is one transaction behind the advisory-lock discipline the append
 //! path already uses, so concurrent callers serialize and the later
 //! ones find nothing pending. DDL in postgres is transactional, so a
-//! failed step leaves no partial application behind.
+//! failed step leaves no partial application behind: not the step's
+//! DDL, not the ledger rows, not even the ledger table itself.
 
 use std::collections::HashSet;
 
@@ -29,42 +38,23 @@ const ENSURE_LEDGER: &str = "CREATE TABLE IF NOT EXISTS epoch_schema_migrations 
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )";
 
+#[derive(Clone, Copy)]
 struct Migration {
     version: i64,
     name: &'static str,
     sql: &'static str,
 }
 
-/// Step 1 embeds `schema.sql` verbatim; the file stays the canonical
-/// current-shape reference. Step 2 carries the check constraint to
-/// databases created before it existed in the CREATE: postgres names
-/// the inline constraint `stream_events_sequence_check`, and the
-/// guard adds it only when a database has no constraint of that name,
-/// which is also what makes re-running step 1's CREATE on an existing
-/// table harmless. New schema work lands as further steps here, in
-/// ascending version order.
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
         name: "create-stream-events",
-        sql: include_str!("schema.sql"),
+        sql: include_str!("migrations/0001-create-stream-events.sql"),
     },
     Migration {
         version: 2,
         name: "pin-sequences-positive",
-        sql: "DO $m$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_constraint
-                    WHERE conrelid = 'stream_events'::regclass
-                      AND conname = 'stream_events_sequence_check'
-                ) THEN
-                    ALTER TABLE stream_events
-                        ADD CONSTRAINT stream_events_sequence_check
-                        CHECK (sequence > 0);
-                END IF;
-            END
-            $m$",
+        sql: include_str!("migrations/0002-pin-sequences-positive.sql"),
     },
 ];
 
@@ -72,6 +62,10 @@ const MIGRATIONS: &[Migration] = &[
 /// recording each in the ledger inside the same transaction that ran
 /// its DDL.
 pub(super) async fn apply(client: &mut Client) -> Result<(), PgStreamsError> {
+    apply_steps(client, MIGRATIONS).await
+}
+
+async fn apply_steps(client: &mut Client, steps: &[Migration]) -> Result<(), PgStreamsError> {
     let tx = client.transaction().await?;
     tx.execute("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK])
         .await?;
@@ -82,10 +76,7 @@ pub(super) async fn apply(client: &mut Client) -> Result<(), PgStreamsError> {
         .await?;
     let applied: HashSet<i64> = rows.iter().map(|row| row.get(0)).collect();
 
-    for step in MIGRATIONS
-        .iter()
-        .filter(|step| !applied.contains(&step.version))
-    {
+    for step in steps.iter().filter(|step| !applied.contains(&step.version)) {
         tx.batch_execute(step.sql).await?;
         tx.execute(
             "INSERT INTO epoch_schema_migrations (version, name) VALUES ($1, $2)",
@@ -100,8 +91,11 @@ pub(super) async fn apply(client: &mut Client) -> Result<(), PgStreamsError> {
 
 #[cfg(all(test, feature = "postgres"))]
 mod tests {
+    use std::sync::Arc;
+
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
+    use tokio::sync::Barrier;
     use tokio_postgres::NoTls;
 
     use super::*;
@@ -168,6 +162,42 @@ mod tests {
             .expect("pool over the scratch database")
     }
 
+    fn store(pool: &PgPool) -> PgEventStreams<String, ()> {
+        PgEventStreams::new(pool.clone(), "migrations")
+    }
+
+    /// The applied ledger's (version, name) rows, in order.
+    async fn ledger_rows(pool: &PgPool) -> Vec<(i64, String)> {
+        let conn = pool.get().await.expect("ledger connection");
+        conn.query(
+            "SELECT version, name FROM epoch_schema_migrations ORDER BY version",
+            &[],
+        )
+        .await
+        .expect("ledger read")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+    }
+
+    /// The shape of `stream_events` that matters to the migration
+    /// story: every constraint, by name and definition. Comparing
+    /// this across databases is comparing their schema state.
+    async fn constraint_defs(pool: &PgPool) -> Vec<(String, String)> {
+        let conn = pool.get().await.expect("constraint connection");
+        conn.query(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint \
+             WHERE conrelid = 'stream_events'::regclass \
+             ORDER BY conname",
+            &[],
+        )
+        .await
+        .expect("constraint read")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+    }
+
     /// `migrate()` must carry an old-shape database to the current
     /// schema with data intact, through no path but itself, and stay
     /// idempotent once there.
@@ -180,43 +210,40 @@ mod tests {
         seed.batch_execute(OLD_SHAPE).await.expect("seed old shape");
         seed.execute(
             "INSERT INTO stream_events \
-                 (category, stream_key, event_type, sequence, event_data) \
-                 VALUES ('c', 'k', 'T', 1, '\"{}\"')",
+             (category, stream_key, event_type, sequence, event_data) \
+             VALUES ('c', 'k', 'T', 1, '\"{}\"')",
             &[],
         )
         .await
         .expect("seed one event");
 
-        let store = PgEventStreams::<String, ()>::new(pool.clone(), "c");
-        store.migrate().await.expect("first migrate repairs");
-        store.migrate().await.expect("second migrate is a no-op");
-
-        let conn = pool.get().await.expect("verification connection");
-        let constraint: i64 = conn
-            .query_one(
-                "SELECT COUNT(*) FROM pg_constraint \
-                 WHERE conrelid = 'stream_events'::regclass \
-                   AND conname = 'stream_events_sequence_check'",
-                &[],
-            )
+        store(&pool).migrate().await.expect("first migrate repairs");
+        store(&pool)
+            .migrate()
             .await
-            .expect("constraint lookup")
-            .get(0);
-        assert_eq!(constraint, 1, "the repair step added the check");
+            .expect("second migrate is a no-op");
 
-        let ledger: Vec<(i64, String)> = conn
-            .query(
-                "SELECT version, name FROM epoch_schema_migrations \
-                 ORDER BY version",
-                &[],
-            )
-            .await
-            .expect("ledger read")
-            .iter()
-            .map(|row| (row.get(0), row.get(1)))
-            .collect();
         assert_eq!(
-            ledger,
+            constraint_defs(&pool).await,
+            vec![
+                (
+                    "stream_events_pkey".to_owned(),
+                    "PRIMARY KEY (global_sequence)".to_owned(),
+                ),
+                (
+                    "stream_events_position".to_owned(),
+                    "UNIQUE (category, stream_key, sequence)".to_owned(),
+                ),
+                (
+                    "stream_events_sequence_check".to_owned(),
+                    "CHECK ((sequence > 0))".to_owned(),
+                ),
+            ],
+            "the repair step added the real check constraint"
+        );
+
+        assert_eq!(
+            ledger_rows(&pool).await,
             vec![
                 (1, "create-stream-events".to_owned()),
                 (2, "pin-sequences-positive".to_owned()),
@@ -224,6 +251,7 @@ mod tests {
             "both steps recorded in order"
         );
 
+        let conn = pool.get().await.expect("verification connection");
         let events: i64 = conn
             .query_one("SELECT COUNT(*) FROM stream_events", &[])
             .await
@@ -232,42 +260,95 @@ mod tests {
         assert_eq!(events, 1, "the seeded event survived the repair");
     }
 
-    /// Fresh and already-current databases converge, and concurrent
-    /// callers all succeed with the ledger applied exactly once.
+    /// Four callers hit the PUBLIC `migrate()` at once, through a
+    /// barrier so the advisory lock is genuinely contended - once on
+    /// a fresh database, once on an already-current one - and the two
+    /// databases converge to the same schema and ledger.
     #[tokio::test(flavor = "multi_thread")]
-    async fn concurrent_callers_converge_on_a_fresh_database() {
+    async fn concurrent_migrate_callers_converge_on_both_starting_states() {
+        const CALLERS: usize = 4;
         scratch_database("epoch_migration_fresh").await;
-        let pool = pool_for("epoch_migration_fresh").await;
+        scratch_database("epoch_migration_current").await;
+        let fresh = pool_for("epoch_migration_fresh").await;
+        let current = pool_for("epoch_migration_current").await;
 
-        let mut callers = Vec::new();
-        for _ in 0..4 {
-            let pool = pool.clone();
-            callers.push(tokio::spawn(async move {
-                let mut conn = pool.get().await.expect("caller connection");
-                apply(&mut conn).await.expect("concurrent migrate")
-            }));
-        }
-        for caller in callers {
-            caller.await.expect("caller task");
-        }
-
-        let mut conn = pool.get().await.expect("verification connection");
-        // An already-current database migrates to the same state.
-        apply(&mut conn)
+        // The already-current database exists before the storm hits it.
+        store(&current)
+            .migrate()
             .await
-            .expect("no-op migrate after convergence");
+            .expect("pre-migrate the current database");
 
-        let ledger: i64 = conn
-            .query_one("SELECT COUNT(*) FROM epoch_schema_migrations", &[])
+        for pool in [&fresh, &current] {
+            let barrier = Arc::new(Barrier::new(CALLERS));
+            let mut callers = Vec::new();
+            for _ in 0..CALLERS {
+                let barrier = Arc::clone(&barrier);
+                let store = store(pool);
+                callers.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    store.migrate().await.expect("concurrent migrate")
+                }));
+            }
+            for caller in callers {
+                caller.await.expect("caller task");
+            }
+        }
+
+        assert_eq!(
+            ledger_rows(&fresh).await,
+            ledger_rows(&current).await,
+            "both starting states record the same steps exactly once"
+        );
+        assert_eq!(
+            constraint_defs(&fresh).await,
+            constraint_defs(&current).await,
+            "both starting states converge to the same schema"
+        );
+    }
+
+    /// A failing step rolls the whole run back - its DDL, the ledger
+    /// rows, and the ledger table itself - so nothing partial
+    /// survives and the next run starts clean.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_step_leaves_no_partial_application() {
+        scratch_database("epoch_migration_failure").await;
+        let pool = pool_for("epoch_migration_failure").await;
+
+        let poison = Migration {
+            version: 2,
+            name: "poison",
+            sql: "CREATE TABLE poison_marker (x INT); SELECT 1/0;",
+        };
+        let steps = [MIGRATIONS[0], poison];
+        let mut conn = pool.get().await.expect("caller connection");
+        apply_steps(&mut conn, &steps)
             .await
-            .expect("ledger count")
-            .get(0);
-        assert_eq!(ledger, 2, "each step recorded exactly once");
+            .expect_err("the poison step fails");
 
-        let steps: Vec<i64> = MIGRATIONS.iter().map(|step| step.version).collect();
+        let conn = pool.get().await.expect("verification connection");
+        for table in ["poison_marker", "stream_events", "epoch_schema_migrations"] {
+            let present: i64 = conn
+                .query_one(
+                    "SELECT COUNT(*) FROM information_schema.tables \
+                     WHERE table_schema = 'public' AND table_name = $1",
+                    &[&table],
+                )
+                .await
+                .expect("table lookup")
+                .get(0);
+            assert_eq!(present, 0, "no {table} survives the rollback");
+        }
+    }
+
+    /// The step list is the migration contract; its order is load
+    /// bearing and pinned here, not assumed.
+    #[test]
+    fn steps_are_ascending_and_gapless() {
+        let versions: Vec<i64> = MIGRATIONS.iter().map(|step| step.version).collect();
+        assert_eq!(versions.first(), Some(&1), "versions start at 1");
         assert!(
-            steps.windows(2).all(|pair| pair[0] < pair[1]),
-            "the step list stays in ascending version order: {steps:?}"
+            versions.windows(2).all(|pair| pair[0] + 1 == pair[1]),
+            "versions ascend without gaps: {versions:?}"
         );
     }
 }
