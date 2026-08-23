@@ -37,10 +37,9 @@ use super::{
 };
 
 mod batch;
+mod migrations;
 
 pub use batch::{EncodedEvent, PgBatch, PgBatchBuilder, PgDatabase, PgWriteError};
-
-const SCHEMA: &str = include_str!("postgres/schema.sql");
 
 /// The connection pool every store in this module runs on.
 pub type PgPool = Pool<PostgresConnectionManager<NoTls>>;
@@ -63,18 +62,13 @@ impl<Id, E> PgEventStreams<Id, E> {
         }
     }
 
-    /// Apply `schema.sql`. Idempotent and safe under concurrent callers:
-    /// a transaction-scoped advisory lock serializes the CREATE
-    /// statements and releases automatically at commit.
+    /// Apply pending schema migrations in order. Idempotent and safe
+    /// under concurrent callers: the whole run is one transaction
+    /// behind a transaction-scoped advisory lock, and later callers
+    /// find nothing pending.
     pub async fn migrate(&self) -> Result<(), PgStreamsError> {
-        const MIGRATION_LOCK: i64 = 0x6570_6f63_685f_7374; // "epoch_st"
         let mut conn = self.pool.get().await?;
-        let tx = conn.transaction().await?;
-        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK])
-            .await?;
-        tx.batch_execute(SCHEMA).await?;
-        tx.commit().await?;
-        Ok(())
+        migrations::apply(&mut conn).await
     }
 
     async fn category_rows(&self) -> Result<Vec<Row>, PgStreamsError> {
