@@ -7,19 +7,18 @@
 //! existing table. A database created at any earlier shape reaches
 //! the current schema through [`PgEventStreams::migrate`] alone.
 //!
-//! A step file is IMMUTABLE once any database has applied it: editing
-//! an applied step retroactively changes what fresh databases get
-//! while applied ones keep the old shape, and the two diverge under
-//! an identical ledger. Every schema change lands as a new numbered
-//! step file, never as an edit to an existing one; the current shape
-//! of the schema is the composition of the steps, readable in order.
+//! A step file is IMMUTABLE once any database has applied it. An
+//! edit to an applied step retroactively changes what fresh
+//! databases get, while applied ones keep the old shape - identical
+//! ledgers, divergent schemas. Schema changes arrive as new numbered
+//! step files, never as edits to existing ones; the current shape of
+//! the schema is the composition of the steps, readable in order.
 //!
 //! The whole run - lock, ledger read, pending steps, ledger writes -
 //! is one transaction behind the advisory-lock discipline the append
 //! path already uses, so concurrent callers serialize and the later
 //! ones find nothing pending. DDL in postgres is transactional, so a
-//! failed step leaves no partial application behind: not the step's
-//! DDL, not the ledger rows, not even the ledger table itself.
+//! failed step rolls everything back, the ledger table included.
 
 use std::collections::HashSet;
 
