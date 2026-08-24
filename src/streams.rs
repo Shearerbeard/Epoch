@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::decider::Event;
 
 mod batch;
+pub mod feed;
 #[cfg(feature = "in_memory")]
 pub mod in_memory;
 #[cfg(feature = "postgres")]
