@@ -3,9 +3,13 @@
 //! store (the E11 pattern: backends wire their own test modules
 //! through these cases unchanged).
 //!
-//! Every case generates a unique consumer group per iteration (a ULID
-//! nonce in the group name), so preconditions hold on any backend
-//! without assuming storage can be cleared. Cases pair a writer and a
+//! Every case generates a unique consumer group per call (a ULID
+//! nonce in the group name) and a unique stream id, so cursor state
+//! and version expectations never collide across runs. The cases do
+//! assume their category holds only the events they seeded: a wiring
+//! must give each case a fresh store (or a fresh category) rather
+//! than a shared log, because the count assertions read the whole
+//! category tail. Cases pair a writer and a
 //! feed view over one store: the writer appends through the ordinary
 //! streams surface, the feed delivers through the polling surface,
 //! and the cases pin the at-least-once and monotonic-ack contract
@@ -17,7 +21,9 @@ use crate::decider::Event;
 
 use super::super::spec::under_deadline;
 use super::super::{EventBatch, EventMetadata, EventStreams, ExpectedVersion, RecordedEvent};
-use super::{AckError, ConsumerGroup, EventFeed, FeedCursor, FeedPosition, PollLimit};
+use super::{
+    AckError, ConsumerGroup, DeliveredWatermark, EventFeed, FeedCursor, FeedPosition, PollLimit,
+};
 
 /// A unique group name per call, so runs never collide.
 fn unique_group(prefix: &str) -> ConsumerGroup {
@@ -183,9 +189,9 @@ pub async fn ack_is_monotonic<S, F, E>(
             .expect("re-acking the cursor position is a no-op");
 
         match feed.ack(&group, low).await {
-            Err(AckError::Regression { cursor, attempted }) => {
-                assert_eq!(cursor, FeedCursor::at(high.get()));
-                assert_eq!(attempted, low);
+            Err(AckError::Regression(regression)) => {
+                assert_eq!(regression.cursor(), FeedCursor::at(high.get()));
+                assert_eq!(regression.attempted(), low);
             }
             other => panic!("expected a regression rejection, got {other:?}"),
         }
@@ -225,19 +231,20 @@ pub async fn ack_rejects_undelivered<S, F, E>(
             .expect("a bounded poll delivers");
         assert_eq!(page.len(), 2, "one entry stays undelivered");
 
-        // Ack something this group never saw. Any position past the
-        // delivered page is undelivered; position arithmetic keeps the
-        // case independent of the log's tail.
+        // Ack a position past everything the group was delivered: the
+        // delivered watermark tracks polls, independent of acks, so it
+        // stands at the page tip even though nothing was acked.
+        let tip = page.last().expect("page is nonempty").position();
         let undelivered =
-            FeedPosition::new(page.last().expect("page is nonempty").position().get() + 1)
-                .expect("the position after the page is nonzero");
+            FeedPosition::new(tip.get() + 1).expect("the position after the page is nonzero");
         match feed.ack(&group, undelivered).await {
-            Err(AckError::NotDelivered { delivered_to, .. }) => {
+            Err(AckError::NotDelivered(rejection)) => {
                 assert_eq!(
-                    delivered_to,
-                    FeedCursor::START,
-                    "nothing was acked, so the delivered watermark stands at start"
+                    rejection.delivered_to(),
+                    DeliveredWatermark::at(tip.get()),
+                    "the delivered watermark stands at the page tip"
                 );
+                assert_eq!(rejection.attempted(), undelivered);
             }
             other => panic!("expected a not-delivered rejection, got {other:?}"),
         }

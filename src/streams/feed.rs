@@ -81,9 +81,38 @@ impl FeedCursor {
     /// poll delivers. `START` yields position 1, which is nonzero by
     /// the log's own numbering.
     pub fn next_position(self) -> FeedPosition {
-        // The cursor is a count of acknowledged log positions, so the
-        // next position is cursor + 1 and can never be zero.
-        FeedPosition::new(self.0 + 1).expect("cursor + 1 is nonzero")
+        // A cursor at u64::MAX has acknowledged every position a log
+        // could hold; its successor does not exist. Past that guard,
+        // the successor of a watermark is never zero.
+        let raw = self
+            .0
+            .checked_add(1)
+            .expect("a cursor at u64::MAX has no next position");
+        FeedPosition::new(raw).expect("the successor of a cursor is nonzero")
+    }
+}
+
+/// The highest position a group has been delivered. A different
+/// watermark from the ack cursor: the two diverge exactly in the
+/// at-least-once window between delivery and acknowledgement, which
+/// is why they are different types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeliveredWatermark(u64);
+
+impl DeliveredWatermark {
+    /// The watermark of a group that has been delivered nothing.
+    pub const NONE: Self = Self(0);
+
+    /// A watermark value. Any u64 is legal; the delivery rule is
+    /// enforced where the watermark moves (the feed's poll), not
+    /// where it is read.
+    pub fn at(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// The raw watermark; zero means nothing delivered yet.
+    pub fn get(self) -> u64 {
+        self.0
     }
 }
 
@@ -178,6 +207,109 @@ impl<E> FeedEntry<E> {
     }
 }
 
+/// A rejected backwards ack. Constructible only when the attempted
+/// position genuinely sits below the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Regression {
+    cursor: FeedCursor,
+    attempted: FeedPosition,
+}
+
+impl Regression {
+    /// Build the rejection; refuses pairs that are not regressions -
+    /// the cursor's own position is a silent no-op, and anything
+    /// above it is not a regression.
+    pub fn new(cursor: FeedCursor, attempted: FeedPosition) -> Result<Self, NotARegression> {
+        if attempted.get() < cursor.get() {
+            Ok(Self { cursor, attempted })
+        } else {
+            Err(NotARegression)
+        }
+    }
+
+    /// The group's watermark the ack would have regressed.
+    pub fn cursor(&self) -> FeedCursor {
+        self.cursor
+    }
+
+    /// The position the caller tried to acknowledge.
+    pub fn attempted(&self) -> FeedPosition {
+        self.attempted
+    }
+}
+
+/// An ack rejection was requested for a pair that is not a
+/// regression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("the attempted position is not below the cursor; not a regression")]
+pub struct NotARegression;
+
+impl std::fmt::Display for Regression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ack at {} would regress the cursor from {}",
+            self.attempted.get(),
+            self.cursor.get()
+        )
+    }
+}
+
+/// A rejected ack naming a position past the group's delivered
+/// watermark. Constructible only when the attempted position was
+/// genuinely never delivered that far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Undelivered {
+    delivered_to: DeliveredWatermark,
+    attempted: FeedPosition,
+}
+
+impl Undelivered {
+    /// Build the rejection; refuses pairs at or below the delivered
+    /// watermark, which are legal watermark movement (positions of
+    /// other categories included).
+    pub fn new(
+        delivered_to: DeliveredWatermark,
+        attempted: FeedPosition,
+    ) -> Result<Self, AlreadyDelivered> {
+        if attempted.get() > delivered_to.get() {
+            Ok(Self {
+                delivered_to,
+                attempted,
+            })
+        } else {
+            Err(AlreadyDelivered)
+        }
+    }
+
+    /// The highest position this group was delivered.
+    pub fn delivered_to(&self) -> DeliveredWatermark {
+        self.delivered_to
+    }
+
+    /// The position the caller tried to acknowledge.
+    pub fn attempted(&self) -> FeedPosition {
+        self.attempted
+    }
+}
+
+/// An ack rejection was requested for a position within the group's
+/// delivered watermark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("the attempted position is within the delivered watermark; not an undelivered ack")]
+pub struct AlreadyDelivered;
+
+impl std::fmt::Display for Undelivered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ack at {} precedes the group's delivered watermark {}",
+            self.attempted.get(),
+            self.delivered_to.get()
+        )
+    }
+}
+
 /// Why an acknowledgement was rejected. Both rejections are protocol
 /// violations a caller fixes, not backend faults it retries.
 #[derive(Debug, Error)]
@@ -188,22 +320,12 @@ where
     /// The acked position is below the group's cursor. Cursors are
     /// monotonic: an ack of the position the cursor already sits at
     /// is a silent no-op, and a regression below it is rejected.
-    #[error("ack at {attempted:?} would regress the cursor from {cursor:?}")]
-    Regression {
-        /// The group's current watermark.
-        cursor: FeedCursor,
-        /// The position the caller tried to acknowledge.
-        attempted: FeedPosition,
-    },
-    /// The acked position has not been delivered to this group, so
+    #[error("{0}")]
+    Regression(Regression),
+    /// The acked position is past the group's delivered watermark, so
     /// acknowledging it would advance the cursor past unread entries.
-    #[error("ack at {attempted:?} precedes the group's delivered watermark {delivered_to:?}")]
-    NotDelivered {
-        /// The highest position this group has been delivered.
-        delivered_to: FeedCursor,
-        /// The position the caller tried to acknowledge.
-        attempted: FeedPosition,
-    },
+    #[error("{0}")]
+    NotDelivered(Undelivered),
     /// The backend failed before the protocol check could decide.
     #[error(transparent)]
     Backend(#[from] E),
@@ -236,10 +358,13 @@ where
         limit: PollLimit,
     ) -> Result<Vec<FeedEntry<E>>, Self::Error>;
 
-    /// Advance the group's cursor to `position`. The position must
-    /// have been delivered to this group, and the cursor never moves
-    /// backwards; an ack of an already-acknowledged position is a
-    /// silent no-op.
+    /// Advance the group's cursor to `position`. The cursor never
+    /// moves backwards: an ack of the position the cursor already
+    /// sits at is a silent no-op, and an ack below it is rejected as
+    /// [`AckError::Regression`]. The position must not exceed the
+    /// group's delivered watermark - [`AckError::NotDelivered`] -
+    /// though positions of other categories at or below that
+    /// watermark are legal watermark movement, not a skip.
     async fn ack(
         &self,
         group: &ConsumerGroup,

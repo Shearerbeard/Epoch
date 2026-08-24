@@ -15,11 +15,13 @@ card's gate A.
 | --- | --- | --- |
 | `FeedPosition` | A committed event's place in the log is 1-based and nonzero. | Position 0 ("before the log") masquerading as a real event's place. |
 | `FeedCursor` | A group's watermark is the highest position it acknowledged; 0 means nothing yet. | Nothing value-wise; the monotonic rule lives at `ack`, because a cursor value alone cannot know its own history. |
+| `DeliveredWatermark` | A group's delivery watermark is the highest position it was delivered; 0 means nothing yet. Distinct from the ack cursor - the two diverge in the at-least-once window. | The ack watermark and the delivery watermark collapsing into one type, so a rejected ack reports the wrong one. |
 | `ConsumerGroup` | A group has an identity, and the empty string is not one. | The anonymous group: unaddressable, indistinguishable from a forgotten argument. |
 | `PollLimit` | A poll delivers at least one entry when it delivers at all. | The zero-entry poll: a no-op round trip the caller mistakes for "caught up". |
 | `FeedEntry` | A delivery carries where (position), who (stream), and what (record with envelope) - one coherent unit. | An envelope delivered without its event's identity, or a position without its stream. |
-| `AckError::Regression` | The cursor never moves backwards. | A consumer rewinding its group's progress by replaying an old ack. |
-| `AckError::NotDelivered` | The cursor never advances past what the group was actually delivered. | Acknowledging entries the group never read - silently skipping work. |
+| `Regression` (payload) | The cursor never moves backwards, and a rejection only exists for a backwards ack. | A regression report whose attempted position is at or above the cursor - unconstructible via `Regression::new`. |
+| `Undelivered` (payload) | The cursor never advances past the delivered watermark, and a rejection only exists for an ack past the watermark. | An undelivered-ack report naming a position within delivery - unconstructible via `Undelivered::new`. |
+| `AckError::Regression` / `AckError::NotDelivered` | The two protocol violations a caller fixes differently: rewind vs skip-ahead. | Backend faults masquerading as protocol violations (they are `Backend`). |
 | `EventFeed` (trait) | Delivery is at-least-once over the committed log per group; ack is monotonic and delivery-bounded. | A feed that could represent exactly-once or regressing semantics. |
 
 ## Visibility and seams
@@ -43,10 +45,11 @@ group); that is legal watermark movement, not a skip.
   assumption degrades to at-least-once duplication, never cursor
   corruption; a lease-based enforcement is a later, chartered
   extension.
-- **Delivered-watermark durability.** `NotDelivered` rejection needs
-  the group's highest-delivered position; whether it persists in the
-  cursor row or derives at poll time is a fills decision the panel
-  should weigh (crash semantics differ).
+- **Delivered-watermark durability.** `Undelivered` rejection needs
+  the group's highest-delivered position (`DeliveredWatermark`);
+  whether it persists in the cursor row or derives at poll time is a
+  fills decision (crash semantics differ). The panel confirmed the watermark
+  moves on poll, independent of acks.
 - **Whole-log decoding.** Feed impls decode entries to `E`; a category
   whose events are not all `E` fails at decode. The per-category
   scoping above is the containment; multi-type categories are the
