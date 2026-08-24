@@ -152,6 +152,24 @@ pub enum PgStreamsError {
     Config(String),
 }
 
+/// Lock-timeout expiry inside an append transaction is a distinct
+/// retryable outcome, never a generic backend fault (ADR 0010's
+/// funnel contract, the append-side twin of the batch path's
+/// statement classifier). Every statement after the funnel
+/// acquisition routes its failure through here so an expiry is
+/// classified the same wherever it arises - the funnel lock itself,
+/// the head read, the inserts, and the commit can all wait on locks.
+fn append_statement_error(
+    error: tokio_postgres::Error,
+    lock_timeout: std::time::Duration,
+) -> AppendError<PgStreamsError> {
+    if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) {
+        AppendError::LockTimeout(lock_timeout)
+    } else {
+        AppendError::Backend(PgStreamsError::Connection(error))
+    }
+}
+
 /// A stream's highest stored position as the observed version: no rows
 /// is `NoStream`, otherwise sequence N.
 fn version_of(position: u64) -> StreamVersion {
@@ -308,12 +326,7 @@ where
         // concurrently appending to.
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
             .await
-            .map_err(|error| match error.code() {
-                Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) => {
-                    AppendError::LockTimeout(self.lock_timeout)
-                }
-                _ => AppendError::Backend(PgStreamsError::Connection(error)),
-            })?;
+            .map_err(|error| append_statement_error(error, self.lock_timeout))?;
 
         let position: i64 = tx
             .query_one(
@@ -322,7 +335,7 @@ where
                 &[&self.category, &key],
             )
             .await
-            .map_err(PgStreamsError::Connection)?
+            .map_err(|error| append_statement_error(error, self.lock_timeout))?
             .get("position");
         let observed = version_of(stored_position(position));
 
@@ -364,10 +377,12 @@ where
                 ],
             )
             .await
-            .map_err(PgStreamsError::Connection)?;
+            .map_err(|error| append_statement_error(error, self.lock_timeout))?;
         }
 
-        tx.commit().await.map_err(PgStreamsError::Connection)?;
+        tx.commit()
+            .await
+            .map_err(|error| append_statement_error(error, self.lock_timeout))?;
         Ok(StreamSequence::new(stored_position(next)).expect("a batch holds at least one event"))
     }
 }
@@ -532,42 +547,47 @@ mod tests {
     /// append's bounded wait expires against it.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_wedged_funnel_is_a_retryable_append_timeout() {
-        let _ = dotenv::dotenv();
-        let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
-        let pool = pool_from_conn_str(&conn_str)
-            .await
-            .expect("pg pool from EPOCH_PG_TEST_URL");
-        let store = PgEventStreams::<String, SomethingHappened>::new(pool.clone(), "spec-funnel")
-            .with_lock_timeout(std::time::Duration::from_millis(100));
-        store.migrate().await.expect("schema migrates");
-        let key = format!("k-{}", rusty_ulid::generate_ulid_string());
+        under_deadline(async {
+            let _ = dotenv::dotenv();
+            let conn_str =
+                std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
+            let pool = pool_from_conn_str(&conn_str)
+                .await
+                .expect("pg pool from EPOCH_PG_TEST_URL");
+            let store =
+                PgEventStreams::<String, SomethingHappened>::new(pool.clone(), "spec-funnel")
+                    .with_lock_timeout(std::time::Duration::from_millis(100));
+            store.migrate().await.expect("schema migrates");
+            let key = format!("k-{}", rusty_ulid::generate_ulid_string());
 
-        let mut holder = pool.get().await.expect("a second connection");
-        let held = holder.transaction().await.expect("holder transaction");
-        held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
-            .await
-            .expect("the holder takes the funnel lock");
+            let mut holder = pool.get().await.expect("a second connection");
+            let held = holder.transaction().await.expect("holder transaction");
+            held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
+                .await
+                .expect("the holder takes the funnel lock");
 
-        let bound = std::time::Duration::from_millis(100);
-        let outcome = store
-            .append(
-                ExpectedVersion::NoStream,
-                &key,
-                &EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty"),
-            )
-            .await;
-        assert!(
-            matches!(outcome, Err(AppendError::LockTimeout(reported)) if reported == bound),
-            "expected a retryable funnel timeout, got {outcome:?}"
-        );
+            let bound = std::time::Duration::from_millis(100);
+            let outcome = store
+                .append(
+                    ExpectedVersion::NoStream,
+                    &key,
+                    &EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty"),
+                )
+                .await;
+            assert!(
+                matches!(outcome, Err(AppendError::LockTimeout(reported)) if reported == bound),
+                "expected a retryable funnel timeout, got {outcome:?}"
+            );
 
-        held.rollback().await.expect("the holder releases");
-        let state = store.load_stream(&key).await.expect("load succeeds");
-        assert_eq!(
-            state,
-            StreamState::Missing,
-            "a timed-out append stores nothing"
-        );
+            held.rollback().await.expect("the holder releases");
+            let state = store.load_stream(&key).await.expect("load succeeds");
+            assert_eq!(
+                state,
+                StreamState::Missing,
+                "a timed-out append stores nothing"
+            );
+        })
+        .await;
     }
 
     /// The envelope a keyed append carries is the envelope the row
