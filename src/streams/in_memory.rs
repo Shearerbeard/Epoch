@@ -29,8 +29,10 @@ use super::{
 };
 
 mod batch;
+mod feed;
 
 pub use batch::{InMemoryBatch, InMemoryBatchBuilder, MemoryEvent};
+pub use feed::InMemoryEventFeed;
 
 /// The category a standalone [`InMemoryEventStreams`] opens on its own
 /// private root.
@@ -45,17 +47,16 @@ struct StoredEvent {
     category: String,
     key: String,
     payload: ErasedEvent,
-    /// The feed's delivery reads it; staged ahead of the feed itself.
-    #[cfg_attr(not(test), expect(dead_code))]
     metadata: EventMetadata,
 }
 
-/// The shared store root: one oldest-first log plus the event type each
-/// category is claimed with.
+/// The shared store root: one oldest-first log, the event type each
+/// category is claimed with, and each feed group's progress.
 #[derive(Default)]
 pub(crate) struct Root {
     log: Vec<StoredEvent>,
     types: HashMap<String, TypeId>,
+    cursors: HashMap<(String, String), feed::GroupProgress>,
 }
 
 impl Root {
@@ -110,6 +111,34 @@ impl Root {
             payload,
             metadata,
         });
+    }
+
+    /// One feed group's progress on one category; absent means
+    /// nothing acknowledged, nothing delivered.
+    pub(crate) fn feed_progress(&self, category: &str, group: &str) -> feed::GroupProgress {
+        self.cursors
+            .get(&(category.to_owned(), group.to_owned()))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Record that a poll delivered through `position`. The watermark
+    /// only moves forward.
+    pub(crate) fn record_delivery(&mut self, category: &str, group: &str, position: u64) {
+        let progress = self
+            .cursors
+            .entry((category.to_owned(), group.to_owned()))
+            .or_default();
+        progress.delivered_to = progress.delivered_to.max(position);
+    }
+
+    /// Advance a group's cursor. Callers validate the move first: the
+    /// position exceeds the current cursor and lies within delivery.
+    pub(crate) fn advance_cursor(&mut self, category: &str, group: &str, to: u64) {
+        self.cursors
+            .entry((category.to_owned(), group.to_owned()))
+            .or_default()
+            .cursor = to;
     }
 }
 
