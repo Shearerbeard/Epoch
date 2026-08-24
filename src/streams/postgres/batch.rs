@@ -50,10 +50,12 @@ const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// An event erased to the backend's wire form at push (ADR 0006):
 /// encoding is fallible and happens before any transaction starts.
+/// The envelope rides as its JSON form, the same as the payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodedEvent {
     event_type: String,
     data: Value,
+    metadata: Value,
 }
 
 /// A batch the postgres database can commit.
@@ -115,12 +117,13 @@ impl PgBatchBuilder {
         E: Event + Serialize,
     {
         let encoded = events
-            .as_slice()
+            .records()
             .iter()
-            .map(|event| {
+            .map(|record| {
                 Ok(EncodedEvent {
-                    event_type: event.event_type(),
-                    data: serde_json::to_value(event)?,
+                    event_type: record.event().event_type(),
+                    data: serde_json::to_value(record.event())?,
+                    metadata: serde_json::to_value(record.metadata())?,
                 })
             })
             .collect::<Result<Vec<_>, serde_json::Error>>()?;
@@ -305,14 +308,15 @@ impl AtomicStreams for PgDatabase {
                     .expect("a stream's length fits the stored sequence");
                 tx.execute(
                     "INSERT INTO stream_events \
-                     (category, stream_key, event_type, sequence, event_data) \
-                     VALUES ($1, $2, $3, $4, $5)",
+                     (category, stream_key, event_type, sequence, event_data, event_metadata) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
                     &[
                         &stream.category().to_owned(),
                         &stream.key().to_owned(),
                         &event.event_type,
                         &sequence,
                         &event.data,
+                        &event.metadata,
                     ],
                 )
                 .await
@@ -359,7 +363,7 @@ mod postgres_tests {
     use crate::streams::batch::BatchConstraint;
     use crate::streams::postgres::{pool_from_conn_str, PgEventStreams};
     use crate::streams::spec::under_deadline;
-    use crate::streams::{AppendError, EventStreams, StreamState};
+    use crate::streams::{AppendError, EventMetadata, EventStreams, RecordedEvent, StreamState};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct KidHoldsCard;
@@ -731,6 +735,46 @@ mod postgres_tests {
                 kid_state(&fixture, &kid).await,
                 StreamState::Missing,
                 "a timed-out batch stores nothing"
+            );
+        })
+        .await;
+    }
+
+    /// A keyed batch write's envelope reaches the stored row (the
+    /// runner's intent keys ride exactly this path).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_keyed_batch_write_stores_its_envelope() {
+        under_deadline(async {
+            let fixture = fixture().await;
+            let kid = unique("kid");
+            let mut envelope = EventMetadata::new();
+            envelope.insert("intent", "saga-3/draw-7/1");
+            let events =
+                EventBatch::from_records(vec![RecordedEvent::keyed(KidHoldsCard, envelope)])
+                    .expect("one event is nonempty");
+
+            let mut builder = fixture.db.batch();
+            builder
+                .write(KIDS, &kid, ExpectedVersion::NoStream, &events)
+                .expect("one write per stream");
+            fixture
+                .db
+                .transact(builder.build().expect("the batch has writes"))
+                .await
+                .expect("the batch commits");
+
+            let conn = fixture.pool.get().await.expect("assertion connection");
+            let stored = conn
+                .query_one(
+                    "SELECT event_metadata FROM stream_events \
+                     WHERE category = $1 AND stream_key = $2",
+                    &[&KIDS, &kid],
+                )
+                .await
+                .expect("envelope read");
+            assert_eq!(
+                stored.get::<_, serde_json::Value>("event_metadata"),
+                serde_json::json!({"intent": "saga-3/draw-7/1"})
             );
         })
         .await;

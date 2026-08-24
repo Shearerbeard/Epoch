@@ -24,8 +24,8 @@ use thiserror::Error;
 use crate::decider::Event;
 
 use super::{
-    AppendError, CategoryEvent, EventBatch, EventStreams, ExpectedVersion, LoadError, StreamId,
-    StreamSequence, StreamSlice, StreamState, StreamVersion, VersionConflict,
+    AppendError, CategoryEvent, EventBatch, EventMetadata, EventStreams, ExpectedVersion,
+    LoadError, StreamId, StreamSequence, StreamSlice, StreamState, StreamVersion, VersionConflict,
 };
 
 mod batch;
@@ -45,6 +45,9 @@ struct StoredEvent {
     category: String,
     key: String,
     payload: ErasedEvent,
+    /// The feed's delivery reads it; staged ahead of the feed itself.
+    #[cfg_attr(not(test), expect(dead_code))]
+    metadata: EventMetadata,
 }
 
 /// The shared store root: one oldest-first log plus the event type each
@@ -94,11 +97,18 @@ impl Root {
 
     /// Store one event at the tail of the log. The caller has already
     /// claimed the category and checked the stream's head.
-    pub(crate) fn append_erased(&mut self, category: &str, key: &str, payload: ErasedEvent) {
+    pub(crate) fn append_erased(
+        &mut self,
+        category: &str,
+        key: &str,
+        payload: ErasedEvent,
+        metadata: EventMetadata,
+    ) {
         self.log.push(StoredEvent {
             category: category.to_owned(),
             key: key.to_owned(),
             payload,
+            metadata,
         });
     }
 }
@@ -341,10 +351,68 @@ where
             StreamVersion::NoStream => 0,
             StreamVersion::Exact(sequence) => sequence.get(),
         };
-        for event in events.as_slice() {
-            root.append_erased(&self.category, &key, Arc::new(event.clone()));
+        for record in events.records() {
+            root.append_erased(
+                &self.category,
+                &key,
+                Arc::new(record.event().clone()),
+                record.metadata().clone(),
+            );
         }
-        let position = count + events.as_slice().len() as u64;
+        let position = count + events.records().len() as u64;
         Ok(StreamSequence::new(position).expect("a batch holds at least one event"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::streams::RecordedEvent;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Noted;
+
+    impl Event for Noted {
+        type EntityId = ();
+
+        fn event_type(&self) -> String {
+            "Noted".to_owned()
+        }
+
+        fn get_id(&self) -> Self::EntityId {}
+    }
+
+    /// The envelope written at append is the envelope stored: bare
+    /// events store the empty map, keyed events store their keys.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_envelope_written_is_the_envelope_stored() {
+        let db = InMemoryDatabase::new();
+        let store = db.category::<Noted>("envelope").expect("fresh category");
+
+        let mut envelope = EventMetadata::new();
+        envelope.insert("intent", "saga-1/order-5/2");
+        let batch = EventBatch::from_records(vec![
+            RecordedEvent::new(Noted),
+            RecordedEvent::keyed(Noted, envelope),
+        ])
+        .expect("two events are nonempty");
+        store
+            .append(ExpectedVersion::NoStream, &"s".to_owned(), &batch)
+            .await
+            .expect("append succeeds");
+
+        let root = db.root.lock().expect("event store lock poisoned");
+        let stored: Vec<&StoredEvent> = root
+            .log
+            .iter()
+            .filter(|stored| stored.category == "envelope")
+            .collect();
+        assert_eq!(stored.len(), 2);
+        assert!(stored[0].metadata.is_empty(), "a bare event stores no keys");
+        assert_eq!(
+            stored[1].metadata.get("intent"),
+            Some("saga-1/order-5/2"),
+            "a keyed event stores its envelope"
+        );
     }
 }

@@ -4,9 +4,11 @@
 //! bodies, pending the E1 design panel. No behavior lands here until
 //! the panel passes.
 
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::decider::Event;
@@ -114,36 +116,116 @@ impl From<StreamVersion> for ExpectedVersion {
     }
 }
 
-/// One or more events to append. An empty append is meaningless, so it
-/// is rejected at construction rather than reaching a backend.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventBatch<E>(Vec<E>);
-
-impl<E> EventBatch<E> {
-    /// Reject an empty batch at the boundary.
-    pub fn new(events: Vec<E>) -> Result<Self, EmptyBatch> {
-        if events.is_empty() {
-            Err(EmptyBatch)
-        } else {
-            Ok(Self(events))
-        }
-    }
-
-    /// The batched events, oldest first.
-    pub fn as_slice(&self) -> &[E] {
-        &self.0
-    }
-
-    /// Consume the batch.
-    pub fn into_vec(self) -> Vec<E> {
-        self.0
-    }
-}
-
 /// An append was requested with no events in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("an event batch must contain at least one event")]
 pub struct EmptyBatch;
+
+/// The opaque keyed envelope an event carries across the write path
+/// and the feed's delivery (ADR 0010). Epoch attaches no meaning to a
+/// key; the only interpretation that exists sits at the storage layer
+/// (the outbox stream's intent-key uniqueness index). Reaction keys -
+/// the identity a saga runner deduplicates redeliveries by - are the
+/// envelope's first rider.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct EventMetadata(BTreeMap<String, String>);
+
+impl EventMetadata {
+    /// The empty envelope a bare event carries.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set one key, returning the value it replaced.
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) -> Option<String> {
+        self.0.insert(key.into(), value.into())
+    }
+
+    /// Read one key.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(String::as_str)
+    }
+
+    /// Whether no key rides this envelope.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// One event plus the envelope riding it through the write path. A
+/// bare event lifts into a record with an empty envelope, so
+/// unkeyed writers are unchanged; keyed writers (the saga runner's
+/// appends) construct records with metadata minted at append time,
+/// because the envelope is written by the framework, not the domain
+/// event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedEvent<E> {
+    event: E,
+    metadata: EventMetadata,
+}
+
+impl<E> RecordedEvent<E> {
+    /// A bare record: the event with an empty envelope.
+    pub fn new(event: E) -> Self {
+        Self {
+            event,
+            metadata: EventMetadata::new(),
+        }
+    }
+
+    /// A keyed record: the event with the envelope a writer minted.
+    pub fn keyed(event: E, metadata: EventMetadata) -> Self {
+        Self { event, metadata }
+    }
+
+    /// The domain event.
+    pub fn event(&self) -> &E {
+        &self.event
+    }
+
+    /// The envelope riding it.
+    pub fn metadata(&self) -> &EventMetadata {
+        &self.metadata
+    }
+
+    /// Consume the record into its parts.
+    pub fn into_parts(self) -> (E, EventMetadata) {
+        (self.event, self.metadata)
+    }
+}
+
+/// One or more events to append, each carrying its envelope. An empty
+/// append is meaningless, so it is rejected at construction rather
+/// than reaching a backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventBatch<E>(Vec<RecordedEvent<E>>);
+
+impl<E> EventBatch<E> {
+    /// Reject an empty batch at the boundary. Bare events: every
+    /// record carries the empty envelope.
+    pub fn new(events: Vec<E>) -> Result<Self, EmptyBatch> {
+        Self::from_records(events.into_iter().map(RecordedEvent::new).collect())
+    }
+
+    /// Build from records already carrying their envelopes.
+    pub fn from_records(records: Vec<RecordedEvent<E>>) -> Result<Self, EmptyBatch> {
+        if records.is_empty() {
+            Err(EmptyBatch)
+        } else {
+            Ok(Self(records))
+        }
+    }
+
+    /// The batched records, oldest first.
+    pub fn records(&self) -> &[RecordedEvent<E>] {
+        &self.0
+    }
+
+    /// Consume the batch into its records.
+    pub fn into_records(self) -> Vec<RecordedEvent<E>> {
+        self.0
+    }
+}
 
 /// A full stream load: either the stream does not exist, or it has at
 /// least one event. Under ADR 0003's semantics a full load's version
@@ -358,4 +440,48 @@ where
         stream: &Self::Id,
         events: &EventBatch<E>,
     ) -> Result<StreamSequence, AppendError<Self::Error>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_events_lift_into_empty_envelopes() {
+        let batch = EventBatch::new(vec![7u8, 9]).expect("two events are nonempty");
+        let records = batch.records();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| record.metadata().is_empty()));
+        assert_eq!(records[0].event(), &7);
+    }
+
+    #[test]
+    fn keyed_records_carry_their_envelopes() {
+        let mut envelope = EventMetadata::new();
+        envelope.insert("intent", "saga-1/order-5/2");
+        let batch = EventBatch::from_records(vec![RecordedEvent::keyed(7u8, envelope)])
+            .expect("one event is nonempty");
+        let record = &batch.records()[0];
+        assert_eq!(record.metadata().get("intent"), Some("saga-1/order-5/2"));
+        let (event, metadata) = batch.into_records().pop().expect("one record").into_parts();
+        assert_eq!(event, 7);
+        assert_eq!(metadata.get("intent"), Some("saga-1/order-5/2"));
+    }
+
+    #[test]
+    fn an_empty_batch_is_rejected_whichever_way_it_is_built() {
+        assert_eq!(EventBatch::<u8>::new(Vec::new()).unwrap_err(), EmptyBatch);
+        let empty: Vec<RecordedEvent<u8>> = Vec::new();
+        assert_eq!(EventBatch::from_records(empty).unwrap_err(), EmptyBatch);
+    }
+
+    #[test]
+    fn metadata_insert_reads_and_replaces() {
+        let mut envelope = EventMetadata::new();
+        assert_eq!(envelope.get("k"), None);
+        assert_eq!(envelope.insert("k", "first"), None);
+        assert_eq!(envelope.get("k"), Some("first"));
+        assert_eq!(envelope.insert("k", "second"), Some("first".to_owned()));
+        assert_eq!(envelope.get("k"), Some("second"));
+    }
 }

@@ -55,6 +55,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "pin-sequences-positive",
         sql: include_str!("migrations/0002-pin-sequences-positive.sql"),
     },
+    Migration {
+        version: 3,
+        name: "event-metadata",
+        sql: include_str!("migrations/0003-event-metadata.sql"),
+    },
 ];
 
 /// Apply every step the database has not recorded, in version order,
@@ -246,8 +251,9 @@ mod tests {
             vec![
                 (1, "create-stream-events".to_owned()),
                 (2, "pin-sequences-positive".to_owned()),
+                (3, "event-metadata".to_owned()),
             ],
-            "both steps recorded in order"
+            "every step recorded in order"
         );
 
         let conn = pool.get().await.expect("verification connection");

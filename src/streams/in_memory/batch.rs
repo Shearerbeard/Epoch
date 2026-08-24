@@ -15,16 +15,18 @@ use crate::streams::batch::{
     expectation_satisfied, AtomicStreams, Batch, BatchBuilder, BatchConflict, ConstraintViolation,
     DuplicateWrite, StreamRef, TransactError,
 };
-use crate::streams::{EventBatch, ExpectedVersion, StreamId};
+use crate::streams::{EventBatch, EventMetadata, ExpectedVersion, StreamId};
 
 use super::{CategoryTypeMismatch, ErasedEvent, InMemoryDatabase, Root};
 
 /// An event erased for the in-memory root at push, carrying the type
-/// its category is claimed with at transact.
+/// its category is claimed with at transact and the envelope riding
+/// the event.
 #[derive(Clone)]
 pub struct MemoryEvent {
     payload: ErasedEvent,
     event_type: TypeId,
+    metadata: EventMetadata,
 }
 
 /// A batch the in-memory database can commit.
@@ -49,11 +51,12 @@ impl InMemoryBatchBuilder {
         E: Event + Clone + Send + Sync + 'static,
     {
         let erased = events
-            .as_slice()
+            .records()
             .iter()
-            .map(|event| MemoryEvent {
-                payload: Arc::new(event.clone()) as Arc<dyn Any + Send + Sync>,
+            .map(|record| MemoryEvent {
+                payload: Arc::new(record.event().clone()) as Arc<dyn Any + Send + Sync>,
                 event_type: TypeId::of::<E>(),
+                metadata: record.metadata().clone(),
             })
             .collect();
         self.push(StreamRef::new(category, id), expected, erased)
@@ -98,7 +101,12 @@ impl AtomicStreams for InMemoryDatabase {
             let stream = write.stream();
             for event in write.events() {
                 root.claim(stream.category(), event.event_type)?;
-                root.append_erased(stream.category(), stream.key(), Arc::clone(&event.payload));
+                root.append_erased(
+                    stream.category(),
+                    stream.key(),
+                    Arc::clone(&event.payload),
+                    event.metadata.clone(),
+                );
             }
         }
         Ok(())
@@ -131,7 +139,7 @@ fn admits_every_write(root: &Root, batch: &InMemoryBatch) -> Result<(), Category
 mod tests {
     use super::*;
     use crate::streams::batch::BatchConstraint;
-    use crate::streams::{EventStreams, StreamState, StreamVersion};
+    use crate::streams::{EventStreams, RecordedEvent, StreamState, StreamVersion};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct KidHoldsCard;
@@ -204,7 +212,7 @@ mod tests {
         match store.load_stream(&key.to_owned()).await {
             Ok(StreamState::Missing) => StreamVersion::NoStream,
             Ok(StreamState::Present(events)) => {
-                super::super::version_of(events.as_slice().len() as u64)
+                super::super::version_of(events.records().len() as u64)
             }
             Err(error) => match error {},
         }
@@ -385,5 +393,37 @@ mod tests {
             StreamVersion::NoStream,
             "the rejected batch stored neither write"
         );
+    }
+
+    /// The envelope a keyed batch write carries is the envelope the
+    /// root stores (ADR 0010's seam).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_keyed_batch_stores_its_envelope() {
+        let db = InMemoryDatabase::new();
+        let mut envelope = EventMetadata::new();
+        envelope.insert("intent", "saga-2/order-9/0");
+        let events = EventBatch::from_records(vec![RecordedEvent::keyed(KidHoldsCard, envelope)])
+            .expect("one event is nonempty");
+
+        let mut builder = db.batch();
+        builder
+            .write(
+                KIDS,
+                &"kid-env".to_owned(),
+                ExpectedVersion::NoStream,
+                &events,
+            )
+            .expect("one write per stream");
+        db.transact(builder.build().expect("the batch has writes"))
+            .await
+            .expect("the batch commits");
+
+        let root = db.root.lock().expect("event store lock poisoned");
+        let stored = root
+            .log
+            .iter()
+            .find(|stored| stored.category == KIDS && stored.key == "kid-env")
+            .expect("the keyed write is stored");
+        assert_eq!(stored.metadata.get("intent"), Some("saga-2/order-9/0"));
     }
 }

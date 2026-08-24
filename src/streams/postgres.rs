@@ -302,15 +302,25 @@ where
         }
 
         let mut next = position;
-        for event in events.as_slice() {
+        for record in events.records() {
             next += 1;
-            let event_type = event.event_type();
-            let event_data = serde_json::to_value(event).map_err(PgStreamsError::Serialization)?;
+            let event_type = record.event().event_type();
+            let event_data =
+                serde_json::to_value(record.event()).map_err(PgStreamsError::Serialization)?;
+            let event_metadata =
+                serde_json::to_value(record.metadata()).map_err(PgStreamsError::Serialization)?;
             tx.execute(
                 "INSERT INTO stream_events \
-                 (category, stream_key, event_type, sequence, event_data) \
-                 VALUES ($1, $2, $3, $4, $5)",
-                &[&self.category, &key, &event_type, &next, &event_data],
+                 (category, stream_key, event_type, sequence, event_data, event_metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &self.category,
+                    &key,
+                    &event_type,
+                    &next,
+                    &event_data,
+                    &event_metadata,
+                ],
             )
             .await
             .map_err(PgStreamsError::Connection)?;
@@ -330,6 +340,7 @@ mod tests {
         flash_sale_sells_exactly_the_stock, single_event_occ_race_on_empty_stream,
         single_event_occ_race_on_seeded_stream, under_deadline,
     };
+    use crate::streams::{EventMetadata, RecordedEvent};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct SomethingHappened;
@@ -395,5 +406,46 @@ mod tests {
             || SomethingHappened,
         ))
         .await;
+    }
+
+    /// The envelope a keyed append carries is the envelope the row
+    /// stores; a bare append stores the empty object (ADR 0010's seam).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_the_envelope_written_is_the_envelope_stored() {
+        let store = store("spec-envelope").await;
+        let key = format!("stream-{}", rusty_ulid::generate_ulid_string());
+
+        let mut envelope = EventMetadata::new();
+        envelope.insert("intent", "saga-1/order-5/2");
+        let batch = EventBatch::from_records(vec![
+            RecordedEvent::new(SomethingHappened),
+            RecordedEvent::keyed(SomethingHappened, envelope),
+        ])
+        .expect("two events are nonempty");
+        store
+            .append(ExpectedVersion::NoStream, &key, &batch)
+            .await
+            .expect("append succeeds");
+
+        let conn = store.pool.get().await.expect("assertion connection");
+        let rows = conn
+            .query(
+                "SELECT event_metadata FROM stream_events \
+                 WHERE category = $1 AND stream_key = $2 ORDER BY sequence",
+                &[&"spec-envelope", &key],
+            )
+            .await
+            .expect("envelope read");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].get::<_, serde_json::Value>("event_metadata"),
+            serde_json::json!({}),
+            "a bare event stores the empty envelope"
+        );
+        assert_eq!(
+            rows[1].get::<_, serde_json::Value>("event_metadata"),
+            serde_json::json!({"intent": "saga-1/order-5/2"}),
+            "a keyed event stores its envelope"
+        );
     }
 }
