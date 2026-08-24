@@ -239,6 +239,12 @@ pub async fn flash_sale_sells_exactly_the_stock<S, E>(
                                      conflicts on correct expectations",
                                 );
                             }
+                            Err(AppendError::LockTimeout(_)) => {
+                                // The funnel is contended by design; the
+                                // sale retries on its next loop turn, the
+                                // same response a batch path gives a
+                                // retryable timeout.
+                            }
                             Err(AppendError::Backend(error)) => {
                                 panic!("backend failure mid-sale: {error:?}")
                             }

@@ -107,7 +107,7 @@ where
             });
 
         let lower = i64::try_from(progress.cursor).unwrap_or(i64::MAX);
-        let limit = limit.get() as i64;
+        let limit = i64::try_from(limit.get()).unwrap_or(i64::MAX);
         let rows = tx
             .query(
                 "SELECT global_sequence, stream_key, event_data, event_metadata \

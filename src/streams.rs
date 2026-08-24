@@ -372,6 +372,12 @@ where
     /// The optimistic version check failed.
     #[error("version conflict: {0:?}")]
     Conflict(VersionConflict),
+    /// The write path's serialization wait exceeded its bound;
+    /// retryable, never a conflict (ADR 0010's funnel contract, the
+    /// same outcome [`crate::streams::TransactError::LockTimeout`]
+    /// pins for batches).
+    #[error("lock wait exceeded the bound after {0:?}; retryable")]
+    LockTimeout(std::time::Duration),
     /// The backend failed before the version check could decide.
     #[error(transparent)]
     Backend(#[from] E),

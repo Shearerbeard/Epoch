@@ -13,6 +13,10 @@
 //! ledgers, divergent schemas. Schema changes arrive as new numbered
 //! step files, never as edits to existing ones; the current shape of
 //! the schema is the composition of the steps, readable in order.
+//! (Step 0003's comment points at an allocation-ledger step this
+//! wave once chartered; the gate-S spike's pivot superseded it, and
+//! the intent-key index it would have carried landed in step 0004.
+//! The comment stays as history - the step itself is immutable.)
 //!
 //! The whole run - lock, ledger read, pending steps, ledger writes -
 //! is one transaction behind the advisory-lock discipline the append

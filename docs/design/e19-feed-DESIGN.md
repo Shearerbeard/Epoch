@@ -1,13 +1,15 @@
 # E19 feed surface - design record (post-pivot)
 
-Status: skeleton, pending the design panel. The gate-S spike failed
-the allocation ledger's pre-registered append threshold (4.444x p99
-vs 2.000x; numbers on the E19 card), so this surface implements ADR
-0010's named fallback: the single-writer funnel. Insert order is
-commit order by construction, the cursor is a plain maximum over
-`global_sequence`, and the ledger, reaper, and prefix machinery do not
-exist. The ADR's decision-outcome section rewrites to match at the
-card's gate A.
+Status: shipped. The design panel's findings are dispositioned
+(repairs in 2b3d67c, confirmation PASS) and ADR 0010 is revised with
+the spike's measured verdict and the executed pivot (f65f40c); the
+contract section of that record is the shipped semantics this surface
+implements. The gate-S spike failed the allocation ledger's
+pre-registered append threshold (4.444x p99 vs 2.000x; numbers on the
+E19 card), so this surface implements ADR 0010's named fallback: the
+single-writer funnel. Insert order is commit order by construction,
+the cursor is a plain maximum over `global_sequence`, and the ledger,
+reaper, and prefix machinery do not exist.
 
 ## Type-to-business-rule map
 

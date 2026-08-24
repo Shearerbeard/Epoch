@@ -54,10 +54,15 @@ pub type PgPool = Pool<PostgresConnectionManager<NoTls>>;
 /// "epwriter".
 pub(crate) const WRITER_LOCK: i64 = 0x6570_7772_6974_6572;
 
+/// The default funnel wait bound, the same value the batch path
+/// bounds its acquisitions by.
+pub(crate) const DEFAULT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// One category of streams in PostgreSQL, addressed by a typed id.
 pub struct PgEventStreams<Id, E> {
     pool: PgPool,
     category: String,
+    lock_timeout: std::time::Duration,
     _marker: PhantomData<fn() -> (Id, E)>,
 }
 
@@ -68,7 +73,18 @@ impl<Id, E> PgEventStreams<Id, E> {
         Self {
             pool,
             category: category.to_owned(),
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
             _marker: PhantomData,
+        }
+    }
+
+    /// Set the funnel wait bound. A wedged writer surfaces as the
+    /// retryable [`AppendError::LockTimeout`] when it expires, never
+    /// a hang and never a conflict (ADR 0010).
+    pub fn with_lock_timeout(self, lock_timeout: std::time::Duration) -> Self {
+        Self {
+            lock_timeout,
+            ..self
         }
     }
 
@@ -102,6 +118,7 @@ impl<Id, E> Clone for PgEventStreams<Id, E> {
         Self {
             pool: self.pool.clone(),
             category: self.category.clone(),
+            lock_timeout: self.lock_timeout,
             _marker: PhantomData,
         }
     }
@@ -274,12 +291,29 @@ where
             .await
             .map_err(PgStreamsError::Connection)?;
 
+        // Bound the funnel wait below, the same discipline the batch
+        // path applies: a wedged writer surfaces as a retryable
+        // timeout, never a hang. The value is milliseconds from a
+        // `Duration`, so zero ("wait forever") cannot be injected
+        // here.
+        let bound_ms = u64::try_from(self.lock_timeout.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        tx.batch_execute(&format!("SET LOCAL lock_timeout = '{bound_ms}ms'"))
+            .await
+            .map_err(PgStreamsError::Connection)?;
+
         // The funnel: exactly one event transaction runs at a time,
         // so the head read below observes a store no rival can be
         // concurrently appending to.
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
             .await
-            .map_err(PgStreamsError::Connection)?;
+            .map_err(|error| match error.code() {
+                Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) => {
+                    AppendError::LockTimeout(self.lock_timeout)
+                }
+                _ => AppendError::Backend(PgStreamsError::Connection(error)),
+            })?;
 
         let position: i64 = tx
             .query_one(
@@ -490,6 +524,50 @@ mod tests {
             || SomethingHappened,
         ))
         .await;
+    }
+
+    /// A wedged writer holding the funnel is a retryable timeout on
+    /// the append path, never a hang and never a conflict: a second
+    /// connection holds WRITER_LOCK in an open transaction, and the
+    /// append's bounded wait expires against it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wedged_funnel_is_a_retryable_append_timeout() {
+        let _ = dotenv::dotenv();
+        let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
+        let pool = pool_from_conn_str(&conn_str)
+            .await
+            .expect("pg pool from EPOCH_PG_TEST_URL");
+        let store = PgEventStreams::<String, SomethingHappened>::new(pool.clone(), "spec-funnel")
+            .with_lock_timeout(std::time::Duration::from_millis(100));
+        store.migrate().await.expect("schema migrates");
+        let key = format!("k-{}", rusty_ulid::generate_ulid_string());
+
+        let mut holder = pool.get().await.expect("a second connection");
+        let held = holder.transaction().await.expect("holder transaction");
+        held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
+            .await
+            .expect("the holder takes the funnel lock");
+
+        let bound = std::time::Duration::from_millis(100);
+        let outcome = store
+            .append(
+                ExpectedVersion::NoStream,
+                &key,
+                &EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty"),
+            )
+            .await;
+        assert!(
+            matches!(outcome, Err(AppendError::LockTimeout(reported)) if reported == bound),
+            "expected a retryable funnel timeout, got {outcome:?}"
+        );
+
+        held.rollback().await.expect("the holder releases");
+        let state = store.load_stream(&key).await.expect("load succeeds");
+        assert_eq!(
+            state,
+            StreamState::Missing,
+            "a timed-out append stores nothing"
+        );
     }
 
     /// The envelope a keyed append carries is the envelope the row
