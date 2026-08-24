@@ -60,6 +60,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "event-metadata",
         sql: include_str!("migrations/0003-event-metadata.sql"),
     },
+    Migration {
+        version: 4,
+        name: "feed-cursors-and-intent-key",
+        sql: include_str!("migrations/0004-feed-cursors-and-intent-key.sql"),
+    },
 ];
 
 /// Apply every step the database has not recorded, in version order,
@@ -252,6 +257,7 @@ mod tests {
                 (1, "create-stream-events".to_owned()),
                 (2, "pin-sequences-positive".to_owned()),
                 (3, "event-metadata".to_owned()),
+                (4, "feed-cursors-and-intent-key".to_owned()),
             ],
             "every step recorded in order"
         );

@@ -3,17 +3,19 @@
 //! (ADR 0005): clones share one pool and one category, so concurrent
 //! writers contend on the same stored streams.
 //!
-//! Append atomicity. One transaction takes a per-stream
-//! `pg_advisory_xact_lock`, then reads the stream's position, then
-//! writes. Rivals on one stream serialize on that lock, and the position
-//! read is a statement that cannot start until the lock is held: under
-//! READ COMMITTED it therefore takes its snapshot after the winner
-//! committed and observes the winner's rows, so the loser conflicts
-//! instead of overwriting. The lock is transaction-scoped, so a
-//! cancelled future releases it at rollback rather than leaking a
-//! session-level lock. The unique position constraint in the first
-//! migration step backstops the same invariant at the storage layer,
-//! alongside a check constraint that keeps positions 1-based.
+//! Append atomicity, single-writer funnel (ADR 0010 post-pivot).
+//! Every event transaction - single append or atomic batch - first
+//! takes one global transaction-scoped advisory lock, so exactly one
+//! writer is ever in flight. That makes insert order commit order by
+//! construction, which is the property the feed's plain-maximum
+//! cursor rests on: no event can become visible below an already
+//! committed value. The version check inside the funnel decides
+//! conflicts exactly as before; the funnel only serializes who may
+//! run one. The lock is transaction-scoped, so a cancelled future
+//! releases it at rollback rather than leaking. The unique position
+//! constraint in the first migration step backstops the same
+//! invariant at the storage layer, alongside a check constraint that
+//! keeps positions 1-based.
 //!
 //! Read consistency. Each load is a single statement, which is its own
 //! snapshot: a rival append committing mid-read cannot split a read
@@ -37,12 +39,20 @@ use super::{
 };
 
 mod batch;
+mod feed;
 mod migrations;
 
 pub use batch::{EncodedEvent, PgBatch, PgBatchBuilder, PgDatabase, PgWriteError};
+pub use feed::PgEventFeed;
 
 /// The connection pool every store in this module runs on.
 pub type PgPool = Pool<PostgresConnectionManager<NoTls>>;
+
+/// The single-writer funnel: one advisory lock every event
+/// transaction takes before anything else. Distinct from the
+/// migration lock and from every two-int stream lock; spells
+/// "epwriter".
+pub(crate) const WRITER_LOCK: i64 = 0x6570_7772_6974_6572;
 
 /// One category of streams in PostgreSQL, addressed by a typed id.
 pub struct PgEventStreams<Id, E> {
@@ -264,15 +274,12 @@ where
             .await
             .map_err(PgStreamsError::Connection)?;
 
-        // Serialize this stream's writers for the life of the
-        // transaction; see the module docs for why this rules out the
-        // lost update.
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
-            &[&self.category, &key],
-        )
-        .await
-        .map_err(PgStreamsError::Connection)?;
+        // The funnel: exactly one event transaction runs at a time,
+        // so the head read below observes a store no rival can be
+        // concurrently appending to.
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
+            .await
+            .map_err(PgStreamsError::Connection)?;
 
         let position: i64 = tx
             .query_one(
@@ -373,6 +380,83 @@ mod tests {
         let store = PgEventStreams::new(pool, category);
         store.migrate().await.expect("schema migrates");
         store
+    }
+
+    /// A writer and a feed over one fresh category, per the feed
+    /// suite's fresh-store assumption: count assertions read the
+    /// whole category tail.
+    async fn writer_and_feed() -> (
+        PgEventStreams<String, SomethingHappened>,
+        PgEventFeed<SomethingHappened>,
+    ) {
+        let category = format!("feed-spec-{}", rusty_ulid::generate_ulid_string());
+        let store = store(&category).await;
+        let pool = pool_from_conn_str(
+            &std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set"),
+        )
+        .await
+        .expect("pg pool from EPOCH_PG_TEST_URL");
+        (store, PgEventFeed::new(pool, &category))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_poll_redelivers_until_acked() {
+        let (writer, feed) = writer_and_feed().await;
+        under_deadline(crate::streams::feed::spec::poll_redelivers_until_acked(
+            writer,
+            feed,
+            str::to_owned,
+            || SomethingHappened,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_poll_pages_the_backlog() {
+        let (writer, feed) = writer_and_feed().await;
+        under_deadline(crate::streams::feed::spec::poll_pages_the_backlog(
+            writer,
+            feed,
+            str::to_owned,
+            || SomethingHappened,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_ack_is_monotonic() {
+        let (writer, feed) = writer_and_feed().await;
+        under_deadline(crate::streams::feed::spec::ack_is_monotonic(
+            writer,
+            feed,
+            str::to_owned,
+            || SomethingHappened,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_ack_rejects_undelivered() {
+        let (writer, feed) = writer_and_feed().await;
+        under_deadline(crate::streams::feed::spec::ack_rejects_undelivered(
+            writer,
+            feed,
+            str::to_owned,
+            || SomethingHappened,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_delivery_carries_the_envelope() {
+        let (writer, feed) = writer_and_feed().await;
+        under_deadline(crate::streams::feed::spec::delivery_carries_the_envelope(
+            writer,
+            feed,
+            str::to_owned,
+            || SomethingHappened,
+        ))
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

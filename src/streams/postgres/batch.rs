@@ -1,30 +1,21 @@
-//! The PostgreSQL [`AtomicStreams`] implementation (ADR 0006).
+//! The PostgreSQL [`AtomicStreams`] implementation (ADR 0006, under
+//! ADR 0010's post-pivot single-writer funnel).
 //!
-//! One transaction does the whole batch. It takes the same two-key
-//! `pg_advisory_xact_lock(hashtext(category), hashtext(stream_key))`
-//! that single append takes, over every stream the batch writes or
-//! constrains, so batches and ordinary appends serialize against each
-//! other on every stream they share. Locks are acquired in one total
-//! order - lexicographic over the deduplicated two-integer hash tuples -
-//! which is what makes a cross-category deadlock cycle impossible.
+//! One transaction does the whole batch. Its first statement takes
+//! the one global writer lock every event transaction shares - the
+//! same funnel single append runs through - so exactly one writer is
+//! ever in flight and insert order is commit order by construction.
+//! The version checks and the head observations that back them run
+//! inside the funnel, exactly as before; only who may run one at a
+//! time changed.
 //!
-//! Deriving that order needs the `hashtext` values, which only postgres
-//! can compute, so the transaction spends one round trip hashing every
-//! pair, sorts and deduplicates the tuples in the client, and then takes
-//! the locks one statement at a time in that order. The alternative -
-//! a single `SELECT pg_advisory_xact_lock(...) FROM (... ORDER BY ...)`
-//! statement - rests acquisition order on the evaluation order of a
-//! plan's target list, which postgres does not promise; ordering in the
-//! client instead makes the order both guaranteed and testable
-//! ([`lock_order`] is pinned by its own case below).
-//!
-//! Waiting is bounded per acquisition by a transaction-scoped
-//! `lock_timeout`. Expiry is its own retryable outcome
+//! Waiting is bounded by a transaction-scoped `lock_timeout` on the
+//! funnel acquisition. Expiry is its own retryable outcome
 //! ([`TransactError::LockTimeout`]), never a version conflict: the
-//! transaction rolls back whole and its xact-scoped locks release with
-//! it. Every check runs before the first insert and the transaction is
-//! only committed once they all pass, so a rejected batch leaves no
-//! partial rows.
+//! transaction rolls back whole and its xact-scoped lock releases
+//! with it. Every check runs before the first insert and the
+//! transaction is only committed once they all pass, so a rejected
+//! batch leaves no partial rows.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -142,20 +133,9 @@ pub enum PgWriteError {
     Encoding(#[from] serde_json::Error),
 }
 
-/// The batch's advisory locks in the total order ADR 0006 pins:
-/// lexicographic over the deduplicated `hashtext` tuples. The order is
-/// total across categories, which is what rules out a cross-category
-/// deadlock cycle; ordering stream keys as text within a category would
-/// not be.
-fn lock_order(mut tuples: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
-    tuples.sort_unstable();
-    tuples.dedup();
-    tuples
-}
-
 /// Lock-timeout expiry is a distinct retryable outcome, never a version
 /// conflict (ADR 0006), and the bound is transaction-scoped: it applies
-/// to the advisory locks the batch takes by name and equally to the row
+/// to the funnel lock the batch takes and equally to the row
 /// and index locks the inserts and the commit take on their own. Every
 /// statement inside a transact routes its failure through here so an
 /// expiry is classified the same wherever it arises.
@@ -170,31 +150,7 @@ fn statement_error(
     }
 }
 
-/// Hash every addressed stream to its lock tuple in one round trip, so
-/// the client can sort them into the acquisition order.
-async fn lock_tuples(
-    tx: &Transaction<'_>,
-    categories: &[String],
-    keys: &[String],
-    lock_timeout: Duration,
-) -> Result<Vec<(i32, i32)>, TransactError<PgStreamsError>> {
-    let rows = tx
-        .query(
-            "SELECT hashtext(t.category) AS category_hash, \
-                    hashtext(t.stream_key) AS key_hash \
-               FROM unnest($1::text[], $2::text[]) AS t(category, stream_key)",
-            &[&categories, &keys],
-        )
-        .await
-        .map_err(|error| statement_error(error, lock_timeout))?;
-    Ok(lock_order(
-        rows.iter()
-            .map(|row| (row.get("category_hash"), row.get("key_hash")))
-            .collect(),
-    ))
-}
-
-/// Every addressed stream's head under the held locks, the same
+/// Every addressed stream's head inside the funnel, the same
 /// `COALESCE(MAX(sequence), 0)` observation single append makes.
 async fn locked_heads(
     tx: &Transaction<'_>,
@@ -227,7 +183,7 @@ async fn locked_heads(
         .collect())
 }
 
-/// The head of a stream the batch just locked and observed.
+/// The head of a stream the batch observed inside the funnel.
 fn head_of(heads: &HashMap<(String, String), StreamVersion>, stream: &StreamRef) -> StreamVersion {
     *heads
         .get(&(stream.category().to_owned(), stream.key().to_owned()))
@@ -251,10 +207,10 @@ impl AtomicStreams for PgDatabase {
             .await
             .map_err(|error| statement_error(error, self.lock_timeout))?;
 
-        // Bound every acquisition below. The value is milliseconds from
-        // a `Duration`, so there is nothing here a caller can inject;
-        // zero would mean "wait forever", which is the one bound this
-        // path must not set.
+        // Bound the funnel acquisition below. The value is milliseconds
+        // from a `Duration`, so there is nothing here a caller can
+        // inject; zero would mean "wait forever", which is the one
+        // bound this path must not set.
         let bound_ms = u64::try_from(self.lock_timeout.as_millis())
             .unwrap_or(u64::MAX)
             .max(1);
@@ -262,16 +218,11 @@ impl AtomicStreams for PgDatabase {
             .await
             .map_err(|error| statement_error(error, self.lock_timeout))?;
 
-        for (category_hash, key_hash) in
-            lock_tuples(&tx, &categories, &keys, self.lock_timeout).await?
-        {
-            tx.execute(
-                "SELECT pg_advisory_xact_lock($1, $2)",
-                &[&category_hash, &key_hash],
-            )
+        // The funnel: one global writer lock, the same one single
+        // append takes, so insert order is commit order.
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&super::WRITER_LOCK])
             .await
             .map_err(|error| statement_error(error, self.lock_timeout))?;
-        }
 
         let heads = locked_heads(&tx, &categories, &keys, self.lock_timeout).await?;
 
@@ -328,27 +279,6 @@ impl AtomicStreams for PgDatabase {
             .await
             .map_err(|error| statement_error(error, self.lock_timeout))?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn locks_are_ordered_across_categories_and_deduplicated() {
-        // Two streams of one category, one of another, one repeated:
-        // the order is lexicographic over the whole tuple, so it does
-        // not depend on which category a stream came from.
-        let ordered = lock_order(vec![(7, 2), (-3, 9), (7, -1), (-3, 9), (0, 0)]);
-        assert_eq!(ordered, [(-3, 9), (0, 0), (7, -1), (7, 2)]);
-    }
-
-    #[test]
-    fn the_order_is_the_same_whichever_way_a_batch_declares_its_streams() {
-        let one = lock_order(vec![(5, 5), (1, 9), (1, 2)]);
-        let other = lock_order(vec![(1, 2), (5, 5), (1, 9)]);
-        assert_eq!(one, other, "two batches cannot wait on each other");
     }
 }
 
@@ -713,11 +643,11 @@ mod postgres_tests {
             let mut holder = fixture.pool.get().await.expect("a second connection");
             let held = holder.transaction().await.expect("holder transaction");
             held.execute(
-                "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
-                &[&KIDS, &kid],
+                "SELECT pg_advisory_xact_lock($1)",
+                &[&super::super::WRITER_LOCK],
             )
             .await
-            .expect("the holder takes the stream's lock");
+            .expect("the holder takes the funnel lock");
 
             let outcome = fixture
                 .db
