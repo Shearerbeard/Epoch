@@ -17,6 +17,22 @@
 //! invariant at the storage layer, alongside a check constraint that
 //! keeps positions 1-based.
 //!
+//! The funnel's ordering theorem rests on operating assumptions the
+//! schema cannot enforce; every writer of `stream_events` must honor
+//! them, forever. Every writer goes through the funnel above - raw
+//! SQL, backfills, second services, and pre-funnel binaries from a
+//! mixed-version deploy included. The backing sequence keeps its
+//! default `CACHE 1`: a larger cache preallocates per session, so two
+//! sessions can commit cached values out of draw order even while
+//! obeying the lock. Nobody rewinds the sequence (`setval`,
+//! `RESTART`): a re-issued value can land below an already-visible
+//! one. Transactions run at the default READ COMMITTED: a pool
+//! configured for a stronger isolation can stale the head read that
+//! backs the version check. A violator's damage is scoped to the
+//! categories it writes, and a late out-of-order commit below an
+//! advanced feed cursor is silent - no assertion, constraint, or
+//! poll invariant can detect it after the fact.
+//!
 //! Read consistency. Each load is a single statement, which is its own
 //! snapshot: a rival append committing mid-read cannot split a read
 //! across two views and hand back events that disagree with the
@@ -54,9 +70,21 @@ pub type PgPool = Pool<PostgresConnectionManager<NoTls>>;
 /// "epwriter".
 pub(crate) const WRITER_LOCK: i64 = 0x6570_7772_6974_6572;
 
-/// The default funnel wait bound, the same value the batch path
-/// bounds its acquisitions by.
+/// The default funnel wait bound for both write paths (single append
+/// and atomic batch). Long enough that a writer queued behind
+/// ordinary work still commits, short enough that a wedged holder
+/// surfaces as a retryable timeout rather than a hang.
 pub(crate) const DEFAULT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A `Duration` as the `lock_timeout` GUC's integer milliseconds.
+/// The value is a count, so there is nothing a caller can inject;
+/// `.max(1)` keeps zero ("wait forever") unsettable - the one bound
+/// these paths must not set.
+pub(crate) fn lock_timeout_ms(timeout: std::time::Duration) -> u64 {
+    u64::try_from(timeout.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
 
 /// One category of streams in PostgreSQL, addressed by a typed id.
 pub struct PgEventStreams<Id, E> {
@@ -311,12 +339,8 @@ where
 
         // Bound the funnel wait below, the same discipline the batch
         // path applies: a wedged writer surfaces as a retryable
-        // timeout, never a hang. The value is milliseconds from a
-        // `Duration`, so zero ("wait forever") cannot be injected
-        // here.
-        let bound_ms = u64::try_from(self.lock_timeout.as_millis())
-            .unwrap_or(u64::MAX)
-            .max(1);
+        // timeout, never a hang.
+        let bound_ms = lock_timeout_ms(self.lock_timeout);
         tx.batch_execute(&format!("SET LOCAL lock_timeout = '{bound_ms}ms'"))
             .await
             .map_err(PgStreamsError::Connection)?;
@@ -439,72 +463,63 @@ mod tests {
         PgEventFeed<SomethingHappened>,
     ) {
         let category = format!("feed-spec-{}", rusty_ulid::generate_ulid_string());
-        let store = store(&category).await;
-        let pool = pool_from_conn_str(
-            &std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set"),
-        )
-        .await
-        .expect("pg pool from EPOCH_PG_TEST_URL");
+        let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
+        let pool = pool_from_conn_str(&conn_str)
+            .await
+            .expect("pg pool from EPOCH_PG_TEST_URL");
+        let store = PgEventStreams::new(pool.clone(), &category);
+        store.migrate().await.expect("schema migrates");
         (store, PgEventFeed::new(pool, &category))
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn postgres_poll_redelivers_until_acked() {
         let (writer, feed) = writer_and_feed().await;
-        under_deadline(crate::streams::feed::spec::poll_redelivers_until_acked(
+        crate::streams::feed::spec::poll_redelivers_until_acked(
             writer,
             feed,
             str::to_owned,
             || SomethingHappened,
-        ))
+        )
         .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn postgres_poll_pages_the_backlog() {
         let (writer, feed) = writer_and_feed().await;
-        under_deadline(crate::streams::feed::spec::poll_pages_the_backlog(
-            writer,
-            feed,
-            str::to_owned,
-            || SomethingHappened,
-        ))
+        crate::streams::feed::spec::poll_pages_the_backlog(writer, feed, str::to_owned, || {
+            SomethingHappened
+        })
         .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn postgres_ack_is_monotonic() {
         let (writer, feed) = writer_and_feed().await;
-        under_deadline(crate::streams::feed::spec::ack_is_monotonic(
-            writer,
-            feed,
-            str::to_owned,
-            || SomethingHappened,
-        ))
+        crate::streams::feed::spec::ack_is_monotonic(writer, feed, str::to_owned, || {
+            SomethingHappened
+        })
         .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn postgres_ack_rejects_undelivered() {
         let (writer, feed) = writer_and_feed().await;
-        under_deadline(crate::streams::feed::spec::ack_rejects_undelivered(
-            writer,
-            feed,
-            str::to_owned,
-            || SomethingHappened,
-        ))
+        crate::streams::feed::spec::ack_rejects_undelivered(writer, feed, str::to_owned, || {
+            SomethingHappened
+        })
         .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn postgres_delivery_carries_the_envelope() {
         let (writer, feed) = writer_and_feed().await;
-        under_deadline(crate::streams::feed::spec::delivery_carries_the_envelope(
+        crate::streams::feed::spec::delivery_carries_the_envelope(
             writer,
             feed,
             str::to_owned,
             || SomethingHappened,
-        ))
+        )
         .await;
     }
 
@@ -585,6 +600,115 @@ mod tests {
                 state,
                 StreamState::Missing,
                 "a timed-out append stores nothing"
+            );
+        })
+        .await;
+    }
+
+    /// The funnel's discriminating proof (pre-Gate-U review round,
+    /// finding C1): a holder inside WRITER_LOCK with an uncommitted
+    /// insert blocks a rival store append, and a poll in that window
+    /// delivers nothing the holder or the rival wrote; after the
+    /// holder rolls back, the rival commits above the holder's
+    /// burned value and one poll delivers it. Under the pre-pivot
+    /// per-stream locks the rival would not have waited on the
+    /// holder at all - the wait IS the funnel's observable shadow.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_funnel_holder_blocks_a_rival_append_until_release() {
+        use crate::streams::feed::{ConsumerGroup, EventFeed, PollLimit};
+
+        under_deadline(async {
+            let _ = dotenv::dotenv();
+            let conn_str =
+                std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
+            let pool = pool_from_conn_str(&conn_str)
+                .await
+                .expect("pg pool from EPOCH_PG_TEST_URL");
+            let category = format!("feed-funnel-{}", rusty_ulid::generate_ulid_string());
+            let store = PgEventStreams::<String, SomethingHappened>::new(pool.clone(), &category);
+            store.migrate().await.expect("schema migrates");
+            let feed = PgEventFeed::<SomethingHappened>::new(pool.clone(), &category);
+            let group = ConsumerGroup::new("funnel-testers").expect("non-empty group");
+
+            let seed_key = format!("seed-{}", rusty_ulid::generate_ulid_string());
+            store
+                .append(
+                    ExpectedVersion::NoStream,
+                    &seed_key,
+                    &EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty"),
+                )
+                .await
+                .expect("seed append");
+
+            // The holder: the funnel lock plus one uncommitted
+            // insert; its drawn sequence value burns at rollback.
+            let mut holder_conn = pool.get().await.expect("a second connection");
+            let held = holder_conn.transaction().await.expect("holder transaction");
+            held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
+                .await
+                .expect("the holder takes the funnel");
+            held.execute(
+                "INSERT INTO stream_events \
+                 (category, stream_key, event_type, sequence, event_data, event_metadata) \
+                 VALUES ($1, $2, 'Held', 1, '\"{}\"'::jsonb, '{}'::jsonb)",
+                &[
+                    &category,
+                    &format!("held-{}", rusty_ulid::generate_ulid_string()),
+                ],
+            )
+            .await
+            .expect("the uncommitted insert");
+
+            // A rival store append through the funnel must block on
+            // the holder.
+            let rival = {
+                let store = store.clone();
+                let key = format!("rival-{}", rusty_ulid::generate_ulid_string());
+                tokio::spawn(async move {
+                    store
+                        .append(
+                            ExpectedVersion::NoStream,
+                            &key,
+                            &EventBatch::new(vec![SomethingHappened])
+                                .expect("one event is nonempty"),
+                        )
+                        .await
+                })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(!rival.is_finished(), "the rival append waits on the funnel");
+
+            // A poll in the window delivers only the seed: the
+            // holder's row is uncommitted and invisible, the rival's
+            // does not exist yet.
+            let windowed = feed
+                .poll(&group, PollLimit::new(10).expect("nonzero limit"))
+                .await
+                .expect("poll inside the holder's window");
+            assert_eq!(windowed.len(), 1, "only the seed is visible in the window");
+            let tip = windowed.last().expect("the seed entry").position();
+            feed.ack(&group, tip).await.expect("ack the seed tip");
+
+            held.rollback().await.expect("the holder releases");
+            rival
+                .await
+                .expect("rival task")
+                .expect("the rival commits once the funnel frees");
+
+            // The rival's event delivers above the acked tip; the
+            // holder's burned value never appears.
+            let settled = feed
+                .poll(&group, PollLimit::new(10).expect("nonzero limit"))
+                .await
+                .expect("poll after the release");
+            assert_eq!(
+                settled.len(),
+                1,
+                "the rival's event delivers after the release"
+            );
+            assert!(
+                settled[0].position() > tip,
+                "the rival committed above the acked tip"
             );
         })
         .await;

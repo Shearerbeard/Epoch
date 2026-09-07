@@ -1,11 +1,19 @@
 //! The E19 gate-S spike: ADR 0010's validation gate, executed before
 //! the ledger is built. Both paths run as raw SQL over dedicated
 //! connections so the only delta between them is the ledger protocol
-//! itself - the unledgered path mirrors the shipped append/transact
-//! statement shapes, the ledgered path adds the allocation
+//! itself - the unledgered path mirrors the pre-pivot append/transact
+//! statement shapes (per-stream advisory locks), the ledgered path
+//! adds the allocation
 //! transaction (advisory-locked `nextval` draws plus the ledger-row
 //! insert), the first-statement claim, explicit sequence values, and
 //! the guarded COMMITTED update.
+//!
+//! Run of record for a superseded design: the spike adjudicated the
+//! ledger against the per-stream-lock write path the funnel has since
+//! replaced, so its shapes no longer mirror the shipped code, and a
+//! re-run writes `stream_events` OUTSIDE the single-writer funnel -
+//! only run it against a scratch database (it also leaves the
+//! `spike_e19_ledger` table and its `spike-*` categories behind).
 //!
 //! Pre-registered verdict (ADR 0010, applied mechanically):
 //!
@@ -330,7 +338,7 @@ async fn batch_ledgered(client: &mut Client, category: &str, streams: &[String])
                      (category, stream_key, event_type, sequence, event_data, \
                       event_metadata, global_sequence) \
                      VALUES ($1, $2, 'Spike', $3, '\"{}\"'::jsonb, '{}'::jsonb, $4)",
-                    &[&category, &key, &(head + offset as i64), &drawn],
+                    &[&category, &key, &(head + offset), &drawn],
                 )
                 .await
                 .expect("insert");

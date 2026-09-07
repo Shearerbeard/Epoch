@@ -54,9 +54,8 @@ pub async fn poll_redelivers_until_acked<S, F, E>(
     make_id: impl Fn(&str) -> S::Id,
     make_event: impl Fn() -> E,
 ) where
-    S: EventStreams<E> + Clone + Send + Sync + 'static,
-    S::Id: Clone + Send + Sync + 'static,
-    F: EventFeed<E> + Clone + Send + Sync + 'static,
+    S: EventStreams<E>,
+    F: EventFeed<E>,
     E: Event + Clone + PartialEq + Send + Sync + Debug + 'static,
 {
     under_deadline(async {
@@ -112,9 +111,8 @@ pub async fn poll_pages_the_backlog<S, F, E>(
     make_id: impl Fn(&str) -> S::Id,
     make_event: impl Fn() -> E,
 ) where
-    S: EventStreams<E> + Clone + Send + Sync + 'static,
-    S::Id: Clone + Send + Sync + 'static,
-    F: EventFeed<E> + Clone + Send + Sync + 'static,
+    S: EventStreams<E>,
+    F: EventFeed<E>,
     E: Event + Clone + PartialEq + Send + Sync + Debug + 'static,
 {
     under_deadline(async {
@@ -161,9 +159,8 @@ pub async fn ack_is_monotonic<S, F, E>(
     make_id: impl Fn(&str) -> S::Id,
     make_event: impl Fn() -> E,
 ) where
-    S: EventStreams<E> + Clone + Send + Sync + 'static,
-    S::Id: Clone + Send + Sync + 'static,
-    F: EventFeed<E> + Clone + Send + Sync + 'static,
+    S: EventStreams<E>,
+    F: EventFeed<E>,
     E: Event + Clone + PartialEq + Send + Sync + Debug + 'static,
 {
     under_deadline(async {
@@ -207,9 +204,8 @@ pub async fn ack_rejects_undelivered<S, F, E>(
     make_id: impl Fn(&str) -> S::Id,
     make_event: impl Fn() -> E,
 ) where
-    S: EventStreams<E> + Clone + Send + Sync + 'static,
-    S::Id: Clone + Send + Sync + 'static,
-    F: EventFeed<E> + Clone + Send + Sync + 'static,
+    S: EventStreams<E>,
+    F: EventFeed<E>,
     E: Event + Clone + PartialEq + Send + Sync + Debug + 'static,
 {
     under_deadline(async {
@@ -261,9 +257,8 @@ pub async fn delivery_carries_the_envelope<S, F, E>(
     make_id: impl Fn(&str) -> S::Id,
     make_event: impl Fn() -> E,
 ) where
-    S: EventStreams<E> + Clone + Send + Sync + 'static,
-    S::Id: Clone + Send + Sync + 'static,
-    F: EventFeed<E> + Clone + Send + Sync + 'static,
+    S: EventStreams<E>,
+    F: EventFeed<E>,
     E: Event + Clone + PartialEq + Send + Sync + Debug + 'static,
 {
     under_deadline(async {

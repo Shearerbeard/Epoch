@@ -32,12 +32,9 @@ use crate::streams::batch::{
 };
 use crate::streams::{EventBatch, ExpectedVersion, StreamId, StreamVersion};
 
-use super::{stored_position, version_of, PgPool, PgStreamsError};
-
-/// The default per-acquisition wait bound. Long enough that a batch
-/// queued behind ordinary work still commits, short enough that a
-/// wedged writer surfaces as a retryable timeout rather than a hang.
-const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+use super::{
+    lock_timeout_ms, stored_position, version_of, PgPool, PgStreamsError, DEFAULT_LOCK_TIMEOUT,
+};
 
 /// An event erased to the backend's wire form at push (ADR 0006):
 /// encoding is fallible and happens before any transaction starts.
@@ -207,13 +204,8 @@ impl AtomicStreams for PgDatabase {
             .await
             .map_err(|error| statement_error(error, self.lock_timeout))?;
 
-        // Bound the funnel acquisition below. The value is milliseconds
-        // from a `Duration`, so there is nothing here a caller can
-        // inject; zero would mean "wait forever", which is the one
-        // bound this path must not set.
-        let bound_ms = u64::try_from(self.lock_timeout.as_millis())
-            .unwrap_or(u64::MAX)
-            .max(1);
+        // Bound the funnel acquisition below.
+        let bound_ms = lock_timeout_ms(self.lock_timeout);
         tx.batch_execute(&format!("SET LOCAL lock_timeout = '{bound_ms}ms'"))
             .await
             .map_err(|error| statement_error(error, self.lock_timeout))?;

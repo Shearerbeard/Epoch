@@ -84,8 +84,11 @@ where
     fn entries_after(&self, root: &Root, cursor: u64, limit: PollLimit) -> Vec<FeedEntry<E>> {
         let mut entries = Vec::new();
         // Positions are 1-based log indexes; the cursor is a count of
-        // acknowledged positions, so scanning starts at its offset.
-        let mut scan = cursor as usize;
+        // acknowledged positions, so scanning starts at its offset. A
+        // cursor that does not fit usize (a narrowing target beyond a
+        // log that size) starts at the end: redelivery only, never a
+        // skip.
+        let mut scan = usize::try_from(cursor).unwrap_or(root.log.len());
         while entries.len() < limit.get() && scan < root.log.len() {
             let stored = &root.log[scan];
             if stored.category == self.category {
@@ -97,7 +100,7 @@ where
                 );
                 entries.push(FeedEntry::new(
                     position,
-                    StreamRef::new(&self.category, &stored.key.clone()),
+                    StreamRef::new(&self.category, &stored.key),
                     record,
                 ));
             }
@@ -165,7 +168,6 @@ mod tests {
         ack_is_monotonic, ack_rejects_undelivered, delivery_carries_the_envelope,
         poll_pages_the_backlog, poll_redelivers_until_acked,
     };
-    use crate::streams::spec::under_deadline;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Noted;
@@ -195,48 +197,30 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn in_memory_poll_redelivers_until_acked() {
         let (writer, feed) = pair();
-        under_deadline(poll_redelivers_until_acked(
-            writer,
-            feed,
-            str::to_owned,
-            || Noted,
-        ))
-        .await;
+        poll_redelivers_until_acked(writer, feed, str::to_owned, || Noted).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn in_memory_poll_pages_the_backlog() {
         let (writer, feed) = pair();
-        under_deadline(poll_pages_the_backlog(writer, feed, str::to_owned, || {
-            Noted
-        }))
-        .await;
+        poll_pages_the_backlog(writer, feed, str::to_owned, || Noted).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn in_memory_ack_is_monotonic() {
         let (writer, feed) = pair();
-        under_deadline(ack_is_monotonic(writer, feed, str::to_owned, || Noted)).await;
+        ack_is_monotonic(writer, feed, str::to_owned, || Noted).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn in_memory_ack_rejects_undelivered() {
         let (writer, feed) = pair();
-        under_deadline(ack_rejects_undelivered(writer, feed, str::to_owned, || {
-            Noted
-        }))
-        .await;
+        ack_rejects_undelivered(writer, feed, str::to_owned, || Noted).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn in_memory_delivery_carries_the_envelope() {
         let (writer, feed) = pair();
-        under_deadline(delivery_carries_the_envelope(
-            writer,
-            feed,
-            str::to_owned,
-            || Noted,
-        ))
-        .await;
+        delivery_carries_the_envelope(writer, feed, str::to_owned, || Noted).await;
     }
 }

@@ -131,7 +131,11 @@ skip a committed event nor wait on a value that will never appear.
   head observations inside the funnel are unchanged from ADR 0006.
   The lock's wait is bounded by the same `lock_timeout` discipline,
   so a wedged writer surfaces as the retryable
-  `TransactError::LockTimeout`, never a hang and never a conflict.
+  `AppendError::LockTimeout` on the single-append path and
+  `TransactError::LockTimeout` on the batch path, never a hang and
+  never a conflict. The bound covers each waiter, not the holder: a
+  holder that goes silent mid-transaction stalls every writer until
+  the server drops its session.
 - **Cursor definition.** The cursor is the highest committed
   `global_sequence` a group has acknowledged. Contiguity is not
   integer adjacency: values burned by rolled-back appends appear in
@@ -190,7 +194,12 @@ append path, 8 concurrent writers over 10k appends each (80k samples
 per path) - unledgered p99 8,960us, ledgered p99 39,814us, ratio
 4.444 against the 2.000 limit; batch path, 4 concurrent multi-stream
 batches over a shared 8-stream pool - unledgered p99 29,486us,
-ledgered p99 31,820us, ratio 1.079, inside the 1.500 limit. An
+ledgered p99 31,820us, ratio 1.079, inside the 1.500 limit. One
+evidence precision (E19 review round, 2026-09-07): the batch timers
+span the whole operation from begin to commit, so the batch ratio
+measures total batch latency rather than the isolated lock-wait the
+charter names; the verdict does not depend on it, since the append
+threshold failed independently. An
 earlier partial run on cold tables measured the append ratio at
 1.598, but its baseline was 3x slower than the warm run while the
 ledgered path held steady across both (41.6ms then 39.8ms p99) - the
@@ -224,10 +233,11 @@ the review ledger below.
   single-postgres deployment's append throughput is now structurally
   serial, and any future that needs concurrent writers must reopen
   this record.
-- Negative: a wedged writer stalls all writes until its
-  `lock_timeout` expires. The retryable LockTimeout outcome is the
-  contract for riding that out; consumers must treat it as retry,
-  which ADR 0006 already required.
+- Negative: a wedged writer stalls all writes while its session
+  stays alive. `lock_timeout` bounds each waiter's attempt, not the
+  holder's tenure; the retryable LockTimeout outcome is the
+  contract for riding that out, and consumers must treat it as
+  retry, which ADR 0006 already required.
 - Deferred: the LISTEN/NOTIFY latency optimization. The shipped poll
   is pull-shaped; a wait-capable poll variant owns the optimization
   when a consumer needs it.

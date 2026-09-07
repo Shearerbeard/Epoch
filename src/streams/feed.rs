@@ -7,7 +7,7 @@
 //! so the wave pivoted to the single-writer fallback the record names:
 //! every event transaction funnels through one serialized writer,
 //! which makes insert order commit order by construction. The cursor
-//! is therefore a plain maximum over `global_sequence` - no ledger
+//! is a plain maximum over `global_sequence` - no ledger
 //! ranges, no reaper, no prefix machinery. A committed event below
 //! the log's maximum is always visible (nothing may be in flight
 //! below a committed value under one writer), so a cursor that reads
@@ -75,20 +75,6 @@ impl FeedCursor {
     /// The raw watermark; zero means nothing acknowledged yet.
     pub fn get(self) -> u64 {
         self.0
-    }
-
-    /// The position one past this watermark: the first position a
-    /// poll delivers. `START` yields position 1, which is nonzero by
-    /// the log's own numbering.
-    pub fn next_position(self) -> FeedPosition {
-        // A cursor at u64::MAX has acknowledged every position a log
-        // could hold; its successor does not exist. Past that guard,
-        // the successor of a watermark is never zero.
-        let raw = self
-            .0
-            .checked_add(1)
-            .expect("a cursor at u64::MAX has no next position");
-        FeedPosition::new(raw).expect("the successor of a cursor is nonzero")
     }
 }
 
@@ -208,7 +194,7 @@ impl<E> FeedEntry<E> {
 }
 
 /// A rejected backwards ack. Constructible only when the attempted
-/// position genuinely sits below the cursor.
+/// position sits strictly below the cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Regression {
     cursor: FeedCursor,
@@ -257,7 +243,7 @@ impl std::fmt::Display for Regression {
 
 /// A rejected ack naming a position past the group's delivered
 /// watermark. Constructible only when the attempted position was
-/// genuinely never delivered that far.
+/// never delivered that far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Undelivered {
     delivered_to: DeliveredWatermark,
@@ -303,7 +289,7 @@ impl std::fmt::Display for Undelivered {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ack at {} precedes the group's delivered watermark {}",
+            "ack at {} exceeds the group's delivered watermark {}",
             self.attempted.get(),
             self.delivered_to.get()
         )
@@ -370,4 +356,29 @@ where
         group: &ConsumerGroup,
         position: FeedPosition,
     ) -> Result<(), AckError<Self::Error>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn position(raw: u64) -> FeedPosition {
+        FeedPosition::new(raw).expect("test positions are nonzero")
+    }
+
+    #[test]
+    fn regression_requires_a_strictly_lower_attempt() {
+        let cursor = FeedCursor::at(5);
+        assert!(Regression::new(cursor, position(4)).is_ok());
+        assert!(Regression::new(cursor, position(5)).is_err());
+        assert!(Regression::new(cursor, position(6)).is_err());
+    }
+
+    #[test]
+    fn undelivered_requires_an_attempt_past_the_watermark() {
+        let delivered = DeliveredWatermark::at(5);
+        assert!(Undelivered::new(delivered, position(6)).is_ok());
+        assert!(Undelivered::new(delivered, position(5)).is_err());
+        assert!(Undelivered::new(delivered, position(4)).is_err());
+    }
 }

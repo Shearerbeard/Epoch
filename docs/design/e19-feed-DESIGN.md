@@ -49,8 +49,9 @@ group); that is legal watermark movement, not a skip.
   extension.
 - **Delivered-watermark durability.** `Undelivered` rejection needs
   the group's highest-delivered position (`DeliveredWatermark`);
-  whether it persists in the cursor row or derives at poll time is a
-  fills decision (crash semantics differ). The panel confirmed the watermark
+  both backends persist it: postgres in the cursor row (a poll
+  writes it in the same transaction as the entries read), in-memory
+  in the root beside the log. The panel confirmed the watermark
   moves on poll, independent of acks.
 - **Whole-log decoding.** Feed impls decode entries to `E`; a category
   whose events are not all `E` fails at decode. The per-category

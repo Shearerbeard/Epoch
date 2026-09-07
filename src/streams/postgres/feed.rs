@@ -11,9 +11,9 @@
 //! 4). Both poll and ack run as one transaction each - the entries a
 //! poll returns and the watermark it records derive from one
 //! snapshot, and an ack's check-then-advance cannot interleave with
-//! itself. The row is locked for the statement's life, which is also
-//! the v1 one-poller-per-group contract's backstop: a second poller
-//! contends on the row lock rather than racing the watermark.
+//! itself. The row is locked for the transaction's life, which is
+//! also the v1 one-poller-per-group contract's backstop: a second
+//! poller contends on the row lock rather than racing the watermark.
 
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -69,9 +69,10 @@ struct Progress {
 
 impl Progress {
     fn from_row(cursor: i64, delivered_to: i64) -> Self {
-        // The migration's check constraint keeps both non-negative
-        // and the watermark at or above the cursor, so the u64 casts
-        // are storage-corruption assertions rather than branches.
+        // Migration steps 0004 and 0005 keep the watermark at or
+        // above the cursor and both values non-negative, so the u64
+        // casts are storage-corruption assertions rather than
+        // branches.
         Self {
             cursor: u64::try_from(cursor).expect("stored cursors are non-negative"),
             delivered_to: u64::try_from(delivered_to).expect("stored watermarks are non-negative"),
@@ -97,7 +98,7 @@ where
             .query_opt(
                 "SELECT cursor, delivered_to FROM epoch_feed_cursors \
                  WHERE category = $1 AND group_name = $2 FOR UPDATE",
-                &[&self.category, &group.as_str().to_owned()],
+                &[&self.category, &group.as_str()],
             )
             .await?
             .map(|row| Progress::from_row(row.get("cursor"), row.get("delivered_to")))
@@ -106,7 +107,9 @@ where
                 delivered_to: 0,
             });
 
-        let lower = i64::try_from(progress.cursor).unwrap_or(i64::MAX);
+        // The cursor came from an i64 column, so the conversion back
+        // cannot fail; a limit beyond i64::MAX means "no limit".
+        let lower = i64::try_from(progress.cursor).expect("a stored cursor fits i64");
         let limit = i64::try_from(limit.get()).unwrap_or(i64::MAX);
         let rows = tx
             .query(
@@ -143,7 +146,7 @@ where
                  VALUES ($1, $2, 0, $3) \
                  ON CONFLICT (category, group_name) \
                  DO UPDATE SET delivered_to = GREATEST(epoch_feed_cursors.delivered_to, $3)",
-                &[&self.category, &group.as_str().to_owned(), &tip],
+                &[&self.category, &group.as_str(), &tip],
             )
             .await?;
         }
@@ -171,7 +174,7 @@ where
             .query_opt(
                 "SELECT cursor, delivered_to FROM epoch_feed_cursors \
                  WHERE category = $1 AND group_name = $2 FOR UPDATE",
-                &[&self.category, &group.as_str().to_owned()],
+                &[&self.category, &group.as_str()],
             )
             .await
             .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?
@@ -206,15 +209,22 @@ where
         }
 
         let to = i64::try_from(attempted).expect("a position fits i64");
-        tx.execute(
-            "INSERT INTO epoch_feed_cursors (category, group_name, cursor, delivered_to) \
-             VALUES ($1, $2, $3, $3) \
-             ON CONFLICT (category, group_name) \
-             DO UPDATE SET cursor = $3",
-            &[&self.category, &group.as_str().to_owned(), &to],
-        )
-        .await
-        .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?;
+        // The guards above imply the row exists: with no row the
+        // delivered watermark reads zero and every (nonzero) position
+        // is rejected as undelivered. A plain UPDATE states the real
+        // transition, and the row count asserts it.
+        let advanced = tx
+            .execute(
+                "UPDATE epoch_feed_cursors SET cursor = $3 \
+                 WHERE category = $1 AND group_name = $2",
+                &[&self.category, &group.as_str(), &to],
+            )
+            .await
+            .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?;
+        assert_eq!(
+            advanced, 1,
+            "the cursor row a poll inserted was just locked FOR UPDATE"
+        );
 
         tx.commit()
             .await

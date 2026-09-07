@@ -69,6 +69,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "feed-cursors-and-intent-key",
         sql: include_str!("migrations/0004-feed-cursors-and-intent-key.sql"),
     },
+    Migration {
+        version: 5,
+        name: "feed-cursor-non-negativity",
+        sql: include_str!("migrations/0005-feed-cursor-non-negativity.sql"),
+    },
 ];
 
 /// Apply every step the database has not recorded, in version order,
@@ -262,6 +267,7 @@ mod tests {
                 (2, "pin-sequences-positive".to_owned()),
                 (3, "event-metadata".to_owned()),
                 (4, "feed-cursors-and-intent-key".to_owned()),
+                (5, "feed-cursor-non-negativity".to_owned()),
             ],
             "every step recorded in order"
         );

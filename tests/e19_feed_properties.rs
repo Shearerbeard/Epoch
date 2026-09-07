@@ -68,16 +68,22 @@ async fn random_poll_ack_interleavings_agree_with_the_model() {
             ConsumerGroup::new(format!("g-{iteration}")).expect("a named group is non-empty");
 
         // The model: cursor and delivered watermark, plus the pool of
-        // positions the group has seen delivered.
+        // positions the group has seen delivered. `appended` tracks
+        // the log independently of the implementation - this backend
+        // burns no values and the case writes one category, so the
+        // next append's position is known exactly - and the poll
+        // assertions below compare delivery against it rather than
+        // against what the feed reported.
         let mut model_cursor: u64 = 0;
         let mut model_delivered: u64 = 0;
         let mut positions: Vec<u64> = Vec::new();
+        let mut appended: u64 = 0;
 
         for step in 0..60 {
             match rng.below(4) {
                 0 | 1 => {
                     let stream = format!("s{}", rng.below(3));
-                    let seq = writer
+                    let _ = writer
                         .append(
                             ExpectedVersion::Any,
                             &stream,
@@ -85,16 +91,21 @@ async fn random_poll_ack_interleavings_agree_with_the_model() {
                         )
                         .await
                         .expect("append succeeds");
-                    let _ = seq;
+                    appended += 1;
                 }
                 2 => {
                     let limit = PollLimit::new(1 + rng.below(3)).expect("nonzero limit");
                     let entries = feed.poll(&group, limit).await.expect("poll succeeds");
-                    for entry in &entries {
+                    assert!(
+                        entries.len() as u64 == (appended - model_cursor).min(limit.get() as u64),
+                        "iteration {iteration} step {step}: the page is the model's contiguous run"
+                    );
+                    for (offset, entry) in entries.iter().enumerate() {
                         let position = entry.position().get();
-                        assert!(
-                            position > model_cursor,
-                            "iteration {iteration} step {step}: delivered {position} at or below cursor {model_cursor}"
+                        let expected = model_cursor + 1 + offset as u64;
+                        assert_eq!(
+                            position, expected,
+                            "iteration {iteration} step {step}: delivery diverges from the model log"
                         );
                         positions.push(position);
                         model_delivered = model_delivered.max(position);
@@ -254,14 +265,21 @@ mod postgres_properties {
         );
     }
 
-    /// The funnel's observable shadow: eight concurrent writers, each
-    /// appending several events, and afterwards delivery is complete
-    /// with no latecomers - one poll delivers every committed row of
-    /// the category, the tip is acked, and a second poll finds nothing
-    /// below it. Literal position contiguity is not assertable on a
-    /// shared database (the sequence is global and other categories'
-    /// appends interleave draws); no-skip and no-latecomer is the
-    /// property the feed actually promises.
+    /// Bulk completeness under concurrent writers: eight concurrent
+    /// writers, each appending several events, and afterwards
+    /// delivery is complete with no latecomers - one poll delivers
+    /// every committed row of the category, the tip is acked, and a
+    /// second poll finds nothing below it. This pins completeness at
+    /// a point in time, not the funnel's ordering theorem: every
+    /// writer joins before the first poll, so a pre-funnel
+    /// implementation would pass it too, and `global_sequence >
+    /// cursor` could never reveal a latecomer below the cursor
+    /// (review-round finding C1). The discriminating proof for the
+    /// funnel itself is `a_funnel_holder_blocks_a_rival_append_until_release`
+    /// in `src/streams/postgres.rs`. Literal position contiguity is
+    /// not assertable on a shared database (the sequence is global
+    /// and other categories' appends interleave draws); no-skip and
+    /// no-latecomer is the property the feed actually promises.
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_writers_deliver_completely_with_no_latecomers() {
         let category = unique("feed-prop-contig");
@@ -355,8 +373,9 @@ mod postgres_properties {
             .expect("delivery before the crash");
         assert_eq!(before.len(), 2);
 
-        // The crash: the handle is gone without any ack.
-        drop(feed);
+        // The crash: no ack ever arrives for this group. The durable
+        // state lives in the database, so a fresh handle is the
+        // consumer-restart shape.
         let fresh = PgEventFeed::<Noted>::new(pool, &category);
         let after = fresh
             .poll(&group, PollLimit::new(10).expect("nonzero limit"))
