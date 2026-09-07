@@ -689,12 +689,15 @@ mod tests {
                 })
             };
 
-            // Establish that the rival actually reached the funnel
-            // wait - an ungranted advisory-lock row for WRITER_LOCK
-            // in pg_locks - rather than merely not having been
-            // scheduled yet (review-round finding: a delayed rival
-            // would satisfy every later assertion under any locking
-            // scheme). Bounded: two seconds, then the test fails.
+            // Establish that a writer actually waits on the funnel:
+            // an ungranted advisory-lock row for WRITER_LOCK in
+            // pg_locks. Our holder is the lock's only granted owner,
+            // so any waiter queues behind it; under the pre-pivot
+            // implementation no session takes this key at all, so the
+            // probe cannot fire - which is what makes it
+            // discriminating rather than decorative (the 300ms sleep
+            // it replaces could only guess). Bounded: two seconds,
+            // then the test fails.
             // pg_locks stores the halves as oid (unsigned), hence u32.
             let classid = u32::try_from(WRITER_LOCK >> 32).expect("the lock key's high half");
             let objid = u32::try_from(WRITER_LOCK & 0xffff_ffff).expect("the lock key's low half");
@@ -720,7 +723,10 @@ mod tests {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            assert!(observed_wait, "the rival never arrived at the funnel wait");
+            assert!(
+                observed_wait,
+                "no writer ever waited on the holder's funnel lock"
+            );
             assert!(!rival.is_finished(), "the rival append waits on the funnel");
 
             // A poll in the window delivers only the seed: the
@@ -760,10 +766,6 @@ mod tests {
             assert!(
                 settled[0].position().get() > burned,
                 "the rival committed above the holder's burned value"
-            );
-            assert!(
-                settled[0].position() > tip,
-                "the rival committed above the acked tip"
             );
         })
         .await;

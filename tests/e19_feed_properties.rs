@@ -265,9 +265,8 @@ mod postgres_properties {
         );
     }
 
-    /// Bulk completeness under concurrent writers: eight concurrent
-    /// writers, each appending several events, and afterwards
-    /// delivery is complete with no latecomers - one poll delivers
+    /// Bulk completeness under concurrent writers. Eight concurrent
+    /// writers append five events each; afterwards one poll delivers
     /// every committed row of the category, the tip is acked, and a
     /// second poll finds nothing below it. This pins completeness at
     /// a point in time, not the funnel's ordering theorem: every

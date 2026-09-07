@@ -88,7 +88,7 @@ where
         // cursor that does not fit usize exceeds every log length the
         // target can hold, so starting at the end is the exact empty
         // page - a refinement over the old `as` cast, which could
-        // wrap and skip.
+        // wrap and redeliver already-acked entries.
         let mut scan = usize::try_from(cursor).unwrap_or(root.log.len());
         while entries.len() < limit.get() && scan < root.log.len() {
             let stored = &root.log[scan];
