@@ -195,11 +195,17 @@ per path) - unledgered p99 8,960us, ledgered p99 39,814us, ratio
 4.444 against the 2.000 limit; batch path, 4 concurrent multi-stream
 batches over a shared 8-stream pool - unledgered p99 29,486us,
 ledgered p99 31,820us, ratio 1.079, inside the 1.500 limit. One
+<!-- vale ai-tells.VerbTricolon = NO -->
+<!-- Reason: the measurement facts chain through commas and the rule
+     reads three clauses across two sentences as one rhetorical
+     tricolon. Dense factual prose, not emphasis; same false-positive
+     class the board recorded 2026-08-14. -->
 evidence precision (E19 review round, 2026-09-07): the batch timers
 span the whole operation from begin to commit, so the batch ratio
-measures total batch latency rather than the isolated lock-wait the
-charter names; the verdict does not depend on it, since the append
-threshold failed independently. An
+measures total batch latency, not the isolated lock-wait the charter
+names. The verdict does not depend on that measurement - the append
+threshold failed on its own. An
+<!-- vale ai-tells.VerbTricolon = YES -->
 earlier partial run on cold tables measured the append ratio at
 1.598, but its baseline was 3x slower than the warm run while the
 ledgered path held steady across both (41.6ms then 39.8ms p99) - the

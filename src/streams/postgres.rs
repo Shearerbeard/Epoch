@@ -463,6 +463,7 @@ mod tests {
         PgEventFeed<SomethingHappened>,
     ) {
         let category = format!("feed-spec-{}", rusty_ulid::generate_ulid_string());
+        let _ = dotenv::dotenv();
         let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
         let pool = pool_from_conn_str(&conn_str)
             .await
@@ -607,12 +608,14 @@ mod tests {
 
     /// The funnel's discriminating proof (pre-Gate-U review round,
     /// finding C1): a holder inside WRITER_LOCK with an uncommitted
-    /// insert blocks a rival store append, and a poll in that window
-    /// delivers nothing the holder or the rival wrote; after the
-    /// holder rolls back, the rival commits above the holder's
-    /// burned value and one poll delivers it. Under the pre-pivot
-    /// per-stream locks the rival would not have waited on the
-    /// holder at all - the wait IS the funnel's observable shadow.
+    /// insert blocks a rival store append - the rival is observed
+    /// waiting on the advisory lock in pg_locks, not merely
+    /// unscheduled - and a poll in that window delivers nothing the
+    /// holder or the rival wrote; after the holder rolls back, the
+    /// rival commits above the holder's burned value and one poll
+    /// delivers it. Under the pre-pivot per-stream locks the rival
+    /// would not have waited on the holder at all - the wait IS the
+    /// funnel's observable shadow.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_funnel_holder_blocks_a_rival_append_until_release() {
         use crate::streams::feed::{ConsumerGroup, EventFeed, PollLimit};
@@ -658,6 +661,16 @@ mod tests {
             )
             .await
             .expect("the uncommitted insert");
+            // The value the holder drew and will burn at rollback,
+            // read inside its own session (CURRVAL is session-local).
+            let burned: i64 = held
+                .query_one(
+                    "SELECT CURRVAL('stream_events_global_sequence_seq') AS drawn",
+                    &[],
+                )
+                .await
+                .expect("read the holder's drawn value")
+                .get("drawn");
 
             // A rival store append through the funnel must block on
             // the holder.
@@ -675,7 +688,39 @@ mod tests {
                         .await
                 })
             };
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            // Establish that the rival actually reached the funnel
+            // wait - an ungranted advisory-lock row for WRITER_LOCK
+            // in pg_locks - rather than merely not having been
+            // scheduled yet (review-round finding: a delayed rival
+            // would satisfy every later assertion under any locking
+            // scheme). Bounded: two seconds, then the test fails.
+            // pg_locks stores the halves as oid (unsigned), hence u32.
+            let classid = u32::try_from(WRITER_LOCK >> 32).expect("the lock key's high half");
+            let objid = u32::try_from(WRITER_LOCK & 0xffff_ffff).expect("the lock key's low half");
+            let mut observed_wait = false;
+            for _ in 0..40 {
+                let waiting: bool = pool
+                    .get()
+                    .await
+                    .expect("a monitor connection")
+                    .query_one(
+                        "SELECT EXISTS(\
+                         SELECT 1 FROM pg_locks \
+                         WHERE locktype = 'advisory' AND classid = $1 AND objid = $2 \
+                         AND NOT granted)",
+                        &[&classid, &objid],
+                    )
+                    .await
+                    .expect("pg_locks probe")
+                    .get(0);
+                if waiting {
+                    observed_wait = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(observed_wait, "the rival never arrived at the funnel wait");
             assert!(!rival.is_finished(), "the rival append waits on the funnel");
 
             // A poll in the window delivers only the seed: the
@@ -695,8 +740,9 @@ mod tests {
                 .expect("rival task")
                 .expect("the rival commits once the funnel frees");
 
-            // The rival's event delivers above the acked tip; the
-            // holder's burned value never appears.
+            // The rival's event delivers above the acked tip, and
+            // above the value the holder burned: insert order is
+            // commit order, and the burn never appears.
             let settled = feed
                 .poll(&group, PollLimit::new(10).expect("nonzero limit"))
                 .await
@@ -705,6 +751,15 @@ mod tests {
                 settled.len(),
                 1,
                 "the rival's event delivers after the release"
+            );
+            assert!(
+                settled[0].position() > tip,
+                "the rival committed above the acked tip"
+            );
+            let burned = u64::try_from(burned).expect("a sequence value is non-negative");
+            assert!(
+                settled[0].position().get() > burned,
+                "the rival committed above the holder's burned value"
             );
             assert!(
                 settled[0].position() > tip,

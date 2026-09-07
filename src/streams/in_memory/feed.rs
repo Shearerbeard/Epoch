@@ -85,9 +85,10 @@ where
         let mut entries = Vec::new();
         // Positions are 1-based log indexes; the cursor is a count of
         // acknowledged positions, so scanning starts at its offset. A
-        // cursor that does not fit usize (a narrowing target beyond a
-        // log that size) starts at the end: redelivery only, never a
-        // skip.
+        // cursor that does not fit usize exceeds every log length the
+        // target can hold, so starting at the end is the exact empty
+        // page - a refinement over the old `as` cast, which could
+        // wrap and skip.
         let mut scan = usize::try_from(cursor).unwrap_or(root.log.len());
         while entries.len() < limit.get() && scan < root.log.len() {
             let stored = &root.log[scan];
