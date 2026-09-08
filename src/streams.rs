@@ -258,31 +258,32 @@ impl<E> StreamState<E> {
     }
 }
 
-/// An incremental read: the events at or after the requested position
+/// An incremental read: the records at or after the requested position
 /// (inclusive, matching the existing PostgreSQL and ESDB contract) and
-/// the stream's observed position. Empty `events` with an `Exact`
-/// position is valid (a cursor past the tail reads nothing); nonempty
-/// events on a `NoStream` observation is rejected at construction.
+/// the stream's observed position, each record carrying the envelope
+/// its append stored. Empty `records` with an `Exact` position is
+/// valid (a cursor past the tail reads nothing); nonempty records on a
+/// `NoStream` observation is rejected at construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamSlice<E> {
-    events: Vec<E>,
+    records: Vec<RecordedEvent<E>>,
     at: StreamVersion,
 }
 
 impl<E> StreamSlice<E> {
-    /// Assemble a slice; rejects events claimed from a stream the
+    /// Assemble a slice; rejects records claimed from a stream the
     /// observation says does not exist.
-    pub fn new(events: Vec<E>, at: StreamVersion) -> Result<Self, MisshapenSlice> {
-        if matches!(at, StreamVersion::NoStream) && !events.is_empty() {
+    pub fn new(records: Vec<RecordedEvent<E>>, at: StreamVersion) -> Result<Self, MisshapenSlice> {
+        if matches!(at, StreamVersion::NoStream) && !records.is_empty() {
             Err(MisshapenSlice)
         } else {
-            Ok(Self { events, at })
+            Ok(Self { records, at })
         }
     }
 
-    /// The events in the requested range, oldest first.
-    pub fn events(&self) -> &[E] {
-        &self.events
+    /// The records in the requested range, oldest first.
+    pub fn records(&self) -> &[RecordedEvent<E>] {
+        &self.records
     }
 
     /// The stream position observed by the read.
@@ -291,8 +292,8 @@ impl<E> StreamSlice<E> {
     }
 
     /// Consume the slice.
-    pub fn into_parts(self) -> (Vec<E>, StreamVersion) {
-        (self.events, self.at)
+    pub fn into_parts(self) -> (Vec<RecordedEvent<E>>, StreamVersion) {
+        (self.records, self.at)
     }
 }
 

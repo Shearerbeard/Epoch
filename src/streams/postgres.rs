@@ -50,8 +50,9 @@ use tokio_postgres::{NoTls, Row};
 use crate::decider::Event;
 
 use super::{
-    AppendError, CategoryEvent, EventBatch, EventStreams, ExpectedVersion, LoadError, StreamId,
-    StreamSequence, StreamSlice, StreamState, StreamVersion, VersionConflict,
+    AppendError, CategoryEvent, EventBatch, EventMetadata, EventStreams, ExpectedVersion,
+    LoadError, RecordedEvent, StreamId, StreamSequence, StreamSlice, StreamState, StreamVersion,
+    VersionConflict,
 };
 
 mod batch;
@@ -245,7 +246,12 @@ fn append_statement_error(
     lock_timeout: std::time::Duration,
 ) -> AppendError<PgStreamsError> {
     if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) {
-        AppendError::LockTimeout(lock_timeout)
+        // The GUC floors zero/sub-millisecond bounds to 1ms, so the
+        // retryable payload names the bound actually in effect - the
+        // same post-floor value the feed classifier reports.
+        AppendError::LockTimeout(std::time::Duration::from_millis(lock_timeout_ms(
+            lock_timeout,
+        )))
     } else {
         AppendError::Backend(PgStreamsError::Connection(error))
     }
@@ -266,14 +272,21 @@ fn stored_position(raw: i64) -> u64 {
     u64::try_from(raw).expect("stored sequences are non-negative")
 }
 
-fn decode_events<'a, E>(
+/// Rows to records: the envelope decodes exactly as the append path
+/// encoded it, so a load hands back the stored envelope instead of a
+/// rebuilt empty one.
+fn decode_records<'a, E>(
     rows: impl IntoIterator<Item = &'a Row>,
-) -> Result<Vec<E>, serde_json::Error>
+) -> Result<Vec<RecordedEvent<E>>, serde_json::Error>
 where
     E: DeserializeOwned,
 {
     rows.into_iter()
-        .map(|row| serde_json::from_value(row.get("event_data")))
+        .map(|row| {
+            let event = serde_json::from_value(row.get("event_data"))?;
+            let metadata: EventMetadata = serde_json::from_value(row.get("event_metadata"))?;
+            Ok(RecordedEvent::keyed(event, metadata))
+        })
         .collect()
 }
 
@@ -290,21 +303,21 @@ where
         let conn = self.pool.get().await?;
         let rows = conn
             .query(
-                "SELECT event_data FROM stream_events \
+                "SELECT event_data, event_metadata FROM stream_events \
                  WHERE category = $1 AND stream_key = $2 \
                  ORDER BY sequence ASC",
                 &[&self.category, &key],
             )
             .await?;
 
-        let events = decode_events(&rows)?;
-        if events.is_empty() {
+        let records = decode_records(&rows)?;
+        if records.is_empty() {
             Ok(StreamState::Missing)
         } else {
             // The nonempty invariant was just checked above, so the
             // empty-batch error is unreachable.
             Ok(StreamState::Present(
-                EventBatch::new(events).expect("events were checked nonempty"),
+                EventBatch::from_records(records).expect("records were checked nonempty"),
             ))
         }
     }
@@ -329,13 +342,13 @@ where
         let conn = self.pool.get().await?;
         let rows = conn
             .query(
-                "SELECT s.head, e.sequence, e.event_data \
-                 FROM (SELECT COALESCE(MAX(sequence), 0) AS head \
-                         FROM stream_events \
-                        WHERE category = $1 AND stream_key = $2) s \
-                 LEFT JOIN stream_events e \
-                   ON e.category = $1 AND e.stream_key = $2 AND e.sequence >= $3 \
-                 ORDER BY e.sequence ASC",
+                "SELECT s.head, e.sequence, e.event_data, e.event_metadata \
+                  FROM (SELECT COALESCE(MAX(sequence), 0) AS head \
+                          FROM stream_events \
+                         WHERE category = $1 AND stream_key = $2) s \
+                  LEFT JOIN stream_events e \
+                    ON e.category = $1 AND e.stream_key = $2 AND e.sequence >= $3 \
+                  ORDER BY e.sequence ASC",
                 &[&self.category, &key, &lower_bound],
             )
             .await?;
@@ -353,7 +366,7 @@ where
         // stream whose observation is `Exact`, so the misshapen-slice
         // error is unreachable.
         Ok(
-            StreamSlice::new(decode_events(in_range)?, version_of(stored_position(head)))
+            StreamSlice::new(decode_records(in_range)?, version_of(stored_position(head)))
                 .expect("in-range rows imply an Exact observation"),
         )
     }
@@ -655,6 +668,48 @@ mod tests {
         .await;
     }
 
+    /// A zero configured bound is floored to 1ms server-side, and the
+    /// timeout payload reports that effective bound, not the zero the
+    /// caller configured - a retry policy sizing its backoff from the
+    /// payload must not read a bound that was never in effect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_zero_funnel_bound_times_out_reporting_the_server_floor() {
+        under_deadline(async {
+            let _ = dotenv::dotenv();
+            let conn_str =
+                std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
+            let pool = pool_from_conn_str(&conn_str)
+                .await
+                .expect("pg pool from EPOCH_PG_TEST_URL");
+            let store =
+                PgEventStreams::<String, SomethingHappened>::new(pool.clone(), "spec-funnel")
+                    .with_lock_timeout(std::time::Duration::ZERO);
+            store.migrate().await.expect("schema migrates");
+            let key = format!("k-{}", rusty_ulid::generate_ulid_string());
+
+            let mut holder = pool.get().await.expect("a second connection");
+            let held = holder.transaction().await.expect("holder transaction");
+            held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
+                .await
+                .expect("the holder takes the funnel lock");
+
+            let outcome = store
+                .append(
+                    ExpectedVersion::NoStream,
+                    &key,
+                    &EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty"),
+                )
+                .await;
+            assert!(
+                matches!(outcome, Err(AppendError::LockTimeout(reported)) if reported == std::time::Duration::from_millis(1)),
+                "expected the floored 1ms bound, got {outcome:?}"
+            );
+
+            held.rollback().await.expect("the holder releases");
+        })
+        .await;
+    }
+
     /// The funnel's discriminating proof (pre-Gate-U review round,
     /// finding C1): a holder inside WRITER_LOCK with an uncommitted
     /// insert blocks a rival store append - the rival is observed
@@ -722,9 +777,31 @@ mod tests {
                 .get("drawn");
 
             // A rival store append through the funnel must block on
-            // the holder.
+            // the holder. The rival rides its own max_size(1) pool, so
+            // its backend's pid - read before the spawn, from the one
+            // pooled connection, which the append then leases - is
+            // known, and the pg_locks probe below can name that exact
+            // waiter instead of any waiter with the funnel key (the
+            // same bind tests/writer_idle_timeout.rs uses).
+            let (rival_pool, rival_pid) = {
+                let config: tokio_postgres::Config =
+                    conn_str.parse().expect("a valid connection string");
+                let pool = PgPool::builder()
+                    .max_size(1)
+                    .build(PostgresConnectionManager::new(config, NoTls))
+                    .await
+                    .expect("the rival's single-connection pool builds");
+                let conn = pool.get().await.expect("the rival pool's connection");
+                let pid: i32 = conn
+                    .query_one("SELECT pg_backend_pid() AS pid", &[])
+                    .await
+                    .expect("the rival backend's pid")
+                    .get("pid");
+                drop(conn);
+                (pool, pid)
+            };
             let rival = {
-                let store = store.clone();
+                let store = PgEventStreams::<String, SomethingHappened>::new(rival_pool, &category);
                 let key = format!("rival-{}", rusty_ulid::generate_ulid_string());
                 tokio::spawn(async move {
                     store
@@ -738,15 +815,16 @@ mod tests {
                 })
             };
 
-            // Establish that a writer actually waits on the funnel:
+            // Establish that the rival actually waits on the funnel:
             // an ungranted advisory-lock row for WRITER_LOCK in
-            // pg_locks. Our holder is the lock's only granted owner,
-            // so any waiter queues behind it; under the pre-pivot
-            // implementation no session takes this key at all, so the
-            // probe cannot fire - which is what makes it
-            // discriminating rather than decorative (the 300ms sleep
-            // it replaces could only guess). Bounded: two seconds,
-            // then the test fails.
+            // pg_locks, bound to the rival's own backend pid so an
+            // unrelated session's waiter cannot satisfy the probe. Our
+            // holder is the lock's only granted owner, so the rival
+            // queues behind it; under the pre-pivot implementation no
+            // session takes this key at all, so the probe cannot fire -
+            // which is what makes it discriminating rather than
+            // decorative (the 300ms sleep it replaces could only
+            // guess). Bounded: two seconds, then the test fails.
             // pg_locks stores the halves as oid (unsigned), hence u32.
             let classid = u32::try_from(WRITER_LOCK >> 32).expect("the lock key's high half");
             let objid = u32::try_from(WRITER_LOCK & 0xffff_ffff).expect("the lock key's low half");
@@ -760,8 +838,8 @@ mod tests {
                         "SELECT EXISTS(\
                          SELECT 1 FROM pg_locks \
                          WHERE locktype = 'advisory' AND classid = $1 AND objid = $2 \
-                         AND NOT granted)",
-                        &[&classid, &objid],
+                         AND pid = $3 AND NOT granted)",
+                        &[&classid, &objid, &rival_pid],
                     )
                     .await
                     .expect("pg_locks probe")
@@ -858,6 +936,40 @@ mod tests {
             rows[1].get::<_, serde_json::Value>("event_metadata"),
             serde_json::json!({"intent": "saga-1/order-5/2"}),
             "a keyed event stores its envelope"
+        );
+    }
+
+    /// The envelope a keyed append stores is the envelope both load
+    /// paths hand back: the full load and the slice return the stored
+    /// record intact, not a rebuilt empty-envelope one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_keyed_append_loads_back_with_its_envelope() {
+        let store = store("spec-envelope-load").await;
+        let key = format!("stream-{}", rusty_ulid::generate_ulid_string());
+
+        let mut envelope = EventMetadata::new();
+        envelope.insert("intent", "saga-1/order-5/2");
+        let batch =
+            EventBatch::from_records(vec![RecordedEvent::keyed(SomethingHappened, envelope)])
+                .expect("one event is nonempty");
+        store
+            .append(ExpectedVersion::NoStream, &key, &batch)
+            .await
+            .expect("append succeeds");
+
+        assert_eq!(
+            store.load_stream(&key).await.expect("load succeeds"),
+            StreamState::Present(batch.clone()),
+            "the full load returns the stored envelope"
+        );
+        let slice = store
+            .load_stream_from(&key, None)
+            .await
+            .expect("slice load succeeds");
+        assert_eq!(
+            slice.records(),
+            batch.records(),
+            "the slice carries the stored envelope"
         );
     }
 }

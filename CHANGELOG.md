@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: new error arms `AppendError::LockTimeout`,
   `TransactError::LockTimeout`, and `PgStreamsError::LockTimeout`; feed
   ack surfaces backend faults via `AckError::Backend`
+- Breaking: the envelope rework removed the `EventBatch` slice
+  accessors `as_slice()` and `into_vec()`; batch contents are read as
+  `RecordedEvent<E>` records via `records()` (consumed via
+  `into_records()`), with the domain event at `RecordedEvent::event()`
+  and its envelope at `metadata()`
+- Breaking: `StreamSlice` holds `RecordedEvent<E>` records instead of
+  bare events; `events()` is renamed to `records()` and `into_parts()`
+  returns the records, so a slice read surfaces each event's stored
+  envelope
+- Load paths (`load_stream`, `load_stream_from`) now return each event
+  with the envelope its append stored instead of rebuilding every
+  record with an empty envelope
 - New timeout builders with defaults: `with_lock_timeout` (5s) on
   `PgEventFeed`; `with_lock_timeout` (5s) and
   `with_idle_transaction_timeout` (30s) on the write handles

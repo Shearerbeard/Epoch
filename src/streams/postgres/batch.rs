@@ -161,7 +161,10 @@ fn statement_error(
     lock_timeout: Duration,
 ) -> TransactError<PgStreamsError> {
     if error.code() == Some(&SqlState::LOCK_NOT_AVAILABLE) {
-        TransactError::LockTimeout(lock_timeout)
+        // The GUC floors zero/sub-millisecond bounds to 1ms, so the
+        // payload names the bound actually in effect - the same
+        // post-floor value the append and feed classifiers report.
+        TransactError::LockTimeout(Duration::from_millis(super::lock_timeout_ms(lock_timeout)))
     } else {
         TransactError::Backend(PgStreamsError::Connection(error))
     }
@@ -674,6 +677,46 @@ mod postgres_tests {
             assert!(
                 matches!(outcome, Err(TransactError::LockTimeout(reported)) if reported == bound),
                 "expected a retryable lock timeout, got {outcome:?}"
+            );
+
+            held.rollback().await.expect("the holder releases");
+            assert_eq!(
+                kid_state(&fixture, &kid).await,
+                StreamState::Missing,
+                "a timed-out batch stores nothing"
+            );
+        })
+        .await;
+    }
+
+    /// A zero configured bound is floored to 1ms server-side, and the
+    /// timeout payload reports that effective bound, not the zero the
+    /// caller configured - the batch twin of the append path's floor
+    /// case.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_zero_funnel_bound_times_out_reporting_the_server_floor() {
+        under_deadline(async {
+            let fixture = fixture().await;
+            let (kid, chore) = (unique("kid"), unique("chore"));
+
+            let mut holder = fixture.pool.get().await.expect("a second connection");
+            let held = holder.transaction().await.expect("holder transaction");
+            held.execute(
+                "SELECT pg_advisory_xact_lock($1)",
+                &[&super::super::WRITER_LOCK],
+            )
+            .await
+            .expect("the holder takes the funnel lock");
+
+            let outcome = fixture
+                .db
+                .clone()
+                .with_lock_timeout(Duration::ZERO)
+                .transact(draw(&fixture.db, &kid, &chore, false))
+                .await;
+            assert!(
+                matches!(outcome, Err(TransactError::LockTimeout(reported)) if reported == Duration::from_millis(1)),
+                "expected the floored 1ms bound, got {outcome:?}"
             );
 
             held.rollback().await.expect("the holder releases");

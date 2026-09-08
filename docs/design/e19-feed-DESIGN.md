@@ -78,6 +78,12 @@ group); that is legal watermark movement, not a skip.
 - **In-memory ordering.** The in-memory root appends under one mutex
   (already single-writer by construction); its positions are arrival
   order, which the conformance cases pin as commit order.
+- **Intent-key uniqueness is postgres-storage-level only in v1.** The
+  partial unique index rejects a duplicate intent in the
+  `saga-outbox` category; the in-memory backend accepts duplicate
+  intents. ADR 0010 scopes that uniqueness to the storage layer
+  deliberately, and whether the backends must reach parity is the
+  saga runner card's gate A decision.
 - **Forward progress is not bounded.** The lock wait (5s) and idle
   session (30s) are bounded, but active SQL, the commit, and total
   client duration are not. A future `statement_timeout` or server
