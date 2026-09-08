@@ -14,9 +14,16 @@
 //! itself. The row is locked for the transaction's life, which is
 //! also the v1 one-poller-per-group contract's backstop: a second
 //! poller contends on the row lock rather than racing the watermark.
+//!
+//! Poll and ack bound their lock waits: each transaction sets a
+//! local `lock_timeout` before taking the cursor row, and an expiry
+//! surfaces as the retryable [`PgStreamsError::LockTimeout`] - never
+//! a hang and never a generic backend fault (ADR 0010). The feed
+//! bounds lock waits only; no idle-holder bound exists on this path.
 
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 
@@ -28,12 +35,13 @@ use crate::streams::feed::{
 };
 use crate::streams::RecordedEvent;
 
-use super::{PgPool, PgStreamsError};
+use super::{lock_timeout_ms, PgPool, PgStreamsError, DEFAULT_LOCK_TIMEOUT};
 
 /// A feed over one category of a PostgreSQL database.
 pub struct PgEventFeed<E> {
     pool: PgPool,
     category: String,
+    lock_timeout: Duration,
     _marker: PhantomData<fn() -> E>,
 }
 
@@ -44,7 +52,19 @@ impl<E> PgEventFeed<E> {
         Self {
             pool,
             category: category.to_owned(),
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
             _marker: PhantomData,
+        }
+    }
+
+    /// Set the poll/ack lock-wait bound. A cursor row or index lock
+    /// held past it surfaces as the retryable
+    /// [`PgStreamsError::LockTimeout`] when it expires, never a hang
+    /// (ADR 0010).
+    pub fn with_lock_timeout(self, lock_timeout: Duration) -> Self {
+        Self {
+            lock_timeout,
+            ..self
         }
     }
 }
@@ -55,9 +75,46 @@ impl<E> Clone for PgEventFeed<E> {
         Self {
             pool: self.pool.clone(),
             category: self.category.clone(),
+            lock_timeout: self.lock_timeout,
             _marker: PhantomData,
         }
     }
+}
+
+/// Apply the feed's lock-wait bound to one poll/ack transaction
+/// before lock-taking work: `SET LOCAL lock_timeout` bounding the
+/// cursor row's `FOR UPDATE` and every index lock the statements
+/// take. Converted by [`lock_timeout_ms`], so a zero or
+/// sub-millisecond bound normalizes to the 1ms floor - the one
+/// "wait forever" value these paths must not set. The feed-side,
+/// lock-only counterpart of the write path's
+/// `configure_writer_timeouts`: C3 gives the feed no holder bound.
+#[expect(
+    unused_variables,
+    reason = "timeout configuration body awaits implementation"
+)]
+async fn configure_feed_timeout(
+    tx: &tokio_postgres::Transaction<'_>,
+    bound_ms: u64,
+) -> Result<(), tokio_postgres::Error> {
+    todo!("set the local lock_timeout GUC before lock-taking work")
+}
+
+/// Lock-timeout expiry inside a poll or ack transaction is a distinct
+/// retryable outcome (`PgStreamsError::LockTimeout`), never a generic
+/// backend fault (ADR 0010, the feed-side twin of the append and
+/// batch statement classifiers). Every statement after the GUC is in
+/// effect routes its failure through here - the cursor row's
+/// `FOR UPDATE`, the head read, the watermark upsert, the cursor
+/// UPDATE, and both commits can all wait on locks. Pre-bound pool,
+/// BEGIN, and config failures are not classified: the GUC is not yet
+/// in effect, so they stay ordinary connection errors.
+#[expect(
+    unused_variables,
+    reason = "statement classifier body awaits implementation"
+)]
+fn feed_statement_error(error: tokio_postgres::Error, bound: Duration) -> PgStreamsError {
+    todo!("classify LOCK_NOT_AVAILABLE as LockTimeout(bound), else Connection(error)")
 }
 
 /// One group's progress row as poll and ack read it.
@@ -91,8 +148,14 @@ where
         group: &ConsumerGroup,
         limit: PollLimit,
     ) -> Result<Vec<FeedEntry<E>>, Self::Error> {
+        let bound_ms = lock_timeout_ms(self.lock_timeout);
+        let effective_bound = Duration::from_millis(bound_ms);
         let mut conn = self.pool.get().await?;
         let tx = conn.transaction().await?;
+
+        // The bound is in effect before the cursor row's FOR UPDATE,
+        // the transaction's first lock-taking statement.
+        configure_feed_timeout(&tx, bound_ms).await?;
 
         let progress = tx
             .query_opt(
@@ -100,7 +163,8 @@ where
                  WHERE category = $1 AND group_name = $2 FOR UPDATE",
                 &[&self.category, &group.as_str()],
             )
-            .await?
+            .await
+            .map_err(|error| feed_statement_error(error, effective_bound))?
             .map(|row| Progress::from_row(row.get("cursor"), row.get("delivered_to")))
             .unwrap_or(Progress {
                 cursor: 0,
@@ -119,7 +183,8 @@ where
                  ORDER BY global_sequence ASC LIMIT $3",
                 &[&self.category, &lower, &limit],
             )
-            .await?;
+            .await
+            .map_err(|error| feed_statement_error(error, effective_bound))?;
 
         let mut entries = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -148,10 +213,13 @@ where
                  DO UPDATE SET delivered_to = GREATEST(epoch_feed_cursors.delivered_to, $3)",
                 &[&self.category, &group.as_str(), &tip],
             )
-            .await?;
+            .await
+            .map_err(|error| feed_statement_error(error, effective_bound))?;
         }
 
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .map_err(|error| feed_statement_error(error, effective_bound))?;
         Ok(entries)
     }
 
@@ -160,6 +228,8 @@ where
         group: &ConsumerGroup,
         position: FeedPosition,
     ) -> Result<(), AckError<Self::Error>> {
+        let bound_ms = lock_timeout_ms(self.lock_timeout);
+        let effective_bound = Duration::from_millis(bound_ms);
         let mut conn = self
             .pool
             .get()
@@ -170,6 +240,14 @@ where
             .await
             .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?;
 
+        // The bound is in effect before the cursor row's FOR UPDATE,
+        // the transaction's first lock-taking statement. A config
+        // failure is pre-bound: an ordinary backend error, not a
+        // classified timeout.
+        configure_feed_timeout(&tx, bound_ms)
+            .await
+            .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?;
+
         let progress = tx
             .query_opt(
                 "SELECT cursor, delivered_to FROM epoch_feed_cursors \
@@ -177,7 +255,7 @@ where
                 &[&self.category, &group.as_str()],
             )
             .await
-            .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?
+            .map_err(|error| feed_statement_error(error, effective_bound))?
             .map(|row| Progress::from_row(row.get("cursor"), row.get("delivered_to")))
             .unwrap_or(Progress {
                 cursor: 0,
@@ -188,7 +266,7 @@ where
         if attempted == progress.cursor {
             tx.commit()
                 .await
-                .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?;
+                .map_err(|error| feed_statement_error(error, effective_bound))?;
             return Ok(());
         }
         if attempted < progress.cursor {
@@ -220,7 +298,7 @@ where
                 &[&self.category, &group.as_str(), &to],
             )
             .await
-            .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?;
+            .map_err(|error| feed_statement_error(error, effective_bound))?;
         assert_eq!(
             advanced, 1,
             "the cursor row a poll inserted was just locked FOR UPDATE"
@@ -228,7 +306,7 @@ where
 
         tx.commit()
             .await
-            .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?;
+            .map_err(|error| feed_statement_error(error, effective_bound))?;
         Ok(())
     }
 }

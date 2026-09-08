@@ -33,7 +33,8 @@ use crate::streams::batch::{
 use crate::streams::{EventBatch, ExpectedVersion, StreamId, StreamVersion};
 
 use super::{
-    lock_timeout_ms, stored_position, version_of, PgPool, PgStreamsError, DEFAULT_LOCK_TIMEOUT,
+    configure_writer_timeouts, stored_position, version_of, PgPool, PgStreamsError,
+    DEFAULT_IDLE_TRANSACTION_TIMEOUT, DEFAULT_LOCK_TIMEOUT,
 };
 
 /// An event erased to the backend's wire form at push (ADR 0006):
@@ -62,6 +63,7 @@ pub type PgBatchBuilder = BatchBuilder<EncodedEvent>;
 pub struct PgDatabase {
     pool: PgPool,
     lock_timeout: Duration,
+    idle_transaction_timeout: Duration,
 }
 
 impl PgDatabase {
@@ -69,6 +71,7 @@ impl PgDatabase {
         Self {
             pool,
             lock_timeout: DEFAULT_LOCK_TIMEOUT,
+            idle_transaction_timeout: DEFAULT_IDLE_TRANSACTION_TIMEOUT,
         }
     }
 
@@ -77,6 +80,19 @@ impl PgDatabase {
     pub fn with_lock_timeout(self, lock_timeout: Duration) -> Self {
         Self {
             lock_timeout,
+            ..self
+        }
+    }
+
+    /// Set the idle-in-transaction bound (the server's
+    /// `idle_in_transaction_session_timeout` GUC): how long the batch's
+    /// transaction may sit without an active statement before the
+    /// server terminates it, evicting a wedged holder. Only idle open
+    /// transactions are bounded; active statements, the commit, and
+    /// total client duration are not.
+    pub fn with_idle_transaction_timeout(self, idle_transaction_timeout: Duration) -> Self {
+        Self {
+            idle_transaction_timeout,
             ..self
         }
     }
@@ -204,11 +220,13 @@ impl AtomicStreams for PgDatabase {
             .await
             .map_err(|error| statement_error(error, self.lock_timeout))?;
 
-        // Bound the funnel acquisition below.
-        let bound_ms = lock_timeout_ms(self.lock_timeout);
-        tx.batch_execute(&format!("SET LOCAL lock_timeout = '{bound_ms}ms'"))
+        // Bound the funnel acquisition below, and bound how long the
+        // transaction may sit without an active statement. A setup
+        // failure here is a connection error, never a lock-wait
+        // classification.
+        configure_writer_timeouts(&tx, self.lock_timeout, self.idle_transaction_timeout)
             .await
-            .map_err(|error| statement_error(error, self.lock_timeout))?;
+            .map_err(|error| TransactError::Backend(PgStreamsError::Connection(error)))?;
 
         // The funnel: one global writer lock, the same one single
         // append takes, so insert order is commit order.

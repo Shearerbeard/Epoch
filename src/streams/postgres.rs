@@ -76,6 +76,14 @@ pub(crate) const WRITER_LOCK: i64 = 0x6570_7772_6974_6572;
 /// surfaces as a retryable timeout rather than a hang.
 pub(crate) const DEFAULT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The default idle-in-transaction bound for the write paths: how
+/// long an event transaction may sit without an active statement
+/// before the server terminates it, evicting a wedged holder.
+/// Active SQL, commit, and total client duration remain outside this
+/// bound.
+pub(crate) const DEFAULT_IDLE_TRANSACTION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 /// A `Duration` as the `lock_timeout` GUC's integer milliseconds.
 /// The value is a count, so there is nothing a caller can inject;
 /// `.max(1)` keeps zero ("wait forever") unsettable - the one bound
@@ -86,11 +94,33 @@ pub(crate) fn lock_timeout_ms(timeout: std::time::Duration) -> u64 {
         .max(1)
 }
 
+/// Apply both writer timeout bounds to one event transaction before
+/// the funnel acquisition, shared by the single append and the atomic
+/// batch paths: `SET LOCAL lock_timeout` bounding the funnel wait
+/// (converted by [`lock_timeout_ms`], so zero or a sub-millisecond
+/// bound normalizes to the 1ms floor) and `SET LOCAL
+/// idle_in_transaction_session_timeout` bounding how long the
+/// transaction may sit without an active statement, both in one
+/// single command. A bound the server rejects as out of range fails
+/// loudly rather than saturating to the server maximum.
+#[expect(
+    unused_variables,
+    reason = "timeout configuration body awaits implementation"
+)]
+async fn configure_writer_timeouts(
+    tx: &tokio_postgres::Transaction<'_>,
+    lock_timeout: std::time::Duration,
+    idle_transaction_timeout: std::time::Duration,
+) -> Result<(), tokio_postgres::Error> {
+    todo!("set both local GUCs in one command")
+}
+
 /// One category of streams in PostgreSQL, addressed by a typed id.
 pub struct PgEventStreams<Id, E> {
     pool: PgPool,
     category: String,
     lock_timeout: std::time::Duration,
+    idle_transaction_timeout: std::time::Duration,
     _marker: PhantomData<fn() -> (Id, E)>,
 }
 
@@ -102,6 +132,7 @@ impl<Id, E> PgEventStreams<Id, E> {
             pool,
             category: category.to_owned(),
             lock_timeout: DEFAULT_LOCK_TIMEOUT,
+            idle_transaction_timeout: DEFAULT_IDLE_TRANSACTION_TIMEOUT,
             _marker: PhantomData,
         }
     }
@@ -112,6 +143,19 @@ impl<Id, E> PgEventStreams<Id, E> {
     pub fn with_lock_timeout(self, lock_timeout: std::time::Duration) -> Self {
         Self {
             lock_timeout,
+            ..self
+        }
+    }
+
+    /// Set the idle-in-transaction bound: how long an event
+    /// transaction may sit without an active statement before the
+    /// server terminates it, evicting a wedged writer.
+    pub fn with_idle_transaction_timeout(
+        self,
+        idle_transaction_timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            idle_transaction_timeout,
             ..self
         }
     }
@@ -147,6 +191,7 @@ impl<Id, E> Clone for PgEventStreams<Id, E> {
             pool: self.pool.clone(),
             category: self.category.clone(),
             lock_timeout: self.lock_timeout,
+            idle_transaction_timeout: self.idle_transaction_timeout,
             _marker: PhantomData,
         }
     }
@@ -175,6 +220,12 @@ pub enum PgStreamsError {
 
     #[error("event payload serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    /// A server-side lock wait expired: the bounded operation made no
+    /// progress and may be retried (the feed-side counterpart of
+    /// [`AppendError::LockTimeout`]).
+    #[error("lock wait timed out after {0:?}")]
+    LockTimeout(std::time::Duration),
 
     #[error("invalid connection config: {0}")]
     Config(String),
@@ -337,11 +388,7 @@ where
             .await
             .map_err(PgStreamsError::Connection)?;
 
-        // Bound the funnel wait below, the same discipline the batch
-        // path applies: a wedged writer surfaces as a retryable
-        // timeout, never a hang.
-        let bound_ms = lock_timeout_ms(self.lock_timeout);
-        tx.batch_execute(&format!("SET LOCAL lock_timeout = '{bound_ms}ms'"))
+        configure_writer_timeouts(&tx, self.lock_timeout, self.idle_transaction_timeout)
             .await
             .map_err(PgStreamsError::Connection)?;
 

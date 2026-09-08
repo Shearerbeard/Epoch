@@ -1,5 +1,8 @@
 # E19 feed surface - design record (post-pivot)
 
+2026-09-07 repair status: timeout configuration is a compile-clean skeleton
+with `todo!()` bodies; invoking append, transact, poll, or ack panics until filled.
+
 Status: shipped. The design panel's findings are dispositioned
 (repairs in 2b3d67c, confirmation PASS) and ADR 0010 is revised with
 the spike's measured verdict and the executed pivot (f65f40c); the
@@ -25,6 +28,18 @@ reaper, and prefix machinery do not exist.
 | `Undelivered` (payload) | The cursor never advances past the delivered watermark, and a rejection only exists for an ack past the watermark. | An undelivered-ack report naming a position within delivery - unconstructible via `Undelivered::new`. |
 | `AckError::Regression` / `AckError::NotDelivered` | The two protocol violations a caller fixes differently: rewind vs skip-ahead. | Backend faults masquerading as protocol violations (they are `Backend`). |
 | `EventFeed` (trait) | Delivery is at-least-once over the committed log per group; ack is monotonic and delivery-bounded. | A feed that could represent exactly-once or regressing semantics. |
+
+## Repair surface (C3/C4 skeletons)
+
+| Configuration / error | One business rule | Unbound gap |
+| --- | --- | --- |
+| `PgEventFeed::with_lock_timeout(default5s)` | Feed poll and ack lock wait bounded. Writer funnel lock-wait separate. | Active statement, commit, client timeout, network expiry pool unchanged. |
+| `PgStreamsError::LockTimeout(Duration)` | Server lock-timeout expiry is retryable (feed poll error). Effective bound reported. | Automatic retry loop not added for ambiguous connection errors. |
+| `AckError::Backend` (wrapping) | Feed ack surfaces lock timeout same as poll. | |
+| `PgEventStreams::with_idle_transaction_timeout(default30s)` `PgDatabase::with_idle_transaction_timeout(default30s)` | Idle writer eviction via server GUC `idle_in_transaction_session_timeout`. Writer lock-wait stays 5s separate bound. | Active SQL exceeding idle window not terminated, commit overflow unaffected. |
+| Clone preserves timeout configs | Builder-set bounds survive sharing. | Pool acquisition, statement deadlines outside scope. |
+
+All timeout boundaries are typed-hole configurations (`todo!()` helpers); calling code panics until filled, and no timeout behavior runs.
 
 ## Visibility and seams
 
