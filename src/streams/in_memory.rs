@@ -24,13 +24,16 @@ use thiserror::Error;
 use crate::decider::Event;
 
 use super::{
-    AppendError, CategoryEvent, EventBatch, EventStreams, ExpectedVersion, LoadError, StreamId,
-    StreamSequence, StreamSlice, StreamState, StreamVersion, VersionConflict,
+    AppendError, CategoryEvent, EventBatch, EventMetadata, EventStreams, ExpectedVersion,
+    LoadError, RecordedEvent, StreamId, StreamSequence, StreamSlice, StreamState, StreamVersion,
+    VersionConflict,
 };
 
 mod batch;
+mod feed;
 
 pub use batch::{InMemoryBatch, InMemoryBatchBuilder, MemoryEvent};
+pub use feed::InMemoryEventFeed;
 
 /// The category a standalone [`InMemoryEventStreams`] opens on its own
 /// private root.
@@ -45,14 +48,16 @@ struct StoredEvent {
     category: String,
     key: String,
     payload: ErasedEvent,
+    metadata: EventMetadata,
 }
 
-/// The shared store root: one oldest-first log plus the event type each
-/// category is claimed with.
+/// The shared store root: one oldest-first log, the event type each
+/// category is claimed with, and each feed group's progress.
 #[derive(Default)]
 pub(crate) struct Root {
     log: Vec<StoredEvent>,
     types: HashMap<String, TypeId>,
+    cursors: HashMap<(String, String), feed::GroupProgress>,
 }
 
 impl Root {
@@ -93,13 +98,51 @@ impl Root {
     }
 
     /// Store one event at the tail of the log. The caller has already
-    /// claimed the category and checked the stream's head.
-    pub(crate) fn append_erased(&mut self, category: &str, key: &str, payload: ErasedEvent) {
+    /// claimed the category and checked the stream's head. The
+    /// envelope is stored as given, with no intent-key uniqueness
+    /// check: the saga-outbox uniqueness is postgres-storage-level
+    /// only in v1 (ADR 0010), so duplicate intents are accepted here.
+    pub(crate) fn append_erased(
+        &mut self,
+        category: &str,
+        key: &str,
+        payload: ErasedEvent,
+        metadata: EventMetadata,
+    ) {
         self.log.push(StoredEvent {
             category: category.to_owned(),
             key: key.to_owned(),
             payload,
+            metadata,
         });
+    }
+
+    /// One feed group's progress on one category; absent means
+    /// nothing acknowledged, nothing delivered.
+    pub(crate) fn feed_progress(&self, category: &str, group: &str) -> feed::GroupProgress {
+        self.cursors
+            .get(&(category.to_owned(), group.to_owned()))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Record that a poll delivered through `position`. The watermark
+    /// only moves forward.
+    pub(crate) fn record_delivery(&mut self, category: &str, group: &str, position: u64) {
+        let progress = self
+            .cursors
+            .entry((category.to_owned(), group.to_owned()))
+            .or_default();
+        progress.delivered_to = progress.delivered_to.max(position);
+    }
+
+    /// Advance a group's cursor. Callers validate the move first: the
+    /// position exceeds the current cursor and lies within delivery.
+    pub(crate) fn advance_cursor(&mut self, category: &str, group: &str, to: u64) {
+        self.cursors
+            .entry((category.to_owned(), group.to_owned()))
+            .or_default()
+            .cursor = to;
     }
 }
 
@@ -203,7 +246,8 @@ where
     }
 }
 
-/// Hand-written because the erased payloads in the root are not `Debug`.
+/// Hand-written so the derive's spurious `E: Debug` bound is not
+/// required of callers, and so the erased log is not dumped.
 impl<E> Debug for InMemoryEventStreams<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InMemoryEventStreams")
@@ -239,6 +283,19 @@ where
         .clone()
 }
 
+/// One stream's records from the locked root, oldest first, each
+/// with the envelope its append stored.
+fn stream_records<E>(root: &Root, category: &str, key: &str) -> Vec<RecordedEvent<E>>
+where
+    E: Clone + 'static,
+{
+    root.log
+        .iter()
+        .filter(|stored| stored.category == category && stored.key == key)
+        .map(|stored| RecordedEvent::keyed(stored_event(&stored.payload), stored.metadata.clone()))
+        .collect()
+}
+
 impl<E> EventStreams<E> for InMemoryEventStreams<E>
 where
     E: Event + Clone + Send + Sync + Debug + 'static,
@@ -248,21 +305,13 @@ where
 
     async fn load_stream(&self, id: &Self::Id) -> Result<StreamState<E>, Self::Error> {
         let root = self.root.lock().expect("event store lock poisoned");
-        let key = id.stream_key();
-        let events: Vec<E> = root
-            .log
-            .iter()
-            .filter(|stored| stored.category == self.category && stored.key == key)
-            .map(|stored| stored_event(&stored.payload))
-            .collect();
+        let records = stream_records(&root, &self.category, &id.stream_key());
 
-        if events.is_empty() {
+        if records.is_empty() {
             Ok(StreamState::Missing)
         } else {
-            // The nonempty invariant was just checked above, so the
-            // empty-batch error is unreachable.
             Ok(StreamState::Present(
-                EventBatch::new(events).expect("events were checked nonempty"),
+                EventBatch::from_records(records).expect("records were checked nonempty"),
             ))
         }
     }
@@ -273,28 +322,21 @@ where
         from: Option<StreamSequence>,
     ) -> Result<StreamSlice<E>, Self::Error> {
         let root = self.root.lock().expect("event store lock poisoned");
-        let key = id.stream_key();
-        let history: Vec<E> = root
-            .log
-            .iter()
-            .filter(|stored| stored.category == self.category && stored.key == key)
-            .map(|stored| stored_event(&stored.payload))
-            .collect();
+        let history = stream_records(&root, &self.category, &id.stream_key());
 
         let at = version_of(history.len() as u64);
         // `from` is 1-based and inclusive; a cursor past the tail reads
         // nothing.
         let start = from.map_or(0, |sequence| (sequence.get() - 1) as usize);
-        let events = if start >= history.len() {
+        let records = if start >= history.len() {
             Vec::new()
         } else {
             history[start..].to_vec()
         };
 
-        // The pair is consistent by construction: nonempty events only
-        // come from a nonempty history, whose observation is `Exact`,
-        // so the misshapen-slice error is unreachable.
-        Ok(StreamSlice::new(events, at).expect("nonempty events imply an Exact observation"))
+        // Nonempty records only come from a nonempty history, whose
+        // observation is `Exact`.
+        Ok(StreamSlice::new(records, at).expect("nonempty records imply an Exact observation"))
     }
 
     async fn load_category(
@@ -328,9 +370,6 @@ where
         let observed = root.head(&self.category, &key);
 
         if !super::batch::expectation_satisfied(expected, observed) {
-            // The pair is a genuine conflict because it is only built
-            // when the check just failed, so the not-a-conflict error
-            // is unreachable.
             return Err(AppendError::Conflict(
                 VersionConflict::new(expected, observed)
                     .expect("the expectation just failed against the observation"),
@@ -341,10 +380,117 @@ where
             StreamVersion::NoStream => 0,
             StreamVersion::Exact(sequence) => sequence.get(),
         };
-        for event in events.as_slice() {
-            root.append_erased(&self.category, &key, Arc::new(event.clone()));
+        for record in events.records() {
+            root.append_erased(
+                &self.category,
+                &key,
+                Arc::new(record.event().clone()),
+                record.metadata().clone(),
+            );
         }
-        let position = count + events.as_slice().len() as u64;
+        let position = count + events.records().len() as u64;
         Ok(StreamSequence::new(position).expect("a batch holds at least one event"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Noted;
+
+    impl Event for Noted {
+        type EntityId = ();
+
+        fn event_type(&self) -> String {
+            "Noted".to_owned()
+        }
+
+        fn get_id(&self) -> Self::EntityId {}
+    }
+
+    /// The envelope written at append is the envelope stored: bare
+    /// events store the empty map, keyed events store their keys.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_envelope_written_is_the_envelope_stored() {
+        let db = InMemoryDatabase::new();
+        let store = db.category::<Noted>("envelope").expect("fresh category");
+
+        let mut envelope = EventMetadata::new();
+        envelope.insert("intent", "saga-1/order-5/2");
+        let batch = EventBatch::from_records(vec![
+            RecordedEvent::new(Noted),
+            RecordedEvent::keyed(Noted, envelope),
+        ])
+        .expect("two events are nonempty");
+        store
+            .append(ExpectedVersion::NoStream, &"s".to_owned(), &batch)
+            .await
+            .expect("append succeeds");
+
+        let root = db.root.lock().expect("event store lock poisoned");
+        let stored: Vec<&StoredEvent> = root
+            .log
+            .iter()
+            .filter(|stored| stored.category == "envelope")
+            .collect();
+        assert_eq!(stored.len(), 2);
+        assert!(stored[0].metadata.is_empty(), "a bare event stores no keys");
+        assert_eq!(
+            stored[1].metadata.get("intent"),
+            Some("saga-1/order-5/2"),
+            "a keyed event stores its envelope"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_keyed_append_loads_back_with_its_envelope() {
+        let db = InMemoryDatabase::new();
+        let store = db
+            .category::<Noted>("envelope-load")
+            .expect("fresh category");
+        crate::streams::spec::under_deadline(
+            crate::streams::spec::a_keyed_append_loads_back_with_its_envelope(
+                store,
+                str::to_owned,
+                || Noted,
+            ),
+        )
+        .await;
+    }
+
+    /// Documented v1 divergence, not an endorsement: the saga-outbox
+    /// intent-key uniqueness is postgres-storage-level only (ADR
+    /// 0010), so two appends carrying the same intent both succeed
+    /// here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duplicate_intents_are_accepted_in_memory() {
+        let db = InMemoryDatabase::new();
+        let store = db.category::<Noted>("saga-outbox").expect("fresh category");
+
+        let keyed_with_intent = |intent: &str| {
+            let mut envelope = EventMetadata::new();
+            envelope.insert("intent", intent);
+            EventBatch::from_records(vec![RecordedEvent::keyed(Noted, envelope)])
+                .expect("one event is nonempty")
+        };
+
+        store
+            .append(
+                ExpectedVersion::NoStream,
+                &"order-5".to_owned(),
+                &keyed_with_intent("saga-1/order-5/2"),
+            )
+            .await
+            .expect("the first keyed append succeeds");
+        store
+            .append(
+                ExpectedVersion::Any,
+                &"order-5".to_owned(),
+                &keyed_with_intent("saga-1/order-5/2"),
+            )
+            .await
+            .expect("the duplicate intent is accepted, as documented for v1");
     }
 }

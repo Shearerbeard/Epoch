@@ -75,8 +75,7 @@ pub enum BatchConstraint {
 }
 
 impl BatchConstraint {
-    /// Satisfaction against the head observed under the batch's lock -
-    /// the same observation single append checks (ADR 0006).
+    /// Whether the constraint holds against an observed head.
     pub fn satisfied_by(self, observed: StreamVersion) -> bool {
         match self {
             Self::StreamExists => matches!(observed, StreamVersion::Exact(_)),
@@ -86,8 +85,7 @@ impl BatchConstraint {
     }
 }
 
-/// A write's expectation against the head observed under the batch's
-/// lock, evaluated exactly as single append evaluates it (ADR 0006).
+/// Whether a write's expectation holds against an observed head.
 pub(crate) fn expectation_satisfied(expected: ExpectedVersion, observed: StreamVersion) -> bool {
     match expected {
         ExpectedVersion::Any => true,
@@ -351,7 +349,7 @@ where
     ConstraintViolated(ConstraintViolation),
     /// A lock could not be taken inside the batch's wait bound. The
     /// batch rolled back whole and the call is safe to retry.
-    #[error("timed out after {0:?} waiting for a stream lock; retryable")]
+    #[error("timed out after {0:?} waiting for the writer lock; retryable")]
     LockTimeout(Duration),
     /// The backend failed before the batch could be decided.
     #[error(transparent)]

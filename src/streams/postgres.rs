@@ -3,17 +3,32 @@
 //! (ADR 0005): clones share one pool and one category, so concurrent
 //! writers contend on the same stored streams.
 //!
-//! Append atomicity. One transaction takes a per-stream
-//! `pg_advisory_xact_lock`, then reads the stream's position, then
-//! writes. Rivals on one stream serialize on that lock, and the position
-//! read is a statement that cannot start until the lock is held: under
-//! READ COMMITTED it therefore takes its snapshot after the winner
-//! committed and observes the winner's rows, so the loser conflicts
-//! instead of overwriting. The lock is transaction-scoped, so a
-//! cancelled future releases it at rollback rather than leaking a
-//! session-level lock. The unique position constraint in the first
-//! migration step backstops the same invariant at the storage layer,
-//! alongside a check constraint that keeps positions 1-based.
+//! Append atomicity, single-writer funnel (ADR 0010 post-pivot).
+//! Every event transaction - single append or atomic batch - first
+//! takes one global transaction-scoped advisory lock, so exactly one
+//! writer is ever in flight. That makes insert order commit order by
+//! construction, which is the property the feed's plain-maximum
+//! cursor rests on: no event can become visible below an already
+//! committed value. The version check runs inside the funnel, so its
+//! head observation sees no concurrent writer. The lock is
+//! transaction-scoped, so a cancelled future releases it at rollback
+//! rather than leaking.
+//!
+//! The funnel's ordering theorem rests on operating assumptions the
+//! schema cannot enforce; every writer of `stream_events` must honor
+//! them, forever. Every writer goes through the funnel above - raw
+//! SQL, backfills, second services, and pre-funnel binaries from a
+//! mixed-version deploy included. The backing sequence keeps its
+//! default `CACHE 1`: a larger cache preallocates per session, so two
+//! sessions can commit cached values out of draw order even while
+//! obeying the lock. Nobody rewinds the sequence (`setval`,
+//! `RESTART`): a re-issued value can land below an already-visible
+//! one. Transactions run at the default READ COMMITTED: a pool
+//! configured for a stronger isolation can stale the head read that
+//! backs the version check. A violator's damage is scoped to the
+//! categories it writes, and a late out-of-order commit below an
+//! advanced feed cursor is silent - no assertion, constraint, or
+//! poll invariant can detect it after the fact.
 //!
 //! Read consistency. Each load is a single statement, which is its own
 //! snapshot: a rival append committing mid-read cannot split a read
@@ -32,22 +47,76 @@ use tokio_postgres::{NoTls, Row};
 use crate::decider::Event;
 
 use super::{
-    AppendError, CategoryEvent, EventBatch, EventStreams, ExpectedVersion, LoadError, StreamId,
-    StreamSequence, StreamSlice, StreamState, StreamVersion, VersionConflict,
+    batch::expectation_satisfied, AppendError, CategoryEvent, EventBatch, EventMetadata,
+    EventStreams, ExpectedVersion, LoadError, RecordedEvent, StreamId, StreamSequence, StreamSlice,
+    StreamState, StreamVersion, VersionConflict,
 };
 
 mod batch;
+mod feed;
 mod migrations;
 
 pub use batch::{EncodedEvent, PgBatch, PgBatchBuilder, PgDatabase, PgWriteError};
+pub use feed::PgEventFeed;
 
 /// The connection pool every store in this module runs on.
 pub type PgPool = Pool<PostgresConnectionManager<NoTls>>;
+
+/// The single-writer funnel: one advisory lock every event
+/// transaction takes before anything else. Distinct from the
+/// migration lock and from every two-int stream lock; spells
+/// "epwriter".
+pub(crate) const WRITER_LOCK: i64 = 0x6570_7772_6974_6572;
+
+/// The default funnel wait bound for both write paths (single append
+/// and atomic batch). Long enough that a writer queued behind
+/// ordinary work still commits, short enough that a wedged holder
+/// surfaces as a retryable timeout rather than a hang.
+pub(crate) const DEFAULT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The default idle-in-transaction bound for the write paths: how
+/// long an event transaction may sit without an active statement
+/// before the server terminates it, evicting a wedged holder.
+/// Active SQL, commit, and total client duration remain outside this
+/// bound.
+pub(crate) const DEFAULT_IDLE_TRANSACTION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+/// A `Duration` as integer milliseconds for a timeout GUC. The value
+/// is a count, so there is nothing a caller can inject; `.max(1)`
+/// keeps zero unsettable for both writer bounds - the funnel wait
+/// ("wait forever") and the idle-in-transaction bound ("no limit").
+pub(crate) fn lock_timeout_ms(timeout: std::time::Duration) -> u64 {
+    u64::try_from(timeout.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+/// Apply both writer timeout bounds to one event transaction before
+/// the funnel acquisition: `SET LOCAL lock_timeout` bounding the
+/// funnel wait and `SET LOCAL idle_in_transaction_session_timeout`
+/// bounding idle time, in one command. A bound the server rejects as
+/// out of range fails loudly rather than saturating.
+async fn configure_writer_timeouts(
+    tx: &tokio_postgres::Transaction<'_>,
+    lock_timeout: std::time::Duration,
+    idle_transaction_timeout: std::time::Duration,
+) -> Result<(), tokio_postgres::Error> {
+    let lock_timeout = lock_timeout_ms(lock_timeout);
+    let idle_transaction_timeout = lock_timeout_ms(idle_transaction_timeout);
+    tx.batch_execute(&format!(
+        "SET LOCAL lock_timeout = '{lock_timeout}ms'; \
+         SET LOCAL idle_in_transaction_session_timeout = '{idle_transaction_timeout}ms';"
+    ))
+    .await
+}
 
 /// One category of streams in PostgreSQL, addressed by a typed id.
 pub struct PgEventStreams<Id, E> {
     pool: PgPool,
     category: String,
+    lock_timeout: std::time::Duration,
+    idle_transaction_timeout: std::time::Duration,
     _marker: PhantomData<fn() -> (Id, E)>,
 }
 
@@ -58,7 +127,32 @@ impl<Id, E> PgEventStreams<Id, E> {
         Self {
             pool,
             category: category.to_owned(),
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
+            idle_transaction_timeout: DEFAULT_IDLE_TRANSACTION_TIMEOUT,
             _marker: PhantomData,
+        }
+    }
+
+    /// Set the funnel wait bound. A wedged writer surfaces as the
+    /// retryable [`AppendError::LockTimeout`] when the lock wait
+    /// expires, never a version conflict (ADR 0010).
+    pub fn with_lock_timeout(self, lock_timeout: std::time::Duration) -> Self {
+        Self {
+            lock_timeout,
+            ..self
+        }
+    }
+
+    /// Set the idle-in-transaction bound: how long an event
+    /// transaction may sit without an active statement before the
+    /// server terminates it, evicting a wedged writer.
+    pub fn with_idle_transaction_timeout(
+        self,
+        idle_transaction_timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            idle_transaction_timeout,
+            ..self
         }
     }
 
@@ -92,6 +186,8 @@ impl<Id, E> Clone for PgEventStreams<Id, E> {
         Self {
             pool: self.pool.clone(),
             category: self.category.clone(),
+            lock_timeout: self.lock_timeout,
+            idle_transaction_timeout: self.idle_transaction_timeout,
             _marker: PhantomData,
         }
     }
@@ -121,8 +217,35 @@ pub enum PgStreamsError {
     #[error("event payload serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    /// A server-side lock wait expired: the bounded operation made no
+    /// progress and may be retried (the feed-side counterpart of
+    /// [`AppendError::LockTimeout`]).
+    #[error("lock wait timed out after {0:?}")]
+    LockTimeout(std::time::Duration),
+
     #[error("invalid connection config: {0}")]
     Config(String),
+}
+
+/// Lock-timeout expiry inside an append transaction is a distinct
+/// retryable outcome, never a generic backend fault (ADR 0010). Every
+/// statement after the funnel acquisition routes its failure through
+/// here so an expiry is classified the same wherever it arises - the
+/// funnel lock itself, the head read, the inserts, and the commit can
+/// all wait on locks.
+fn append_statement_error(
+    error: tokio_postgres::Error,
+    lock_timeout: std::time::Duration,
+) -> AppendError<PgStreamsError> {
+    if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) {
+        // The GUC floors zero/sub-millisecond bounds to 1ms, so the
+        // retryable payload names the bound actually in effect.
+        AppendError::LockTimeout(std::time::Duration::from_millis(lock_timeout_ms(
+            lock_timeout,
+        )))
+    } else {
+        AppendError::Backend(PgStreamsError::Connection(error))
+    }
 }
 
 /// A stream's highest stored position as the observed version: no rows
@@ -140,14 +263,19 @@ fn stored_position(raw: i64) -> u64 {
     u64::try_from(raw).expect("stored sequences are non-negative")
 }
 
-fn decode_events<'a, E>(
+/// Rows to records, each with the envelope stored beside it.
+fn decode_records<'a, E>(
     rows: impl IntoIterator<Item = &'a Row>,
-) -> Result<Vec<E>, serde_json::Error>
+) -> Result<Vec<RecordedEvent<E>>, serde_json::Error>
 where
     E: DeserializeOwned,
 {
     rows.into_iter()
-        .map(|row| serde_json::from_value(row.get("event_data")))
+        .map(|row| {
+            let event = serde_json::from_value(row.get("event_data"))?;
+            let metadata: EventMetadata = serde_json::from_value(row.get("event_metadata"))?;
+            Ok(RecordedEvent::keyed(event, metadata))
+        })
         .collect()
 }
 
@@ -164,21 +292,19 @@ where
         let conn = self.pool.get().await?;
         let rows = conn
             .query(
-                "SELECT event_data FROM stream_events \
+                "SELECT event_data, event_metadata FROM stream_events \
                  WHERE category = $1 AND stream_key = $2 \
                  ORDER BY sequence ASC",
                 &[&self.category, &key],
             )
             .await?;
 
-        let events = decode_events(&rows)?;
-        if events.is_empty() {
+        let records = decode_records(&rows)?;
+        if records.is_empty() {
             Ok(StreamState::Missing)
         } else {
-            // The nonempty invariant was just checked above, so the
-            // empty-batch error is unreachable.
             Ok(StreamState::Present(
-                EventBatch::new(events).expect("events were checked nonempty"),
+                EventBatch::from_records(records).expect("records were checked nonempty"),
             ))
         }
     }
@@ -203,13 +329,13 @@ where
         let conn = self.pool.get().await?;
         let rows = conn
             .query(
-                "SELECT s.head, e.sequence, e.event_data \
-                 FROM (SELECT COALESCE(MAX(sequence), 0) AS head \
-                         FROM stream_events \
-                        WHERE category = $1 AND stream_key = $2) s \
-                 LEFT JOIN stream_events e \
-                   ON e.category = $1 AND e.stream_key = $2 AND e.sequence >= $3 \
-                 ORDER BY e.sequence ASC",
+                "SELECT s.head, e.sequence, e.event_data, e.event_metadata \
+                  FROM (SELECT COALESCE(MAX(sequence), 0) AS head \
+                          FROM stream_events \
+                         WHERE category = $1 AND stream_key = $2) s \
+                  LEFT JOIN stream_events e \
+                    ON e.category = $1 AND e.stream_key = $2 AND e.sequence >= $3 \
+                  ORDER BY e.sequence ASC",
                 &[&self.category, &key, &lower_bound],
             )
             .await?;
@@ -223,11 +349,9 @@ where
                 .is_some_and(|sequence| stored_position(sequence) >= cursor)
         });
 
-        // The pair is consistent by construction: rows only exist for a
-        // stream whose observation is `Exact`, so the misshapen-slice
-        // error is unreachable.
+        // Rows only exist for a stream whose observation is `Exact`.
         Ok(
-            StreamSlice::new(decode_events(in_range)?, version_of(stored_position(head)))
+            StreamSlice::new(decode_records(in_range)?, version_of(stored_position(head)))
                 .expect("in-range rows imply an Exact observation"),
         )
     }
@@ -264,15 +388,13 @@ where
             .await
             .map_err(PgStreamsError::Connection)?;
 
-        // Serialize this stream's writers for the life of the
-        // transaction; see the module docs for why this rules out the
-        // lost update.
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
-            &[&self.category, &key],
-        )
-        .await
-        .map_err(PgStreamsError::Connection)?;
+        configure_writer_timeouts(&tx, self.lock_timeout, self.idle_transaction_timeout)
+            .await
+            .map_err(PgStreamsError::Connection)?;
+
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
+            .await
+            .map_err(|error| append_statement_error(error, self.lock_timeout))?;
 
         let position: i64 = tx
             .query_one(
@@ -281,20 +403,11 @@ where
                 &[&self.category, &key],
             )
             .await
-            .map_err(PgStreamsError::Connection)?
+            .map_err(|error| append_statement_error(error, self.lock_timeout))?
             .get("position");
         let observed = version_of(stored_position(position));
 
-        let satisfied = match expected {
-            ExpectedVersion::Any => true,
-            ExpectedVersion::NoStream => matches!(observed, StreamVersion::NoStream),
-            ExpectedVersion::StreamExists => matches!(observed, StreamVersion::Exact(_)),
-            ExpectedVersion::Exact(sequence) => observed == StreamVersion::Exact(sequence),
-        };
-        if !satisfied {
-            // The pair is a genuine conflict because it is only built
-            // when the check just failed, so the not-a-conflict error
-            // is unreachable.
+        if !expectation_satisfied(expected, observed) {
             return Err(AppendError::Conflict(
                 VersionConflict::new(expected, observed)
                     .expect("the expectation just failed against the observation"),
@@ -302,21 +415,33 @@ where
         }
 
         let mut next = position;
-        for event in events.as_slice() {
+        for record in events.records() {
             next += 1;
-            let event_type = event.event_type();
-            let event_data = serde_json::to_value(event).map_err(PgStreamsError::Serialization)?;
+            let event_type = record.event().event_type();
+            let event_data =
+                serde_json::to_value(record.event()).map_err(PgStreamsError::Serialization)?;
+            let event_metadata =
+                serde_json::to_value(record.metadata()).map_err(PgStreamsError::Serialization)?;
             tx.execute(
                 "INSERT INTO stream_events \
-                 (category, stream_key, event_type, sequence, event_data) \
-                 VALUES ($1, $2, $3, $4, $5)",
-                &[&self.category, &key, &event_type, &next, &event_data],
+                 (category, stream_key, event_type, sequence, event_data, event_metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &self.category,
+                    &key,
+                    &event_type,
+                    &next,
+                    &event_data,
+                    &event_metadata,
+                ],
             )
             .await
-            .map_err(PgStreamsError::Connection)?;
+            .map_err(|error| append_statement_error(error, self.lock_timeout))?;
         }
 
-        tx.commit().await.map_err(PgStreamsError::Connection)?;
+        tx.commit()
+            .await
+            .map_err(|error| append_statement_error(error, self.lock_timeout))?;
         Ok(StreamSequence::new(stored_position(next)).expect("a batch holds at least one event"))
     }
 }
@@ -330,6 +455,7 @@ mod tests {
         flash_sale_sells_exactly_the_stock, single_event_occ_race_on_empty_stream,
         single_event_occ_race_on_seeded_stream, under_deadline,
     };
+    use crate::streams::{EventMetadata, RecordedEvent};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct SomethingHappened;
@@ -364,6 +490,75 @@ mod tests {
         store
     }
 
+    /// A writer and a feed over one fresh category, per the feed
+    /// suite's fresh-store assumption: count assertions read the
+    /// whole category tail.
+    async fn writer_and_feed() -> (
+        PgEventStreams<String, SomethingHappened>,
+        PgEventFeed<SomethingHappened>,
+    ) {
+        let category = format!("feed-spec-{}", rusty_ulid::generate_ulid_string());
+        let _ = dotenv::dotenv();
+        let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
+        let pool = pool_from_conn_str(&conn_str)
+            .await
+            .expect("pg pool from EPOCH_PG_TEST_URL");
+        let store = PgEventStreams::new(pool.clone(), &category);
+        store.migrate().await.expect("schema migrates");
+        (store, PgEventFeed::new(pool, &category))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_poll_redelivers_until_acked() {
+        let (writer, feed) = writer_and_feed().await;
+        crate::streams::feed::spec::poll_redelivers_until_acked(
+            writer,
+            feed,
+            str::to_owned,
+            || SomethingHappened,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_poll_pages_the_backlog() {
+        let (writer, feed) = writer_and_feed().await;
+        crate::streams::feed::spec::poll_pages_the_backlog(writer, feed, str::to_owned, || {
+            SomethingHappened
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_ack_is_monotonic() {
+        let (writer, feed) = writer_and_feed().await;
+        crate::streams::feed::spec::ack_is_monotonic(writer, feed, str::to_owned, || {
+            SomethingHappened
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_ack_rejects_undelivered() {
+        let (writer, feed) = writer_and_feed().await;
+        crate::streams::feed::spec::ack_rejects_undelivered(writer, feed, str::to_owned, || {
+            SomethingHappened
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_delivery_carries_the_envelope() {
+        let (writer, feed) = writer_and_feed().await;
+        crate::streams::feed::spec::delivery_carries_the_envelope(
+            writer,
+            feed,
+            str::to_owned,
+            || SomethingHappened,
+        )
+        .await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn postgres_single_event_occ_race_on_empty_stream() {
         let store = store("spec-occ-empty").await;
@@ -394,6 +589,338 @@ mod tests {
             str::to_owned,
             || SomethingHappened,
         ))
+        .await;
+    }
+
+    /// Run `attempt` against a migrated store whose funnel is wedged:
+    /// a raw holder on a second connection already holds WRITER_LOCK
+    /// in an open transaction, released after the attempt returns. The
+    /// store comes back with the outcome so the caller can assert what
+    /// the timed-out attempt stored (nothing).
+    async fn against_wedged_funnel<F, O>(
+        lock_timeout: std::time::Duration,
+        attempt: impl FnOnce(PgEventStreams<String, SomethingHappened>) -> F,
+    ) -> (PgEventStreams<String, SomethingHappened>, O)
+    where
+        F: std::future::Future<Output = O>,
+    {
+        let _ = dotenv::dotenv();
+        let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
+        let pool = pool_from_conn_str(&conn_str)
+            .await
+            .expect("pg pool from EPOCH_PG_TEST_URL");
+        let store = PgEventStreams::<String, SomethingHappened>::new(pool.clone(), "spec-funnel")
+            .with_lock_timeout(lock_timeout);
+        store.migrate().await.expect("schema migrates");
+
+        let mut holder = pool.get().await.expect("a second connection");
+        let held = holder.transaction().await.expect("holder transaction");
+        held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
+            .await
+            .expect("the holder takes the funnel lock");
+
+        let outcome = attempt(store.clone()).await;
+        held.rollback().await.expect("the holder releases");
+        (store, outcome)
+    }
+
+    /// A wedged writer holding the funnel is a retryable timeout on
+    /// the append path, never a hang and never a conflict.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wedged_funnel_is_a_retryable_append_timeout() {
+        under_deadline(async {
+            let bound = std::time::Duration::from_millis(100);
+            let key = format!("k-{}", rusty_ulid::generate_ulid_string());
+            let (store, outcome) = against_wedged_funnel(bound, |store| {
+                let key = key.clone();
+                async move {
+                    store
+                        .append(
+                            ExpectedVersion::NoStream,
+                            &key,
+                            &EventBatch::new(vec![SomethingHappened])
+                                .expect("one event is nonempty"),
+                        )
+                        .await
+                }
+            })
+            .await;
+            assert!(
+                matches!(outcome, Err(AppendError::LockTimeout(reported)) if reported == bound),
+                "expected a retryable funnel timeout, got {outcome:?}"
+            );
+            assert_eq!(
+                store.load_stream(&key).await.expect("load succeeds"),
+                StreamState::Missing,
+                "a timed-out append stores nothing"
+            );
+        })
+        .await;
+    }
+
+    /// A zero configured bound is floored to 1ms server-side, and the
+    /// timeout payload reports that effective bound, not the zero the
+    /// caller configured - a retry policy sizing its backoff from the
+    /// payload must not read a bound that was never in effect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_zero_funnel_bound_times_out_reporting_the_server_floor() {
+        under_deadline(async {
+            let key = format!("k-{}", rusty_ulid::generate_ulid_string());
+            let (_, outcome) = against_wedged_funnel(std::time::Duration::ZERO, |store| {
+                let key = key.clone();
+                async move {
+                    store
+                        .append(
+                            ExpectedVersion::NoStream,
+                            &key,
+                            &EventBatch::new(vec![SomethingHappened])
+                                .expect("one event is nonempty"),
+                        )
+                        .await
+                }
+            })
+            .await;
+            assert!(
+                matches!(outcome, Err(AppendError::LockTimeout(reported)) if reported == std::time::Duration::from_millis(1)),
+                "expected the floored 1ms bound, got {outcome:?}"
+            );
+        })
+        .await;
+    }
+
+    /// The funnel's discriminating proof: a holder inside WRITER_LOCK
+    /// with an uncommitted insert blocks a rival store append - the
+    /// rival is observed waiting on the advisory lock in pg_locks, not
+    /// merely unscheduled - and a poll in that window delivers nothing
+    /// the holder or the rival wrote; after the holder rolls back, the
+    /// rival commits above the holder's burned value and one poll
+    /// delivers it. Without the funnel the rival would not wait on the
+    /// holder at all, so the observed wait is what proves serialization.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_funnel_holder_blocks_a_rival_append_until_release() {
+        use crate::streams::feed::{ConsumerGroup, EventFeed, PollLimit};
+
+        under_deadline(async {
+            let _ = dotenv::dotenv();
+            let conn_str =
+                std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
+            let pool = pool_from_conn_str(&conn_str)
+                .await
+                .expect("pg pool from EPOCH_PG_TEST_URL");
+            let category = format!("feed-funnel-{}", rusty_ulid::generate_ulid_string());
+            let store = PgEventStreams::<String, SomethingHappened>::new(pool.clone(), &category);
+            store.migrate().await.expect("schema migrates");
+            let feed = PgEventFeed::<SomethingHappened>::new(pool.clone(), &category);
+            let group = ConsumerGroup::new("funnel-testers").expect("non-empty group");
+
+            let seed_key = format!("seed-{}", rusty_ulid::generate_ulid_string());
+            store
+                .append(
+                    ExpectedVersion::NoStream,
+                    &seed_key,
+                    &EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty"),
+                )
+                .await
+                .expect("seed append");
+
+            // The holder: the funnel lock plus one uncommitted
+            // insert; its drawn sequence value burns at rollback.
+            let mut holder_conn = pool.get().await.expect("a second connection");
+            let held = holder_conn.transaction().await.expect("holder transaction");
+            held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
+                .await
+                .expect("the holder takes the funnel");
+            held.execute(
+                "INSERT INTO stream_events \
+                 (category, stream_key, event_type, sequence, event_data, event_metadata) \
+                 VALUES ($1, $2, 'Held', 1, '\"{}\"'::jsonb, '{}'::jsonb)",
+                &[
+                    &category,
+                    &format!("held-{}", rusty_ulid::generate_ulid_string()),
+                ],
+            )
+            .await
+            .expect("the uncommitted insert");
+            // The value the holder drew and will burn at rollback,
+            // read inside its own session (CURRVAL is session-local).
+            let burned: i64 = held
+                .query_one(
+                    "SELECT CURRVAL('stream_events_global_sequence_seq') AS drawn",
+                    &[],
+                )
+                .await
+                .expect("read the holder's drawn value")
+                .get("drawn");
+
+            // A rival store append through the funnel must block on
+            // the holder. The rival rides its own max_size(1) pool, so
+            // its backend's pid - read before the spawn, from the one
+            // pooled connection, which the append then leases - is
+            // known, and the pg_locks probe below can name that exact
+            // waiter instead of any waiter with the funnel key.
+            let (rival_pool, rival_pid) = {
+                let config: tokio_postgres::Config =
+                    conn_str.parse().expect("a valid connection string");
+                let pool = PgPool::builder()
+                    .max_size(1)
+                    .build(PostgresConnectionManager::new(config, NoTls))
+                    .await
+                    .expect("the rival's single-connection pool builds");
+                let conn = pool.get().await.expect("the rival pool's connection");
+                let pid: i32 = conn
+                    .query_one("SELECT pg_backend_pid() AS pid", &[])
+                    .await
+                    .expect("the rival backend's pid")
+                    .get("pid");
+                drop(conn);
+                (pool, pid)
+            };
+            let rival = {
+                let store = PgEventStreams::<String, SomethingHappened>::new(rival_pool, &category);
+                let key = format!("rival-{}", rusty_ulid::generate_ulid_string());
+                tokio::spawn(async move {
+                    store
+                        .append(
+                            ExpectedVersion::NoStream,
+                            &key,
+                            &EventBatch::new(vec![SomethingHappened])
+                                .expect("one event is nonempty"),
+                        )
+                        .await
+                })
+            };
+
+            // Establish that the rival actually waits on the funnel:
+            // an ungranted advisory-lock row for WRITER_LOCK in
+            // pg_locks, bound to the rival's own backend pid so an
+            // unrelated session's waiter cannot satisfy the probe. A
+            // sleep here could only guess at scheduling; the observed
+            // row is the wait itself. Bounded: two seconds, then the
+            // test fails.
+            // pg_locks stores the halves as oid (unsigned), hence u32.
+            let classid = u32::try_from(WRITER_LOCK >> 32).expect("the lock key's high half");
+            let objid = u32::try_from(WRITER_LOCK & 0xffff_ffff).expect("the lock key's low half");
+            let mut observed_wait = false;
+            for _ in 0..40 {
+                let waiting: bool = pool
+                    .get()
+                    .await
+                    .expect("a monitor connection")
+                    .query_one(
+                        "SELECT EXISTS(\
+                         SELECT 1 FROM pg_locks \
+                         WHERE locktype = 'advisory' AND classid = $1 AND objid = $2 \
+                         AND pid = $3 AND NOT granted)",
+                        &[&classid, &objid, &rival_pid],
+                    )
+                    .await
+                    .expect("pg_locks probe")
+                    .get(0);
+                if waiting {
+                    observed_wait = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(
+                observed_wait,
+                "no writer ever waited on the holder's funnel lock"
+            );
+            assert!(!rival.is_finished(), "the rival append waits on the funnel");
+
+            // A poll in the window delivers only the seed: the
+            // holder's row is uncommitted and invisible, the rival's
+            // does not exist yet.
+            let windowed = feed
+                .poll(&group, PollLimit::new(10).expect("nonzero limit"))
+                .await
+                .expect("poll inside the holder's window");
+            assert_eq!(windowed.len(), 1, "only the seed is visible in the window");
+            let tip = windowed.last().expect("the seed entry").position();
+            feed.ack(&group, tip).await.expect("ack the seed tip");
+
+            held.rollback().await.expect("the holder releases");
+            rival
+                .await
+                .expect("rival task")
+                .expect("the rival commits once the funnel frees");
+
+            // The rival's event delivers above the acked tip, and
+            // above the value the holder burned: insert order is
+            // commit order, and the burn never appears.
+            let settled = feed
+                .poll(&group, PollLimit::new(10).expect("nonzero limit"))
+                .await
+                .expect("poll after the release");
+            assert_eq!(
+                settled.len(),
+                1,
+                "the rival's event delivers after the release"
+            );
+            assert!(
+                settled[0].position() > tip,
+                "the rival committed above the acked tip"
+            );
+            let burned = u64::try_from(burned).expect("a sequence value is non-negative");
+            assert!(
+                settled[0].position().get() > burned,
+                "the rival committed above the holder's burned value"
+            );
+        })
+        .await;
+    }
+
+    /// The envelope a keyed append carries is the envelope the row
+    /// stores; a bare append stores the empty object (ADR 0010's seam).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_the_envelope_written_is_the_envelope_stored() {
+        let store = store("spec-envelope").await;
+        let key = format!("stream-{}", rusty_ulid::generate_ulid_string());
+
+        let mut envelope = EventMetadata::new();
+        envelope.insert("intent", "saga-1/order-5/2");
+        let batch = EventBatch::from_records(vec![
+            RecordedEvent::new(SomethingHappened),
+            RecordedEvent::keyed(SomethingHappened, envelope),
+        ])
+        .expect("two events are nonempty");
+        store
+            .append(ExpectedVersion::NoStream, &key, &batch)
+            .await
+            .expect("append succeeds");
+
+        let conn = store.pool.get().await.expect("assertion connection");
+        let rows = conn
+            .query(
+                "SELECT event_metadata FROM stream_events \
+                 WHERE category = $1 AND stream_key = $2 ORDER BY sequence",
+                &[&"spec-envelope", &key],
+            )
+            .await
+            .expect("envelope read");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].get::<_, serde_json::Value>("event_metadata"),
+            serde_json::json!({}),
+            "a bare event stores the empty envelope"
+        );
+        assert_eq!(
+            rows[1].get::<_, serde_json::Value>("event_metadata"),
+            serde_json::json!({"intent": "saga-1/order-5/2"}),
+            "a keyed event stores its envelope"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_keyed_append_loads_back_with_its_envelope() {
+        let store = store("spec-envelope-load").await;
+        crate::streams::spec::under_deadline(
+            crate::streams::spec::a_keyed_append_loads_back_with_its_envelope(
+                store,
+                str::to_owned,
+                || SomethingHappened,
+            ),
+        )
         .await;
     }
 }

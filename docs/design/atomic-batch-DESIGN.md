@@ -6,9 +6,9 @@ the concrete shapes: the type surface, the postgres mechanics, the
 in-memory store design, and the future-backend scoping. The ADR stays
 readable; the details live here.
 
-Anchor stamp: claims verified against `card/e3` commit `4165ab2`
-(2026-08-07, the E3 implementation range, in review). Re-verifying
-bumps this stamp.
+Anchor stamp: claims verified against `card/e19-repair` commit
+`746deba` (2026-09-08, the post-pivot funnel surface under final
+review). Re-verifying bumps this stamp.
 
 ## Type surface (backend-neutral, `src/streams/batch.rs`)
 
@@ -71,60 +71,58 @@ reproduces the append conflict payload exactly.
 ## Postgres implementation (`src/streams/postgres/batch.rs`)
 
 ```rust
-pub struct PgDatabase { /* pool, lock_timeout */ }
+pub struct PgDatabase { /* pool, lock_timeout, idle_timeout */ }
 impl PgDatabase {
-    pub fn new(pool: PgPool) -> Self;              // default bound 5s
+    pub fn new(pool: PgPool) -> Self;              // default lock bound 5s, idle 30s
     pub fn with_lock_timeout(self, bound: Duration) -> Self;
+    pub fn with_idle_transaction_timeout(self, bound: Duration) -> Self;
     pub fn batch(&self) -> PgBatchBuilder;         // Batch<EncodedEvent>
 }
 impl PgBatchBuilder {
     /// serde_json encoding here, at push - PgWriteError::Encoding
-    /// before any transaction.
-    pub fn write<Id, E: Serialize>(...) -> Result<&mut Self, PgWriteError>;
+    /// before any transaction. Not a fluent builder: each call takes
+    /// `&mut self` and returns `Result<(), PgWriteError>`.
+    pub fn write<Id, E: Serialize>(&mut self, ...)
+        -> Result<(), PgWriteError>;
 }
 ```
 
-`transact`, one transaction end to end:
+`transact`, one transaction end to end. The pre-pivot design ordered
+per-stream advisory locks (hashtext hashing, then client-side sort and
+dedupe via a `lock_order` function); ADR 0010's pivot replaced that
+with one global writer lock, so the sequence is now:
 
-1. `SET LOCAL lock_timeout = '<n>ms'` - the value derives from a
-   `Duration` (milliseconds, floored at 1 so it can never mean "wait
-   forever"); nothing caller-controlled is interpolated.
-2. One round trip hashes every addressed `(category, stream_key)`
-   pair: `SELECT hashtext(...), hashtext(...) FROM unnest($1, $2)`.
-   `hashtext` is postgres-internal but is what the landed append path
-   already keys its locks on; sharing it is the ADR's lock-identity
-   point.
-3. The `(i32, i32)` tuples are sorted and deduplicated client-side
-   (`lock_order`, a pure function pinned by unit tests), then one
-   `SELECT pg_advisory_xact_lock($1, $2)` per tuple in that order.
-   Client-side ordering was chosen over a single-statement
-   `SELECT ... FROM (... ORDER BY ...)` form because acquisition
-   order would then rest on target-list evaluation order, which
-   postgres does not promise.
-4. Every addressed head in one query under the held locks:
+1. `SET LOCAL lock_timeout = '<n>ms'; SET LOCAL
+   idle_in_transaction_session_timeout = '<n>ms'` - one command, two
+   statements. Both values derive from a `Duration` (milliseconds,
+   floored at 1 so they can never mean "wait forever" or "no limit");
+   nothing caller-controlled is interpolated, and a value the server
+   rejects as out of range fails loudly rather than saturating.
+2. One global writer lock: `SELECT pg_advisory_xact_lock($1)` with
+   `WRITER_LOCK`, the same funnel single append takes, so exactly one
+   event transaction runs at a time and insert order is commit order.
+3. Every addressed head in one query under the held lock:
    `COALESCE(MAX(sequence), 0)` grouped over the addressed pairs.
-5. Constraints checked, then write expectations; any failure returns
+4. Constraints checked, then write expectations; any failure returns
    before the first insert and the transaction drops (rollback).
-6. Inserts at head+1.. per stream into the landed `stream_events`
+5. Inserts at head+1.. per stream into the landed `stream_events`
    table (no schema change; the
    `UNIQUE (category, stream_key, sequence)` index is the storage
    backstop), then commit.
 
 SQLSTATE `55P03` (lock_not_available) maps to
 `TransactError::LockTimeout`; other database errors map to
-`Backend`. The 5-second default bound is an E3 implementation choice
-the ADR delegated; revisit alongside consumer experience.
+`Backend`. The 5-second default lock bound and 30-second default idle
+bound are E3/C4 implementation choices the ADR delegated; revisit
+alongside consumer experience.
 
 Round-trip cost:
 
-- 1 to hash the addressed pairs
-- 1 per advisory lock
+- 1 to configure the two timeout GUCs
+- 1 for the global writer lock
 - 1 for the heads query
 - 1 per event insert
-- 1 commit Fine for the two-to-three-stream
-batches the consumers need; a batch spanning dozens of streams would
-want a pipelined acquisition, which must then re-solve the
-evaluation-order problem above.
+- 1 commit
 
 ## In-memory store design (`src/streams/in_memory.rs`)
 

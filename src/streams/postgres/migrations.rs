@@ -2,10 +2,9 @@
 //!
 //! Steps are ordered, named SQL files under `migrations/`, embedded
 //! verbatim, and recorded in an applied ledger
-//! (`epoch_schema_migrations`) inside the database - replacing the
-//! single CREATE-IF-NOT-EXISTS batch that could never amend an
-//! existing table. A database created at any earlier shape reaches
-//! the current schema through [`PgEventStreams::migrate`] alone.
+//! (`epoch_schema_migrations`) inside the database. A database
+//! created at any earlier shape reaches the current schema through
+//! [`PgEventStreams::migrate`] alone.
 //!
 //! A step file is IMMUTABLE once any database has applied it. An
 //! edit to an applied step retroactively changes what fresh
@@ -15,10 +14,10 @@
 //! the schema is the composition of the steps, readable in order.
 //!
 //! The whole run - lock, ledger read, pending steps, ledger writes -
-//! is one transaction behind the advisory-lock discipline the append
-//! path already uses, so concurrent callers serialize and the later
-//! ones find nothing pending. DDL in postgres is transactional, so a
-//! failed step rolls everything back, the ledger table included.
+//! is one transaction behind an advisory lock, so concurrent callers
+//! serialize and the later ones find nothing pending. DDL in
+//! postgres is transactional, so a failed step rolls everything
+//! back, the ledger table included.
 
 use std::collections::HashSet;
 
@@ -54,6 +53,21 @@ const MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "pin-sequences-positive",
         sql: include_str!("migrations/0002-pin-sequences-positive.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "event-metadata",
+        sql: include_str!("migrations/0003-event-metadata.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "feed-cursors-and-intent-key",
+        sql: include_str!("migrations/0004-feed-cursors-and-intent-key.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "feed-cursor-non-negativity",
+        sql: include_str!("migrations/0005-feed-cursor-non-negativity.sql"),
     },
 ];
 
@@ -246,8 +260,11 @@ mod tests {
             vec![
                 (1, "create-stream-events".to_owned()),
                 (2, "pin-sequences-positive".to_owned()),
+                (3, "event-metadata".to_owned()),
+                (4, "feed-cursors-and-intent-key".to_owned()),
+                (5, "feed-cursor-non-negativity".to_owned()),
             ],
-            "both steps recorded in order"
+            "every step recorded in order"
         );
 
         let conn = pool.get().await.expect("verification connection");
@@ -271,7 +288,6 @@ mod tests {
         let fresh = pool_for("epoch_migration_fresh").await;
         let current = pool_for("epoch_migration_current").await;
 
-        // The already-current database exists before the storm hits it.
         store(&current)
             .migrate()
             .await

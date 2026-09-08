@@ -1,9 +1,10 @@
-# The event feed's cursor runs on an allocation ledger, not on sequence adjacency
+# The event feed's cursor runs on a single-writer funnel, not an allocation ledger
 
-- Status: proposed (accepted at the feed card's gate U, after its gate A
-  revises this record with the measured spike numbers; supersedes
-  nothing - it discharges ADR 0007's deferral by that record's own
-  trigger, the pull having happened)
+- Status: proposed (final U acceptance pending; revised at the feed
+  card's gate A, 2026-08-23, with the measured spike numbers and the
+  executed pivot to option 3 - supersedes nothing, and discharges
+  ADR 0007's deferral by that record's own trigger, the pull having
+  happened)
 - Date: 2026-08 (drafted 2026-08-23 ahead of implementation, per the
   wave plan's session-order ruling; the gate-S spike is chartered below
   as this record's validation gate)
@@ -62,9 +63,12 @@ inherits whatever cursor semantics land here.
   production-grade system surveyed (Axon tracking processors, Fmodel's
   saga manager, EvidentDB streams) puts a persisted checkpoint under
   the reaction loop.
-- The event write path MUST stay concurrent. Postgres does not need a
-  single-writer funnel for event transactions; ADR 0006's premise
-  stands unless measurement says otherwise.
+- The event write path MUST stay concurrent (historic - overridden by
+  the pre-chartered spike pivot: the measured append amplification
+  failed its threshold, so the single-writer funnel shipped instead).
+  Postgres does not need a single-writer funnel for event
+  transactions; ADR 0006's premise stands unless measurement says
+  otherwise.
 - Adoption MUST be measured before it is forced on consumers: the
   ledger's write amplification gets a spike with a pre-registered
   verdict, not a post-hoc rationalization.
@@ -104,117 +108,92 @@ inherits whatever cursor semantics land here.
    Option 2 the single writer - while this record keeps its own
    four-option numbering; the mapping is stated here once.
 4. **Allocation ledger with serialized allocation and a row-lock
-   reaper (chosen).** Per-transaction sequence ranges drawn from the
-   shared sequence object in a short serialized allocation
-   transaction; guarded state transitions; a reaper built on row
-   locks rather than transaction introspection.
+   reaper (chosen at design time, rejected by the spike).**
+   Per-transaction sequence ranges drawn from the shared sequence
+   object in a short serialized allocation transaction; guarded state
+   transitions; a reaper built on row locks rather than transaction
+   introspection.
 
 ## Decision outcome
 
-Option 4. The feed does not read `global_sequence` adjacency at all:
-it reads a ledger of allocation ranges, and the cursor advances over
-resolved ranges in `first_seq` order. Sequence values that appear in
-no ledger row - values burned by an aborted allocation, and the
-pre-existing gaps of the BIGSERIAL era - are not feed sequences and
-the cursor never waits on them. The figure's failure mode is closed
-by construction rather than by vigilance: an event cannot become
-visible except through a ledger row that was already visible, in
-order, before it.
+Option 4 at design time; option 3 as shipped. The chartered spike
+measured option 4's cost and failed its pre-registered append
+threshold, so the pivot this record named in advance executed. The
+feed does not read `global_sequence` adjacency with tolerance, and it
+no longer reads a ledger either. One serialized writer fronts every
+event transaction, so insert order is commit order by construction;
+the cursor is a plain maximum over the committed log. The figure's failure mode is closed by construction on the write
+side - no event transaction is ever in flight below a committed
+value, so a poll reading `WHERE global_sequence > cursor` can neither
+skip a committed event nor wait on a value that will never appear.
 
-### The contract, pinned
+### The contract, pinned (revised at the feed card's gate A)
 
-The feed card's implementation and its gates rest on these points;
-each is decided here.
+- **The single-writer funnel.** One transaction-scoped advisory lock
+  fronts every event transaction - single append and atomic batch
+  alike. Exactly one writer runs at a time; the version checks and
+  head observations inside the funnel are unchanged from ADR 0006.
+  The lock's wait is bounded by the same `lock_timeout` discipline,
+  so a wedged writer surfaces as the retryable
+  `AppendError::LockTimeout` on the single-append path and
+  `TransactError::LockTimeout` on the batch path, never a hang and
+  never a conflict. The bound covers each waiter, not the holder: an
+  idle holder is evicted by the idle-session timeout, but a holder
+  running active SQL or a slow commit can still hold the writer
+  indefinitely.
+- **Cursor definition.** The cursor is the highest committed
+  `global_sequence` a group has acknowledged. Contiguity is not
+  integer adjacency: values burned by rolled-back appends appear in
+  no committed row and the cursor passes them without waiting -
+  they are not feed sequences. The old BIGSERIAL-era gaps pass the
+  same way.
+- **Delivery.** At-least-once per consumer group over the committed
+  log; a crash between delivery and ack replays, and idempotency is
+  the consumer's documented obligation.
+- **Ack scope.** Delivery is per-entry and may paginate; a group's
+  cursor advances only by whole acks, monotonic and non-regressing.
+  An ack at the cursor's own position is a silent no-op; below it is
+  rejected; past the group's delivered watermark is rejected - the
+  delivered watermark is a separate value from the ack cursor and
+  moves on poll.
+- **One active poller per group in v1** - the Axon
+  tracking-processor model; the cursor row lock is the backstop.
+  Concurrent pollers per group are a later, separately chartered
+  extension.
+- **Group storage.** Per-group progress (ack cursor, delivered
+  watermark) persists per (category, group). A dead group's
+  reclamation is deleting its row - a restart from any position is
+  an operator decision, logged by whoever makes it.
+- **The keyed envelope seam.** The write path and the feed's
+  delivery carry an opaque event-metadata map; reaction keys ride it
+  end to end. The outbox category's intent-key uniqueness index is
+  storage-level and landed with the feed's migrations.
+- **Latency.** v1 ships polling. The LISTEN/NOTIFY push optimization
+  is deferred: the feed trait's poll is pull-shaped, so the
+  optimization belongs to a wait-capable poll variant, chartered
+  separately when a consumer needs sub-poll-interval latency.
+- **Feed lock wait (C3).** `PgEventFeed::with_lock_timeout` bounds
+  each poll/ack lock wait at 5s by default. A poll surfaces an expiry
+  directly as `PgStreamsError::LockTimeout(effective duration)`; an
+  ack wraps the same expiry in `AckError::Backend`. Feed readers never
+  take the writer lock.
+- **Writer idle eviction (C4).** Both writer handles -
+  `PgEventStreams` and `PgDatabase` - bound an idle transaction at 30s
+  by default via the `idle_in_transaction_session_timeout` GUC, set by
+  `with_idle_transaction_timeout`, separate from the 5s
+  `with_lock_timeout` wait. Both bounds floor a zero or sub-millisecond
+  value to 1ms; a value the server rejects as out of range fails as a
+  backend error.
 
-- **Ledger row scope.** One ledger row per event transaction, not
-  per event: `(first_seq, last_seq, txid, state)`. A single-stream
-  append and an E3 multi-stream batch are each one event transaction
-  and take one allocation round-trip. The range itself joins the row
-  to its events: every event row the transaction writes carries a
-  `global_sequence` value from `[first_seq, last_seq]`.
-- **One counter.** Ranges are drawn from the SAME sequence object
-  that backs `global_sequence` - n `nextval` calls inside the
-  allocation transaction, atomic with its commit. A second counter
-  would diverge from the column and collide with it; the `setval`
-  alternative is rejected because it rewinds visibility (a rewind
-  re-issues values whose earlier owners may already be visible). The
-  BIGSERIAL column default is retired by migration, `setval` to the
-  current max first, and the event insert paths write explicit
-  sequence values from the allocated range. The migration runs
-  through the versioned-migration mechanism the schema-migration card
-  ships; its content (the retirement) is the feed card's.
-- **Serialized allocation.** The allocation critical section - draw,
-  insert ledger row, commit - runs under one postgres advisory lock.
-  Because all allocations serialize, a ledger row with a higher
-  `first_seq` became visible strictly after every row with lower
-  values committed. That is what makes the burn claim a theorem
-  rather than an assumption: if a poll sees a visible row and no row
-  covering some lower value, no allocation for that value can still
-  be in flight - it must have committed (and be visible, a
-  contradiction) or never have landed (the allocation transaction
-  aborted before insert, or the value predates the ledger). A gap
-  below a visible row is provably burned. Un-serialized allocation
-  commits could reorder, reintroducing the silent skip one layer up:
-  the cursor would treat a not-yet-committed lower range as burned,
-  then deliver its events behind itself.
-- **States and guarded transitions.** A row is born IN_FLIGHT with a
-  NULL txid. The event transaction's first statement claims the row -
-  it records its txid under the same IN_FLIGHT guard, so a reaped row
-  rejects the claim before any event is written. COMMITTED is written
-  only by the event transaction, as `UPDATE ... WHERE state =
-  'IN_FLIGHT'`; zero rows updated aborts the append loudly rather than
-  committing events no live row covers. ABORTED is written two ways:
-  by the client on a caught rollback, and by the reaper below. No
-  other transitions exist, so a resolved row's events are exactly the
-  committed ones - reaping can never orphan a committed event. The
-  stored txid is diagnostics, not protocol input.
-- **The row-lock reaper.** Orphaned IN_FLIGHT rows - the client died
-  between allocation and resolution - are reaped by row lock, not by
-  transaction introspection: select candidate IN_FLIGHT/NULL rows
-  older than the age bound `FOR UPDATE`; taking the lock proves no
-  event transaction holds or is entering the claim, because the claim
-  UPDATE blocks on the same lock; after a re-check that the state is
-  still IN_FLIGHT, flip to ABORTED and commit. A late claimer then
-  finds the guarded `WHERE state = 'IN_FLIGHT'` empty and aborts
-  loudly. The race is constructive: whichever side takes the lock
-  first wins a well-defined outcome. The reaper runs inside the
-  feed's poll path, so feed liveness is reaper liveness by
-  construction - an orphan is resolved within one age bound of the
-  next poll, and a feed nobody polls holds no one hostage.
-- **Cursor definition.** The cursor is defined over resolved ledger
-  ranges in `first_seq` order. Contiguity means "the next ledger row
-  after the cursor's range, resolved" - never integer adjacency of
-  `global_sequence`. Delivery is at-least-once over the contiguous
-  resolved prefix; redelivery after a crash is the consumer's
-  idempotency obligation, as documented.
-- **Ack scope.** Delivery is per-event within a resolved range
-  (a range may span many events, and pagination inside a range is
-  allowed), but a group's cursor advances only by whole-range ack:
-  monotonic, non-regressing, and an ack naming a range not yet fully
-  delivered to the group is rejected. V1 pins ONE active poller per
-  group - the cursor row is locked for the poll's duration, the Axon
-  tracking-processor model; concurrent pollers per group are a later,
-  separately chartered extension.
-- **Aborted ranges are skippable exactly once.** A resolved ABORTED
-  range advances the cursor past itself in exactly one poll - never
-  re-delivered, never stalled on.
-- **Ledger GC and dead groups.** Terminal rows are deleted only
-  behind `min(all group cursors)`; IN_FLIGHT rows are never GC'd,
-  only reaped. A consumer group with no ack activity beyond a
-  configured horizon is excluded from the min() by an
-  operator-invoked, logged reclaim - never silently.
-- **The keyed envelope seam.** The streams write path and the feed's
-  delivery carry an opaque event-metadata map, so reaction keys ride
-  events end to end for the runner/outbox cards that consume them.
-  The shipped event interfaces widen for this as feed-card scope, and
-  the widening is implemented on BOTH backends before the schema
-  lands, so the in-memory and generic paths enforce the same
-  protocol. The intent-key uniqueness constraint on the outbox stream
-  category and the metadata column itself are feed-card schema
-  deliverables.
-- **Latency.** The feed keeps the LISTEN/NOTIFY push optimization
-  with polling as the degradation path; the reaper rides the poll
-  path either way.
+### Timeout bounds and the gap they leave
+
+The 5s lock wait and the 30s idle-session bound cover waits and idle
+time only. Neither bounds active SQL, the commit, pool or network
+acquisition, or the end-to-end operation. A future `statement_timeout`
+or server transaction deadline (where the server version supports it)
+or a client-side deadline would also need cancellation,
+connection recovery, and a policy for an unknown commit outcome. There
+is no automatic retry of arbitrary connection errors.
 
 ### The validation gate (chartered here, not assumed away)
 
@@ -233,52 +212,120 @@ thresholds:
 
 Either threshold broken is a FAIL, and the wave moves to the
 single-writer fallback (option 3). The pivot's consequences are named
-now so nobody invents them under pressure:
-the feed keeps its trait, consumer groups, and cursor semantics; the
-ledger and prefix machinery drop; the runner card is unchanged except
-that this record's cursor section rewrites; the migration card is
-unchanged. The numbers do not exist yet as of this draft - they land
-on the feed card either way, and this record is revised with them at
-its gate A before anything is accepted.
+above so nobody invents them under pressure.
+
+**The measured verdict (2026-08-23, the feed card's gate S, live
+compose postgres, harness committed as `tests/spike_ledger.rs`):**
+FAIL on the append threshold, and the pivot executed. Run of record:
+append path, 8 concurrent writers over 10k appends each (80k samples
+per path) - unledgered p99 8,960us, ledgered p99 39,814us, ratio
+4.444 against the 2.000 limit; batch path, 4 concurrent multi-stream
+batches over a shared 8-stream pool - unledgered p99 29,486us,
+ledgered p99 31,820us, ratio 1.079, inside the 1.500 limit.
+
+<!-- vale ai-tells.VerbTricolon = NO -->
+<!-- vale ai-tells.ParallelStaccato = NO -->
+<!-- Reason: the measurement facts chain through commas and the rules
+     read the clauses across two sentences as rhetorical patterning.
+     Dense factual prose, not emphasis; same false-positive class the
+     board recorded 2026-08-14. -->
+One evidence precision (E19 review round, 2026-09-07): the batch
+timers span the whole operation from begin to commit, so the batch
+ratio measures total batch latency, not the isolated lock-wait the
+charter names. The verdict does not depend on that measurement - the
+append threshold failed on its own.
+<!-- vale ai-tells.VerbTricolon = YES -->
+<!-- vale ai-tells.ParallelStaccato = YES -->
+
+An
+earlier partial run on cold tables measured the append ratio at
+1.598, but its baseline was 3x slower than the warm run while the
+ledgered path held steady across both (41.6ms then 39.8ms p99) - the
+disagreement was baseline cold-start variance, not ledger variance.
+The stable signal is the mechanism's own cost: the allocation
+transaction's second commit fsync roughly quadruples steady-state
+per-append p50 on this database (3.8ms to 17.3ms). The full numbers
+live on the feed card either way; this record now describes the
+single-writer design that shipped in its place.
+
+<!-- vale ai-tells.VerbTricolon = NO -->
+<!-- vale ai-tells.ParallelStaccato = NO -->
+<!-- Reason: the C15 results are measurement facts chained through
+     commas and semicolons - dense factual prose, not rhetorical
+     patterning; same false-positive class the board recorded
+     2026-08-14. -->
+The full benchmark measurement (C15) is complete. The writer study
+(measured source `746deba`, harness blob
+`2b6d71570afd72d1b713366141c47242cc1fc484`) ran three runs of 10,000
+operations per condition across 18 cases: 180,000 operations,
+405,000 measured events, zero recorded errors; an independent SQL
+count found 409,050 stored rows, exactly the measured events plus
+4,050 warm-up events.
+
+Median-of-three run-level results: append 1 caller 405.1 ops/s, run
+p99 6.09ms; append 4 callers 335.1 ops/s, p99 27.72ms; append
+8 callers 382.0 ops/s, p99 42.29ms; append 16 callers 301.3 ops/s,
+p99 110.34ms; atomic batch 4 callers 254.1 ops/s and 1,524.4
+events/s, p99 29.71ms; mixed writes, 8 callers plus feed, 207.8
+ops/s and 727.2 events/s, p99 69.19ms. Post-writer feed drain lag
+5.01-5.74ms. More callers did not improve append throughput; latency
+grew consistently with waiting behind one writer; batches amortized
+transaction cost across six events.
+
+The paired feed comparison (2026-09-08, fresh matching databases,
+alternating rounds, all 18 case records validated with zero errors)
+found no measurable feed-path cost on the C3/C4 timeout surface -
+median-of-three p99, baseline vs repair: poll-empty 3430us vs 3366us,
+poll-replay 6616us vs 5663us, poll-ack-cycles 10678us vs 11038us,
+within run-to-run variance.
+
+Retained limitations, stated plainly: the study ran on shared lab
+resources (PostgreSQL 16.14, fsync and synchronous_commit on, 1 KiB
+payloads, 32-connection pool, release build, Apple M4 Pro host with a
+4-CPU Docker VM); production capacity and SLO suitability remain
+unvalidated; run-to-run variance is visible; these figures must not
+be compared directly with the gate-S ledger spike, whose workloads
+and measurement conditions differed.
+<!-- vale ai-tells.VerbTricolon = YES -->
+<!-- vale ai-tells.ParallelStaccato = YES -->
 
 ## Consequences
 
-- Positive: a committed event cannot be skipped. The burn theorem
-  plus the guarded transitions make the figure's failure mode
-  unrepresentable rather than merely defended against.
-- Positive: every delivery guarantee is expressible in streams - the
-  ledger is itself an auditable log of attempted event transactions,
-  including the aborted ones, which no adjacency cursor offers.
-- Positive: no new transactional machinery. The event transaction is
-  an ordinary append or E3 batch; the allocation is a short
-  transaction over an existing sequence object and the advisory-lock
-  discipline ADR 0006 already pinned.
-- Negative: one extra transaction per append (two commits, three
-  writes). Unmeasured in this draft; the spike measures it and gate A
-  cites the numbers here, or option 3 takes over per the
-  pre-registered verdict.
-- Negative: the allocation critical section is a funnel - all
-  writers serialize across it, briefly, where before they did not
-  serialize at all. This is the honest shape of the design: the
-  concurrency question moved from "everywhere" to "one short
-  section", and the spike prices exactly that.
-- Negative: the write path is rewritten. `append` and `transact` draw
-  ranges and insert explicit sequence values; the column default
-  retires via migration. Consumers see no surface change, but the
-  backend's failure modes grow by one - the allocation can commit
-  and the append then fail, leaving a durable ABORTED marker and a
-  loud error rather than a silent hole.
-- Negative: feed liveness now owns reaper liveness. A feed nobody
-  polls leaves orphans unresolved until polling resumes; resolution
-  is bounded by one age bound after the next poll, not by a
-  background daemon. Operators who need unconditional liveness run a
-  poller.
-- Open at gate A, each owned: the age bound's value; the advisory
-  lock key space; final naming (the saga-outbox stream category, the
-  Reaction variants); the in-memory backend's reaper analogue. The
-  outbox-saga section of this record - reaction format, intent
-  identity, the executor's retry and compensation contract - is the
-  runner card's gate-A deliverable and lands as a revision here.
+Revised at the feed card's gate A alongside the pivot; the ledger
+design's consequences remain as the design-time record above and in
+the review ledger below.
+
+- Positive: a committed event cannot be skipped. The funnel makes
+  insert order commit order on the write side, so the figure's
+  failure mode is unrepresentable rather than defended against.
+- Positive: the append path keeps one transaction and gains no new
+  machinery to feed: no ledger table, no reaper, and no second
+  commit per append. The funnel is one advisory lock statement inside
+  the transaction, the same discipline ADR 0006 already pinned.
+- Positive: the advisory-lock key space shrinks. One global writer
+  key replaces the per-stream two-key tuples; no acquisition order
+  needs maintaining because there is nothing to order.
+- Negative: writes serialize completely. Every event transaction,
+  whatever its streams, waits on one lock; throughput is bounded by
+  one writer's commit latency. The spike priced the alternative at
+  4.4x p99 per append and the trade was taken with eyes open - a
+  single-postgres deployment's append throughput is now structurally
+  serial, and any future that needs concurrent writers must reopen
+  this record.
+- Negative: a wedged writer stalls all writes while its session
+  stays alive. `lock_timeout` bounds each waiter's attempt, not the
+  holder's tenure; the retryable LockTimeout outcome is the
+  contract for riding that out, and consumers must treat it as
+  retry, which ADR 0006 already required.
+- Deferred: the LISTEN/NOTIFY latency optimization. The shipped poll
+  is pull-shaped; a wait-capable poll variant owns the optimization
+  when a consumer needs it.
+- Open, each owned: final naming (the saga-outbox stream category
+  and its intent-key index are indicative until the runner card's
+  gate A). The outbox-saga section of this record - reaction format,
+  intent identity, the executor's retry and compensation contract -
+  is the runner card's gate-A deliverable and lands as a revision
+  here.
 
 ## Links
 
@@ -286,9 +333,10 @@ its gate A before anything is accepted.
 - [ADR 0006 - the atomic batch whose read side this is](0006-atomic-multi-stream-batch.md)
 - [Saga delivery semantics - the upstream survey](../research/saga-delivery-upstream.md)
   (Axon token stores, one poller per group, the outbox school)
-- The BIGSERIAL column and the write paths the rewrite touches:
+- The BIGSERIAL column and the write paths the funnel now fronts:
   `src/streams/postgres/migrations/0001-create-stream-events.sql`,
-  `src/streams/postgres.rs`, `src/streams/postgres/batch.rs`
+  `src/streams/postgres.rs`, `src/streams/postgres/batch.rs`,
+  and the feed surface `src/streams/feed.rs`
 - The race figure's original:
   [epoch-saga-ledger-infographic](https://shearerbeard.github.io/artifacts/epoch-saga-ledger-infographic)
   (rev 2, 2026-08-22)
@@ -351,3 +399,9 @@ model throughout: GLM-5.3 (the board owner's class).
    The reviewer's fidelity, premise-freshness, and validation-gate
    checks passed; the `.rs` write-path links were taken on the round
    packets' evidence, as the source files were not staged for it.
+7. The gate-A revision, 2026-08-23: the spike's FAIL verdict and the
+   pivot it triggered, applied to this record by the feed card's
+   board owner (GLM-5.3) as the revision this record itself chartered
+   at drafting. The design-panel and gate reviews of the shipped
+   surface live on the feed card's record; this entry closes the loop
+   between the chartered validation gate and the decision it decided.
