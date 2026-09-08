@@ -1,5 +1,9 @@
 //! C15 funnel benchmark: the real public write and feed APIs measured on a
 //! dedicated postgres database. Feature-gated and `#[ignore]`d; owner-only.
+//!
+//! `EPOCH_BENCH_ONLY_ROUND` (optional) selects one declared round for A/B
+//! alternating baseline/repair invocations; a filtered run is a protocol
+//! selector, not a completed study on its own.
 #![cfg(feature = "postgres")]
 
 use std::collections::BTreeMap;
@@ -67,6 +71,7 @@ struct Config {
     profile: Profile,
     ops: usize,
     rounds: usize,
+    only_round: Option<usize>,
     database: String,
     connection: tokio_postgres::Config,
 }
@@ -116,6 +121,20 @@ impl Config {
             }
             Err(_) => 3,
         };
+        let only_round = match std::env::var("EPOCH_BENCH_ONLY_ROUND") {
+            Ok(raw) => {
+                let selected: usize = raw
+                    .parse()
+                    .map_err(|_| format!("EPOCH_BENCH_ONLY_ROUND {raw:?} is not a round"))?;
+                if selected == 0 || selected > rounds {
+                    return Err(format!(
+                        "EPOCH_BENCH_ONLY_ROUND {selected} outside 1..={rounds}"
+                    ));
+                }
+                Some(selected)
+            }
+            Err(_) => None,
+        };
         let profile = if ops >= 10000 && rounds >= 3 {
             Profile::Measurement
         } else {
@@ -126,6 +145,7 @@ impl Config {
             profile,
             ops,
             rounds,
+            only_round,
             database,
             connection,
         })
@@ -684,8 +704,10 @@ fn render(
         "config": {
             "ops": config.ops,
             "rounds": config.rounds,
+            "only_round": config.only_round,
             "database": config.database,
         },
+        "protocol_rounds": config.rounds,
         "source_stamp": std::env::var("EPOCH_BENCH_SOURCE").unwrap_or_default(),
         "package_version": env!("CARGO_PKG_VERSION"),
         "pg": pg,
@@ -747,8 +769,12 @@ async fn funnel_bench() {
     let run = tokio::time::timeout(BUDGET, async {
         let pool = bench_pool(&config.connection).await;
         let pg = pg_environment(&pool).await;
+        let rounds = match config.only_round {
+            Some(selected) => selected..=selected,
+            None => 1..=config.rounds,
+        };
         for condition in Condition::all(config.mode) {
-            for round in 1..=config.rounds {
+            for round in rounds.clone() {
                 let record = run_case(&pool, &config, &pg, condition, round).await;
                 println!("{record}");
             }
