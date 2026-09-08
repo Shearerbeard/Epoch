@@ -1,20 +1,20 @@
 # E19 feed surface - design record (post-pivot)
 
-2026-09-07 repair status: timeout configuration is a compile-clean skeleton
-with `todo!()` bodies; invoking append, transact, poll, or ack panics until filled.
+Status: WIP, under final review. ADR 0010 is revised with the spike's
+FAIL verdict and the executed pivot; the contract section of that
+record is the semantics this surface implements. The gate-S spike
+failed the allocation ledger's pre-registered append threshold
+(4.444x p99 vs 2.000x), so the surface implements ADR 0010's named
+fallback - the single-writer funnel. Insert order is commit order by
+construction, the cursor is a plain maximum over `global_sequence`,
+and the ledger, reaper, and prefix machinery do not exist.
 
-Status: shipped. The design panel's findings are dispositioned
-(repairs in 2b3d67c, confirmation PASS) and ADR 0010 is revised with
-the spike's measured verdict and the executed pivot (f65f40c); the
-contract section of that record is the shipped semantics this surface
-implements. The gate-S spike failed the allocation ledger's
-pre-registered append threshold (4.444x p99 vs 2.000x; numbers on the
-E19 card), so this surface implements ADR 0010's named fallback: the
-single-writer funnel. Insert order is commit order by construction,
-the cursor is a plain maximum over `global_sequence`, and the ledger,
-reaper, and prefix machinery do not exist.
+Contention, eviction, and recovery are live and tested. The writer's
+lock wait and idle-in-transaction session are bounded; active SQL,
+commit, and total client duration are not, so there is no
+forward-progress guarantee.
 
-## Type-to-business-rule map
+## Trait type-to-business-rule map
 
 | Type | One business rule | Invalid state it forbids |
 | --- | --- | --- |
@@ -29,17 +29,20 @@ reaper, and prefix machinery do not exist.
 | `AckError::Regression` / `AckError::NotDelivered` | The two protocol violations a caller fixes differently: rewind vs skip-ahead. | Backend faults masquerading as protocol violations (they are `Backend`). |
 | `EventFeed` (trait) | Delivery is at-least-once over the committed log per group; ack is monotonic and delivery-bounded. | A feed that could represent exactly-once or regressing semantics. |
 
-## Repair surface (C3/C4 skeletons)
+## Runtime repair surface (C3/C4 implementations)
 
 | Configuration / error | One business rule | Unbound gap |
 | --- | --- | --- |
-| `PgEventFeed::with_lock_timeout(default5s)` | Feed poll and ack lock wait bounded. Writer funnel lock-wait separate. | Active statement, commit, client timeout, network expiry pool unchanged. |
+| `PgEventFeed::with_lock_timeout(default 5s)` | Feed poll and ack lock wait bounded. Writer-funnel lock-wait separate. | Active statement, commit, client timeout, network expiry, pool acquisition unchanged. |
 | `PgStreamsError::LockTimeout(Duration)` | Server lock-timeout expiry is retryable (feed poll error). Effective bound reported. | Automatic retry loop not added for ambiguous connection errors. |
-| `AckError::Backend` (wrapping) | Feed ack surfaces lock timeout same as poll. | |
-| `PgEventStreams::with_idle_transaction_timeout(default30s)` `PgDatabase::with_idle_transaction_timeout(default30s)` | Idle writer eviction via server GUC `idle_in_transaction_session_timeout`. Writer lock-wait stays 5s separate bound. | Active SQL exceeding idle window not terminated, commit overflow unaffected. |
+| `AckError::Backend` (wrapping `PgStreamsError::LockTimeout`) | Feed ack surfaces lock timeout as a backend error, same as poll. | |
+| `PgEventStreams::with_idle_transaction_timeout(default 30s)` `PgDatabase::with_idle_transaction_timeout(default 30s)` | Idle-writer eviction via server GUC `idle_in_transaction_session_timeout`. Writer lock-wait stays a separate 5s bound. | Active SQL exceeding the idle window is not terminated; commit overflow unaffected. |
 | Clone preserves timeout configs | Builder-set bounds survive sharing. | Pool acquisition, statement deadlines outside scope. |
 
-All timeout boundaries are typed-hole configurations (`todo!()` helpers); calling code panics until filled, and no timeout behavior runs.
+All timeout boundaries are configuration defaults; a zero or
+sub-millisecond bound floors to 1 ms, a too-large bound fails as a
+backend error, poll surfaces `PgStreamsError::LockTimeout(Duration)`,
+ack wraps `AckError::Backend`. No automatic retries.
 
 ## Visibility and seams
 
@@ -47,7 +50,7 @@ All timeout boundaries are typed-hole configurations (`todo!()` helpers); callin
 | --- | --- | --- |
 | `streams::feed` | public module, one file | `streams::batch::StreamRef` (the stream address type), `streams::RecordedEvent` (the envelope seam's record) |
 | `feed::spec` | public | `streams::spec::under_deadline` (the shared deadline wrapper) |
-| Feed impls (fills) | per backend: `in_memory::feed`, `postgres::feed` | in-memory root / pg pool + `epoch_feed_cursors` table |
+| Feed impls | per backend: `in_memory::feed`, `postgres::feed` | in-memory root / pg pool + `epoch_feed_cursors` table |
 
 Feed handles are per-category views over a log-global position space:
 positions come from the shared `global_sequence`, delivery is scoped to
@@ -75,13 +78,17 @@ group); that is legal watermark movement, not a skip.
 - **In-memory ordering.** The in-memory root appends under one mutex
   (already single-writer by construction); its positions are arrival
   order, which the conformance cases pin as commit order.
+- **Forward progress is not bounded.** The lock wait (5s) and idle
+  session (30s) are bounded, but active SQL, the commit, and total
+  client duration are not. A future `statement_timeout` or server
+  transaction deadline (on a compatible version) or a client deadline
+  would need cancellation, connection recovery, and a policy for an
+  unknown commit outcome.
 
-## Hole inventory
+## WIP status under final review
 
-Zero `todo!()` holes: the feed module is a pure type surface plus a
-trait declaration - every body that exists is a parse or an accessor.
-The behavior lives in the per-backend impls (fill units) and in the
-conformance cases in `feed/spec.rs`, which are written from the
-contract and fail on arrival until the impls exist (layer 2). The
-single-writer funnel for the pg write path is fills scope: it changes
-no type surface, only which lock `append` and `transact` take.
+The three production implementations are complete: the single-writer
+funnel (append, atomic batch, feed) with bounded timeouts, the
+event-metadata seam, and the per-group cursor table. The trait types
+above are the backend-neutral surface; `PgEventFeed`, `PgEventStreams`,
+and `PgDatabase` are the postgres runtime implementations.

@@ -1,34 +1,33 @@
-//! C3 (feed waits) repair proofs: the ACTUAL library feed paths -
+//! C3 (feed waits) repair proofs: the library feed paths -
 //! `PgEventFeed::poll` and `PgEventFeed::ack` - bound their lock waits
 //! with the configured `lock_timeout`, and an expiry surfaces as the
 //! retryable `PgStreamsError::LockTimeout(effective_bound)` - wrapped
-//! in `AckError::Backend` on the ack path - never a hang and never a
-//! generic backend fault. Runs against the live compose postgres:
+//! in `AckError::Backend` on the ack path - never a generic backend
+//! fault. Runs against the live compose postgres:
 //!
 //! ```sh
 //! cargo test --features postgres --test feed_timeouts -- --nocapture
 //! ```
 //!
-//! Deterministic method, public APIs only. An independent raw holder
-//! connection makes the contention real: the cursor-row case holds the
-//! group's existing cursor row `FOR UPDATE`; the first-poll case holds
-//! a PLAIN uncommitted `INSERT` into `epoch_feed_cursors` that the
-//! poll's watermark upsert must wait behind. The classified expiry is
-//! itself the wait evidence - the server reports `55P03` only after a
-//! wait that outlasted the configured bound - so no sleep poses as
-//! proof and there are no tight wallclock thresholds. Every state
-//! claim is an independent raw readback (`cursor_row_state`), never
-//! feed output. Every case runs under `under_deadline`'s outer bound,
-//! so a regression to an unbounded wait fails fast instead of hanging
-//! the suite.
+//! Public APIs only. An independent raw holder makes the contention
+//! real: the cursor-row case holds the group's existing cursor row
+//! `FOR UPDATE`; the first-poll case holds a PLAIN uncommitted
+//! `INSERT` into `epoch_feed_cursors` that the poll's watermark upsert
+//! must wait behind. The classified expiry is itself the wait
+//! evidence - the server reports `55P03` only after a wait that
+//! outlasted the configured bound - so no sleep poses as proof and
+//! there are no tight wallclock thresholds. Every state claim is an
+//! independent raw readback (`cursor_row_state`), never feed output.
+//! Every case runs under `under_deadline`'s outer bound, so a
+//! regression to an unbounded wait fails fast instead of hanging the
+//! suite.
 //!
 //! Honesty notes: the configured 1ms normalization floor IS tested -
-//! the bounds case pins the REPORTED duration (`Duration` equality, as
-//! the wedged-funnel proof does) - but the five-second default is
-//! never timed, and the default's field wiring remains unit-test
-//! material beside `configure_feed_timeout`. The feed bounds lock
-//! waits only; nothing here claims an idle-holder or client-duration
-//! bound (C4's path).
+//! the bounds case pins the REPORTED duration (`Duration` equality) -
+//! but the five-second default is never timed, and the default's field
+//! wiring remains unit-test material beside `configure_feed_timeout`.
+//! The feed bounds lock waits only; nothing here claims an idle-holder
+//! or client-duration bound.
 
 #![cfg(feature = "postgres")]
 

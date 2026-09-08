@@ -10,7 +10,11 @@
 //! time changed.
 //!
 //! Waiting is bounded by a transaction-scoped `lock_timeout` on the
-//! funnel acquisition. Expiry is its own retryable outcome
+//! funnel acquisition, and an
+//! `idle_in_transaction_session_timeout` evicts a transaction that
+//! sits without an active statement - idle-only, so active SQL, the
+//! commit, and total client duration stay outside it. Expiry of the
+//! funnel wait is its own retryable outcome
 //! ([`TransactError::LockTimeout`]), never a version conflict: the
 //! transaction rolls back whole and its xact-scoped lock releases
 //! with it. Every check runs before the first insert and the

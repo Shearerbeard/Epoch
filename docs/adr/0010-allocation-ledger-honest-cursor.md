@@ -1,8 +1,8 @@
-# The event feed's cursor runs on an allocation ledger, not on sequence adjacency
+# The event feed's cursor runs on a single-writer funnel, not an allocation ledger
 
-- Status: proposed (accepted at the feed card's gate U; revised at
-  that card's gate A, 2026-08-23, with the measured spike numbers and
-  the executed pivot to option 3 - supersedes nothing, and discharges
+- Status: proposed (final U acceptance pending; revised at the feed
+  card's gate A, 2026-08-23, with the measured spike numbers and the
+  executed pivot to option 3 - supersedes nothing, and discharges
   ADR 0007's deferral by that record's own trigger, the pull having
   happened)
 - Date: 2026-08 (drafted 2026-08-23 ahead of implementation, per the
@@ -63,9 +63,12 @@ inherits whatever cursor semantics land here.
   production-grade system surveyed (Axon tracking processors, Fmodel's
   saga manager, EvidentDB streams) puts a persisted checkpoint under
   the reaction loop.
-- The event write path MUST stay concurrent. Postgres does not need a
-  single-writer funnel for event transactions; ADR 0006's premise
-  stands unless measurement says otherwise.
+- The event write path MUST stay concurrent (historic - overridden by
+  the pre-chartered spike pivot: the measured append amplification
+  failed its threshold, so the single-writer funnel shipped instead).
+  Postgres does not need a single-writer funnel for event
+  transactions; ADR 0006's premise stands unless measurement says
+  otherwise.
 - Adoption MUST be measured before it is forced on consumers: the
   ledger's write amplification gets a spike with a pre-registered
   verdict, not a post-hoc rationalization.
@@ -105,10 +108,11 @@ inherits whatever cursor semantics land here.
    Option 2 the single writer - while this record keeps its own
    four-option numbering; the mapping is stated here once.
 4. **Allocation ledger with serialized allocation and a row-lock
-   reaper (chosen).** Per-transaction sequence ranges drawn from the
-   shared sequence object in a short serialized allocation
-   transaction; guarded state transitions; a reaper built on row
-   locks rather than transaction introspection.
+   reaper (chosen at design time, rejected by the spike).**
+   Per-transaction sequence ranges drawn from the shared sequence
+   object in a short serialized allocation transaction; guarded state
+   transitions; a reaper built on row locks rather than transaction
+   introspection.
 
 ## Decision outcome
 
@@ -133,9 +137,10 @@ skip a committed event nor wait on a value that will never appear.
   so a wedged writer surfaces as the retryable
   `AppendError::LockTimeout` on the single-append path and
   `TransactError::LockTimeout` on the batch path, never a hang and
-  never a conflict. The bound covers each waiter, not the holder: a
-  holder that goes silent mid-transaction stalls every writer until
-  the server drops its session.
+  never a conflict. The bound covers each waiter, not the holder: an
+  idle holder is evicted by the idle-session timeout, but a holder
+  running active SQL or a slow commit can still hold the writer
+  indefinitely.
 - **Cursor definition.** The cursor is the highest committed
   `global_sequence` a group has acknowledged. Contiguity is not
   integer adjacency: values burned by rolled-back appends appear in
@@ -167,6 +172,28 @@ skip a committed event nor wait on a value that will never appear.
   is deferred: the feed trait's poll is pull-shaped, so the
   optimization belongs to a wait-capable poll variant, chartered
   separately when a consumer needs sub-poll-interval latency.
+- **Feed lock wait (C3).** `PgEventFeed::with_lock_timeout` bounds
+  each poll/ack lock wait at 5s by default. A poll surfaces an expiry
+  directly as `PgStreamsError::LockTimeout(effective duration)`; an
+  ack wraps the same expiry in `AckError::Backend`. Feed readers never
+  take the writer lock.
+- **Writer idle eviction (C4).** Both writer handles -
+  `PgEventStreams` and `PgDatabase` - bound an idle transaction at 30s
+  by default via the `idle_in_transaction_session_timeout` GUC, set by
+  `with_idle_transaction_timeout`, separate from the 5s
+  `with_lock_timeout` wait. Both bounds floor a zero or sub-millisecond
+  value to 1ms; a value the server rejects as out of range fails as a
+  backend error.
+
+### Timeout bounds and the gap they leave
+
+The 5s lock wait and the 30s idle-session bound cover waits and idle
+time only. Neither bounds active SQL, the commit, pool or network
+acquisition, or the end-to-end operation. A future `statement_timeout`
+or server transaction deadline (where the server version supports it)
+or a client-side deadline would also need cancellation,
+connection recovery, and a policy for an unknown commit outcome. There
+is no automatic retry of arbitrary connection errors.
 
 ### The validation gate (chartered here, not assumed away)
 
@@ -220,6 +247,9 @@ transaction's second commit fsync roughly quadruples steady-state
 per-append p50 on this database (3.8ms to 17.3ms). The full numbers
 live on the feed card either way; this record now describes the
 single-writer design that shipped in its place.
+
+The full benchmark measurement (C15) is not run yet; only the smoke
+validity run is complete.
 
 ## Consequences
 

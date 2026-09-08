@@ -17,9 +17,9 @@
 //!
 //! Poll and ack bound their lock waits: each transaction sets a
 //! local `lock_timeout` before taking the cursor row, and an expiry
-//! surfaces as the retryable [`PgStreamsError::LockTimeout`] - never
-//! a hang and never a generic backend fault (ADR 0010). The feed
-//! bounds lock waits only; no idle-holder bound exists on this path.
+//! surfaces as the retryable [`PgStreamsError::LockTimeout`], never a
+//! generic backend fault (ADR 0010). The feed bounds lock waits only;
+//! no idle-holder bound exists on this path.
 
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -59,8 +59,7 @@ impl<E> PgEventFeed<E> {
 
     /// Set the poll/ack lock-wait bound. A cursor row or index lock
     /// held past it surfaces as the retryable
-    /// [`PgStreamsError::LockTimeout`] when it expires, never a hang
-    /// (ADR 0010).
+    /// [`PgStreamsError::LockTimeout`] when it expires (ADR 0010).
     pub fn with_lock_timeout(self, lock_timeout: Duration) -> Self {
         Self {
             lock_timeout,
@@ -88,7 +87,8 @@ impl<E> Clone for PgEventFeed<E> {
 /// sub-millisecond bound normalizes to the 1ms floor - the one
 /// "wait forever" value these paths must not set. The feed-side,
 /// lock-only counterpart of the write path's
-/// `configure_writer_timeouts`: C3 gives the feed no holder bound.
+/// `configure_writer_timeouts`: the feed has no idle-in-transaction
+/// bound.
 async fn configure_feed_timeout(
     tx: &tokio_postgres::Transaction<'_>,
     bound_ms: u64,
@@ -103,9 +103,12 @@ async fn configure_feed_timeout(
 /// batch statement classifiers). Every statement after the GUC is in
 /// effect routes its failure through here - the cursor row's
 /// `FOR UPDATE`, the head read, the watermark upsert, the cursor
-/// UPDATE, and both commits can all wait on locks. Pre-bound pool,
-/// BEGIN, and config failures are not classified: the GUC is not yet
-/// in effect, so they stay ordinary connection errors.
+/// UPDATE, and the one commit each transaction makes can all wait on
+/// locks. Ack's two branches - the no-op at the cursor and the
+/// advance - each commit through this classifier. Pre-bound failures
+/// are not classified: the GUC is not yet in effect, so a pool
+/// checkout stays `PgStreamsError::Pool` and a BEGIN or config
+/// failure stays an ordinary `Connection` error.
 fn feed_statement_error(error: tokio_postgres::Error, bound: Duration) -> PgStreamsError {
     if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) {
         PgStreamsError::LockTimeout(bound)

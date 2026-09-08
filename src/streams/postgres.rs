@@ -84,10 +84,10 @@ pub(crate) const DEFAULT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration
 pub(crate) const DEFAULT_IDLE_TRANSACTION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30);
 
-/// A `Duration` as the `lock_timeout` GUC's integer milliseconds.
-/// The value is a count, so there is nothing a caller can inject;
-/// `.max(1)` keeps zero ("wait forever") unsettable - the one bound
-/// these paths must not set.
+/// A `Duration` as integer milliseconds for a timeout GUC. The value
+/// is a count, so there is nothing a caller can inject; `.max(1)`
+/// keeps zero unsettable for both writer bounds - the funnel wait
+/// ("wait forever") and the idle-in-transaction bound ("no limit").
 pub(crate) fn lock_timeout_ms(timeout: std::time::Duration) -> u64 {
     u64::try_from(timeout.as_millis())
         .unwrap_or(u64::MAX)
@@ -96,13 +96,13 @@ pub(crate) fn lock_timeout_ms(timeout: std::time::Duration) -> u64 {
 
 /// Apply both writer timeout bounds to one event transaction before
 /// the funnel acquisition, shared by the single append and the atomic
-/// batch paths: `SET LOCAL lock_timeout` bounding the funnel wait
-/// (converted by [`lock_timeout_ms`], so zero or a sub-millisecond
-/// bound normalizes to the 1ms floor) and `SET LOCAL
-/// idle_in_transaction_session_timeout` bounding how long the
-/// transaction may sit without an active statement, both in one
-/// single command. A bound the server rejects as out of range fails
-/// loudly rather than saturating to the server maximum.
+/// batch paths: `SET LOCAL lock_timeout` bounding the funnel wait and
+/// `SET LOCAL idle_in_transaction_session_timeout` bounding how long
+/// the transaction may sit without an active statement, both in one
+/// single command. Both are converted by [`lock_timeout_ms`], so a
+/// zero or sub-millisecond bound normalizes to the 1ms floor. A bound
+/// the server rejects as out of range fails loudly rather than
+/// saturating to the server maximum.
 async fn configure_writer_timeouts(
     tx: &tokio_postgres::Transaction<'_>,
     lock_timeout: std::time::Duration,
@@ -140,8 +140,8 @@ impl<Id, E> PgEventStreams<Id, E> {
     }
 
     /// Set the funnel wait bound. A wedged writer surfaces as the
-    /// retryable [`AppendError::LockTimeout`] when it expires, never
-    /// a hang and never a conflict (ADR 0010).
+    /// retryable [`AppendError::LockTimeout`] when the lock wait
+    /// expires, never a version conflict (ADR 0010).
     pub fn with_lock_timeout(self, lock_timeout: std::time::Duration) -> Self {
         Self {
             lock_timeout,

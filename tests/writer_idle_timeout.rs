@@ -1,58 +1,42 @@
-//! C4 (idle writer) repair proofs: the ACTUAL library write paths -
-//! `PgEventStreams::append` and `PgDatabase::transact` - evict a writer
-//! that goes idle inside its event transaction, and the eviction
-//! surfaces as a session fault the caller can tell apart from the
-//! retryable funnel timeout. Runs against the live compose postgres:
+//! C4 (idle writer) repair proofs: the library write paths -
+//! `PgEventStreams::append` and `PgDatabase::transact` - evict a
+//! writer that goes idle inside its event transaction, and the
+//! eviction surfaces as a session fault, never the retryable funnel
+//! timeout. Runs against the live compose postgres:
 //!
 //! ```sh
 //! cargo test --features postgres --test writer_idle_timeout -- --nocapture
 //! ```
 //!
-//! Deterministic method, no production hooks and no raw-SQL `SET`
-//! proof: the idle bound is applied by the library's own
-//! `configure_writer_timeouts` path, and the test observes only
-//! server-side consequences. A raw holder connection takes the
-//! single-writer funnel lock (the crate-private `WRITER_LOCK` key,
-//! spelled independently below); the library pool is built with
-//! `max_size(1)` and its one backend's pid is read before the pinned
-//! write future reuses that connection; the pinned future is selected
-//! against a bounded `pg_locks` probe until that exact pid is the
-//! funnel's ungranted waiter. Polling then STOPS - the future is
-//! retained, never dropped or cancelled - while the holder rolls back.
-//! The tokio_postgres driver, independent of the unpolled top future,
-//! completes the library's lock query, so the backend holds the funnel
-//! idle in transaction. Bounded probes observe the grant, the
-//! `idle in transaction` state, and the backend's disappearance at the
-//! configured bound's expiry. The resumed future must then fail as a
-//! session fault: `Backend(PgStreamsError::Connection(_))`, never
-//! `LockTimeout`, and the inner SQLSTATE must not be the retryable
-//! `55P03`. The termination's own code is deliberately NOT pinned:
-//! the server may report `25P03`, or the failure may arrive as an
-//! already-closed connection with no SQLSTATE at all, because the
-//! buffered lock response lets the next statement hit a dead socket.
-//! The exact-pid expiry observation above is the causal proof; the
-//! assertion only pins the shape, and no arbitrary `Connection`
-//! error pretends to be the abort. Nothing may be stored - for the
-//! batch path neither of its two streams may hold a partial write -
-//! and a fresh operation must succeed through the pool's replacement
-//! connection. No tight sleeps. The whole case runs under
-//! `under_deadline`'s 60s outer bound so a regression fails fast
-//! instead of hanging, and every probe additionally polls under its
-//! own short, bounded deadline - mandatory; the outer bound is not
-//! the probe bound.
+//! The idle bound is applied by the library's own
+//! `configure_writer_timeouts` path; the test observes only
+//! server-side consequences. A raw holder takes the single-writer
+//! funnel lock; the library pool is `max_size(1)` and its backend's
+//! pid is read before the pinned write future reuses it; the pinned
+//! future is selected against a bounded `pg_locks` probe until that
+//! exact pid is the funnel's ungranted waiter, then polling stops -
+//! the future is retained, never dropped or cancelled - while the
+//! holder rolls back. The tokio_postgres driver, independent of the
+//! unpolled future, completes the lock query, leaving the backend
+//! idle in transaction; bounded probes observe the grant, the
+//! `idle in transaction` state, and the backend's disappearance at
+//! the bound's expiry. The resumed future then fails as
+//! `Backend(PgStreamsError::Connection(_))`, never `LockTimeout`, and
+//! the inner SQLSTATE is not the retryable `55P03`; the termination's
+//! own code is unpinned (the server may report `25P03`, or the
+//! failure may arrive as an already-closed connection with no
+//! SQLSTATE). The exact-pid expiry observation is the causal proof;
+//! the assertion only pins the shape. Nothing may be stored, and a
+//! fresh operation must succeed through the pool's replacement
+//! connection. The whole case runs under `under_deadline`'s 60s
+//! outer bound, and every probe polls under its own short deadline.
 //!
 //! Honesty notes: the 30-second default is not tested by waiting 30
 //! seconds - the default field is private, so the wiring proof is the
-//! configured 1s bound through a CLONE of the configured handle (both
-//! handle types share the pool and the bound on clone); the config
-//! floor and the default itself remain unit-test material beside
-//! `configure_writer_timeouts`. Active SQL, commit, and total client
-//! duration are outside this bound by design; nothing here claims
-//! otherwise.
-//!
-//! Skeleton: the event impl, the lock key, and the sync fixtures are
-//! real; the async choreography and case bodies are named typed holes
-//! for the rust-fill pass.
+//! configured 1s bound through a CLONE of the configured handle. The
+//! config floor and the default itself remain unit-test material.
+//! Active SQL, commit, and total client duration are outside this
+//! bound by design.
 
 #![cfg(feature = "postgres")]
 
@@ -203,9 +187,7 @@ async fn hold_then_starve_then_expire(
     let classid = u32::try_from(WRITER_LOCK >> 32).expect("the lock key's high half");
     let objid = u32::try_from(WRITER_LOCK & 0xffff_ffff).expect("the lock key's low half");
 
-    // Heterogeneous parameter slices are supported by the public
-    // query surface; this binding holds the advisory-key halves and is
-    // shared by both funnel probes.
+    // The advisory-key halves, shared by both funnel probes.
     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&classid, &objid];
 
     // Hold: the raw holder takes the funnel inside a transaction it
@@ -288,11 +270,6 @@ async fn hold_then_starve_then_expire(
     tokio::time::timeout(PHASE_DEADLINE, async {
         loop {
             let observed = tokio::time::timeout(PROBE_DEADLINE, async {
-                // Heterogeneous u32/i32 parameters are supported by
-                // the public query surface, so the aggregate form is
-                // not required for typing; it is retained as-is
-                // (granted pids collected, exact-pid membership tested
-                // here) rather than rewritten mid-proof.
                 let granted = monitor
                     .query_one(
                         "SELECT COALESCE(array_agg(pid), '{}'::int[]) AS pids \

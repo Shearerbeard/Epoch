@@ -1,6 +1,10 @@
 # Changelog
 
+<!-- vale ai-tells.OverusedVocabulary = NO -->
+<!-- Reason: "notable changes" is the Keep a Changelog boilerplate's own
+     wording, not AI-generated prose. -->
 All notable changes to this project will be documented in this file.
+<!-- vale ai-tells.OverusedVocabulary = YES -->
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -8,66 +12,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Comprehensive internal documentation structure
-  - Architecture and philosophy documentation (docs/internal/planning/epoch-architecture-philosophy.md)
-  - Coding style guide with Railway-Oriented Programming patterns (docs/internal/planning/coding-style-guide.md)
-  - Documentation guidelines for internal vs external docs (docs/internal/documentation-guidelines.md)
-  - Auto-loaded .claude/context.md for LLM sessions
-  - Session start checklist (.claude/session-start.md)
-- TODO.md for tracking work items and project planning
-  - Current Sprint section for active work visibility
-  - Priority levels (High, Medium, Low, Backlog)
-  - Known Issues tracking
-  - Recently Completed history
-- CHANGELOG.md following Keep a Changelog format
-  - Unreleased section for ongoing work
-  - Semantic versioning guidelines
-  - Version 1.0.0 release criteria
-- TODO and CHANGELOG workflow documentation (docs/internal/todo-changelog-workflow.md)
-  - Daily workflow for feature development
-  - Weekly workflow for sprint management
-  - Release workflow with 10-step process
-  - LLM-assisted development patterns
-  - Templates for TODO items and CHANGELOG entries
-- PostgreSQL repository implementation planning document (docs/internal/planning/postgres-repository-implementation.md)
-  - Comprehensive 4-phase implementation plan (8-12 hours total)
-  - Database schema design with JSONB event storage
-  - Trait implementation patterns following ESDB and Redis
-  - Connection pooling strategy with bb8
-  - Optimistic concurrency control using sequence numbers
-  - Generic spec test integration approach
-  - Migration guides from in-memory, ESDB, and Redis backends
-  - Railway-Oriented Programming error handling patterns
-  - Performance considerations and indexing strategy
+- Versioned schema migrations (`PgEventStreams::migrate`): numbered,
+  ordered, immutable step files (0001-0005) applied under one
+  transaction behind an advisory lock, recorded in an applied ledger,
+  idempotent and safe under concurrent callers
+- Event feed surface (`EventFeed` trait): at-least-once poll/ack delivery
+  over the committed log, per consumer group (ADR 0010)
+- PostgreSQL feed implementation (`PgEventFeed`) with per-group cursor
+  storage (`epoch_feed_cursors`, migrations 0004/0005)
+- Consumer metadata: feed entries deliver each event as a
+  `RecordedEvent` carrying its `EventMetadata` envelope, the same keyed
+  shape the write path stores
 
 ### Changed
-- Enhanced coding style guide with trucker_buddy_rs patterns
-  - Added Railway-Oriented Programming section with visual diagrams
-  - Added "Making Illegal States Unrepresentable" principle
-  - Added protected concrete types (smart constructors) pattern
-  - Added validation helpers for error composition
-  - Expanded anti-patterns section
-- Updated architecture philosophy documentation
-  - Added sections on illegal states and Railway-Oriented Programming
-  - Added Scott Wlaschin's principles and influences
-  - Enhanced with practical examples
-- Updated .claude/context.md with Session Start Protocol
-  - Added references to TODO.md and CHANGELOG.md
-  - Added core philosophical principles section
-  - Enhanced "When Working on Epoch" checklist
-- Established NO EMOJIS as strict documentation standard across all files
+- Single-writer funnel: every event transaction (single append and atomic
+  batch) now takes one global advisory lock, making insert order commit
+  order (ADR 0010 pivot)
+- Breaking: new error arms `AppendError::LockTimeout`,
+  `TransactError::LockTimeout`, and `PgStreamsError::LockTimeout`; feed
+  ack surfaces backend faults via `AckError::Backend`
+- New timeout builders with defaults: `with_lock_timeout` (5s) on
+  `PgEventFeed`; `with_lock_timeout` (5s) and
+  `with_idle_transaction_timeout` (30s) on the write handles
+  `PgEventStreams` and `PgDatabase`
+- Deployment assumption: run `migrate()` before any feed or write; the
+  funnel requires `CACHE 1` on the backing sequence, no sequence
+  rewinds, and no pre-funnel writers during a mixed-version deploy
 
-### Deprecated
-- None
-
-### Removed
-- None
-
-### Fixed
-- None
-
-### Security
-- None
+### Known Issues
+- Work in progress: not released, final review pending
+- Performance characterization pending: smoke tests only so far, no
+  production capacity claim
 
 ## [1.0.0-alpha.18] - Prior to Documentation
 
