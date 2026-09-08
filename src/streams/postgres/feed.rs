@@ -89,15 +89,12 @@ impl<E> Clone for PgEventFeed<E> {
 /// "wait forever" value these paths must not set. The feed-side,
 /// lock-only counterpart of the write path's
 /// `configure_writer_timeouts`: C3 gives the feed no holder bound.
-#[expect(
-    unused_variables,
-    reason = "timeout configuration body awaits implementation"
-)]
 async fn configure_feed_timeout(
     tx: &tokio_postgres::Transaction<'_>,
     bound_ms: u64,
 ) -> Result<(), tokio_postgres::Error> {
-    todo!("set the local lock_timeout GUC before lock-taking work")
+    tx.batch_execute(&format!("SET LOCAL lock_timeout = '{bound_ms}ms';"))
+        .await
 }
 
 /// Lock-timeout expiry inside a poll or ack transaction is a distinct
@@ -109,12 +106,12 @@ async fn configure_feed_timeout(
 /// UPDATE, and both commits can all wait on locks. Pre-bound pool,
 /// BEGIN, and config failures are not classified: the GUC is not yet
 /// in effect, so they stay ordinary connection errors.
-#[expect(
-    unused_variables,
-    reason = "statement classifier body awaits implementation"
-)]
 fn feed_statement_error(error: tokio_postgres::Error, bound: Duration) -> PgStreamsError {
-    todo!("classify LOCK_NOT_AVAILABLE as LockTimeout(bound), else Connection(error)")
+    if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) {
+        PgStreamsError::LockTimeout(bound)
+    } else {
+        PgStreamsError::Connection(error)
+    }
 }
 
 /// One group's progress row as poll and ack read it.

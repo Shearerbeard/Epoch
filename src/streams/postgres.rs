@@ -103,16 +103,18 @@ pub(crate) fn lock_timeout_ms(timeout: std::time::Duration) -> u64 {
 /// transaction may sit without an active statement, both in one
 /// single command. A bound the server rejects as out of range fails
 /// loudly rather than saturating to the server maximum.
-#[expect(
-    unused_variables,
-    reason = "timeout configuration body awaits implementation"
-)]
 async fn configure_writer_timeouts(
     tx: &tokio_postgres::Transaction<'_>,
     lock_timeout: std::time::Duration,
     idle_transaction_timeout: std::time::Duration,
 ) -> Result<(), tokio_postgres::Error> {
-    todo!("set both local GUCs in one command")
+    let lock_timeout = lock_timeout_ms(lock_timeout);
+    let idle_transaction_timeout = lock_timeout_ms(idle_transaction_timeout);
+    tx.batch_execute(&format!(
+        "SET LOCAL lock_timeout = '{lock_timeout}ms'; \
+         SET LOCAL idle_in_transaction_session_timeout = '{idle_transaction_timeout}ms';"
+    ))
+    .await
 }
 
 /// One category of streams in PostgreSQL, addressed by a typed id.
