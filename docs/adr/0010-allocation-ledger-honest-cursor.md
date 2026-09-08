@@ -248,8 +248,46 @@ per-append p50 on this database (3.8ms to 17.3ms). The full numbers
 live on the feed card either way; this record now describes the
 single-writer design that shipped in its place.
 
-The full benchmark measurement (C15) is not run yet; only the smoke
-validity run is complete.
+<!-- vale ai-tells.VerbTricolon = NO -->
+<!-- vale ai-tells.ParallelStaccato = NO -->
+<!-- Reason: the C15 results are measurement facts chained through
+     commas and semicolons - dense factual prose, not rhetorical
+     patterning; same false-positive class the board recorded
+     2026-08-14. -->
+The full benchmark measurement (C15) is complete. The writer study
+(measured source `746deba`, harness blob
+`2b6d71570afd72d1b713366141c47242cc1fc484`) ran three runs of 10,000
+operations per condition across 18 cases: 180,000 operations,
+405,000 measured events, zero recorded errors; an independent SQL
+count found 409,050 stored rows, exactly the measured events plus
+4,050 warm-up events.
+
+Median-of-three run-level results: append 1 caller 405.1 ops/s, run
+p99 6.09ms; append 4 callers 335.1 ops/s, p99 27.72ms; append
+8 callers 382.0 ops/s, p99 42.29ms; append 16 callers 301.3 ops/s,
+p99 110.34ms; atomic batch 4 callers 254.1 ops/s and 1,524.4
+events/s, p99 29.71ms; mixed writes, 8 callers plus feed, 207.8
+ops/s and 727.2 events/s, p99 69.19ms. Post-writer feed drain lag
+5.01-5.74ms. More callers did not improve append throughput; latency
+grew consistently with waiting behind one writer; batches amortized
+transaction cost across six events.
+
+The paired feed comparison (2026-09-08, fresh matching databases,
+alternating rounds, all 18 case records validated with zero errors)
+found no measurable feed-path cost on the C3/C4 timeout surface -
+median-of-three p99, baseline vs repair: poll-empty 3430us vs 3366us,
+poll-replay 6616us vs 5663us, poll-ack-cycles 10678us vs 11038us,
+within run-to-run variance.
+
+Retained limitations, stated plainly: the study ran on shared lab
+resources (PostgreSQL 16.14, fsync and synchronous_commit on, 1 KiB
+payloads, 32-connection pool, release build, Apple M4 Pro host with a
+4-CPU Docker VM); production capacity and SLO suitability remain
+unvalidated; run-to-run variance is visible; these figures must not
+be compared directly with the gate-S ledger spike, whose workloads
+and measurement conditions differed.
+<!-- vale ai-tells.VerbTricolon = YES -->
+<!-- vale ai-tells.ParallelStaccato = YES -->
 
 ## Consequences
 

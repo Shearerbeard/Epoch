@@ -92,3 +92,7 @@ funnel (append, atomic batch, feed) with bounded timeouts, the
 event-metadata seam, and the per-group cursor table. The trait types
 above are the backend-neutral surface; `PgEventFeed`, `PgEventStreams`,
 and `PgDatabase` are the postgres runtime implementations.
+
+Measurement is complete: the writer study and the paired feed
+comparison ran, and the figures are recorded in ADR 0010. The status
+stays WIP under final review; acceptance is still pending.

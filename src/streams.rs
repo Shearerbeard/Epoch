@@ -1,8 +1,6 @@
-//! Redesigned core stream surface (ADRs 0001-0005).
-//!
-//! Layer-1 typed-holes skeleton: the full type surface with `todo!()`
-//! bodies, pending the E1 design panel. No behavior lands here until
-//! the panel passes.
+//! Redesigned core stream surface (ADRs 0001-0005): the core stream
+//! trait surface, the feed surface (ADR 0010), and the atomic batch
+//! (ADR 0006).
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;

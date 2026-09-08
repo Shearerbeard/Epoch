@@ -6,9 +6,9 @@ the concrete shapes: the type surface, the postgres mechanics, the
 in-memory store design, and the future-backend scoping. The ADR stays
 readable; the details live here.
 
-Anchor stamp: claims verified against `card/e3` commit `4165ab2`
-(2026-08-07, the E3 implementation range, in review). Re-verifying
-bumps this stamp.
+Anchor stamp: claims verified against `card/e19-repair` commit
+`746deba` (2026-09-08, the post-pivot funnel surface under final
+review). Re-verifying bumps this stamp.
 
 ## Type surface (backend-neutral, `src/streams/batch.rs`)
 
@@ -80,8 +80,10 @@ impl PgDatabase {
 }
 impl PgBatchBuilder {
     /// serde_json encoding here, at push - PgWriteError::Encoding
-    /// before any transaction.
-    pub fn write<Id, E: Serialize>(...) -> Result<&mut Self, PgWriteError>;
+    /// before any transaction. Not a fluent builder: each call takes
+    /// `&mut self` and returns `Result<(), PgWriteError>`.
+    pub fn write<Id, E: Serialize>(&mut self, ...)
+        -> Result<(), PgWriteError>;
 }
 ```
 

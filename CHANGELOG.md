@@ -41,8 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Issues
 - Work in progress: not released, final review pending
-- Performance characterization pending: smoke tests only so far, no
-  production capacity claim
+- Performance characterization (lab hardware): the writer and feed
+  paths are measured - append ~300-405 ops/s depending on caller
+  count, atomic batch ~1,524 events/s at 4 callers, feed drain lag
+  ~5-6ms, and the single-writer funnel bounds append throughput by
+  design; these are shared-lab numbers, not production capacity
+  claims
 
 ## [1.0.0-alpha.18] - Prior to Documentation
 
