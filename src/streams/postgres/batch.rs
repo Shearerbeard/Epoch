@@ -219,10 +219,12 @@ impl AtomicStreams for PgDatabase {
             .unzip();
 
         let mut conn = self.pool.get().await.map_err(PgStreamsError::Pool)?;
+        // A BEGIN failure is pre-bound: a connection error, never a
+        // lock-wait classification (the GUC below is not in effect yet).
         let tx = conn
             .transaction()
             .await
-            .map_err(|error| statement_error(error, self.lock_timeout))?;
+            .map_err(|error| TransactError::Backend(PgStreamsError::Connection(error)))?;
 
         // Bound the funnel acquisition below, and bound how long the
         // transaction may sit without an active statement. A setup
