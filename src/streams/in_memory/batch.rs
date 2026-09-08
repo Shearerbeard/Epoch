@@ -173,8 +173,6 @@ mod tests {
     const CHORES: &str = "chores";
 
     fn kid_event() -> EventBatch<KidHoldsCard> {
-        // A single-element batch is trivially nonempty, so the
-        // empty-batch error is unreachable.
         EventBatch::new(vec![KidHoldsCard]).expect("a single event is nonempty")
     }
 
@@ -239,7 +237,7 @@ mod tests {
             }
 
             // One winner wrote each stream once; the loser wrote
-            // neither, so nothing partial survived.
+            // neither.
             let kid_store = db.category::<KidHoldsCard>(KIDS).expect("kid category");
             let chore_store = db.category::<CardAssigned>(CHORES).expect("chore category");
             assert_eq!(
@@ -318,7 +316,7 @@ mod tests {
         .expect("the append lands first");
 
         // The batch expects the stream the append just created to be
-        // empty: same head, same check, so it conflicts.
+        // empty, so it conflicts.
         let outcome = db.transact(draw(&db, "kid-shared", "chore-shared")).await;
         let conflict = match outcome {
             Err(TransactError::Conflict(conflict)) => conflict,

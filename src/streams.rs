@@ -1,6 +1,5 @@
-//! Redesigned core stream surface (ADRs 0001-0005): the core stream
-//! trait surface, the feed surface (ADR 0010), and the atomic batch
-//! (ADR 0006).
+//! Core stream surface: versioned event streams (ADRs 0001-0005), the
+//! atomic batch (ADR 0006), and the event feed (ADR 0010).
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -42,7 +41,7 @@ pub trait StreamId: Sized + Send + Sync {
     fn parse_key(key: &str) -> Result<Self, Self::ParseError>;
 }
 
-/// `String` keeps working for tests and simple consumers (ADR 0004).
+/// A plain string is a valid stream id (ADR 0004).
 impl StreamId for String {
     type ParseError = std::convert::Infallible;
 
@@ -104,8 +103,7 @@ pub enum StreamVersion {
     Exact(StreamSequence),
 }
 
-/// An observed position is usable as the expectation for the next
-/// append: `NoStream` maps to `NoStream`, `Exact` to `Exact`.
+/// An observed position is the expectation for the next append.
 impl From<StreamVersion> for ExpectedVersion {
     fn from(observed: StreamVersion) -> Self {
         match observed {
@@ -123,9 +121,7 @@ pub struct EmptyBatch;
 /// The opaque keyed envelope an event carries across the write path
 /// and the feed's delivery (ADR 0010). Epoch attaches no meaning to a
 /// key; the only interpretation that exists sits at the storage layer
-/// (the outbox stream's intent-key uniqueness index). Reaction keys -
-/// the identity a saga runner deduplicates redeliveries by - are the
-/// envelope's first rider.
+/// (the outbox stream's intent-key uniqueness index).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EventMetadata(BTreeMap<String, String>);
 
@@ -152,11 +148,9 @@ impl EventMetadata {
 }
 
 /// One event plus the envelope riding it through the write path. A
-/// bare event lifts into a record with an empty envelope, so
-/// unkeyed writers are unchanged; keyed writers (the saga runner's
-/// appends) construct records with metadata minted at append time,
-/// because the envelope is written by the framework, not the domain
-/// event.
+/// bare event lifts into a record with an empty envelope; a keyed
+/// record carries metadata minted at append time, because the envelope
+/// is written by the framework, not the domain event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedEvent<E> {
     event: E,
@@ -401,10 +395,8 @@ where
 }
 
 /// Versioned event streams over a typed id (ADRs 0002, 0003, 0004,
-/// 0005). Native async-fn-in-trait; the attribute rewrites the trait
-/// so its futures carry the `Send` bound generic consumers need to
-/// spawn them (no second trait is emitted). `append` takes `&self`:
-/// the version check, not the receiver, is the concurrency contract.
+/// 0005). `append` takes `&self`: the version check, not the receiver,
+/// is the concurrency contract.
 #[trait_variant::make(Send)]
 pub trait EventStreams<E>
 where

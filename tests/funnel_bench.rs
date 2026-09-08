@@ -97,30 +97,20 @@ impl Config {
             Ok("feed") => Mode::Feed,
             _ => return Err("EPOCH_BENCH_MODE must be set to writers or feed".to_owned()),
         };
-        let ops = match std::env::var("EPOCH_BENCH_OPS") {
+        let positive_count = |name: &str, default: usize| match std::env::var(name) {
             Ok(raw) => {
-                let ops: usize = raw
+                let count: usize = raw
                     .parse()
-                    .map_err(|_| format!("EPOCH_BENCH_OPS {raw:?} is not a count"))?;
-                if ops == 0 {
-                    return Err("EPOCH_BENCH_OPS must be positive".to_owned());
+                    .map_err(|_| format!("{name} {raw:?} is not a count"))?;
+                if count == 0 {
+                    return Err(format!("{name} must be positive"));
                 }
-                ops
+                Ok(count)
             }
-            Err(_) => 10000,
+            Err(_) => Ok(default),
         };
-        let rounds = match std::env::var("EPOCH_BENCH_ROUNDS") {
-            Ok(raw) => {
-                let rounds: usize = raw
-                    .parse()
-                    .map_err(|_| format!("EPOCH_BENCH_ROUNDS {raw:?} is not a count"))?;
-                if rounds == 0 {
-                    return Err("EPOCH_BENCH_ROUNDS must be positive".to_owned());
-                }
-                rounds
-            }
-            Err(_) => 3,
-        };
+        let ops = positive_count("EPOCH_BENCH_OPS", 10000)?;
+        let rounds = positive_count("EPOCH_BENCH_ROUNDS", 3)?;
         let only_round = match std::env::var("EPOCH_BENCH_ONLY_ROUND") {
             Ok(raw) => {
                 let selected: usize = raw
@@ -243,7 +233,8 @@ async fn bench_pool(connection: &tokio_postgres::Config) -> PgPool {
         .build(manager)
         .await
         .expect("bench pool builds");
-    // Warm: hold every lease concurrently before dropping them.
+    // Warm: hold every lease concurrently before dropping them, so
+    // timing never pays connection setup.
     let leases: Vec<_> = join_all((0..POOL_SIZE).map(|_| pool.get())).await;
     for lease in &leases {
         lease.as_ref().expect("warm lease acquired");
@@ -315,7 +306,7 @@ async fn feed_attempt(
     group: &ConsumerGroup,
     ack: bool,
 ) -> Result<(u64, u64), String> {
-    // Ack cycles advance one event per poll; replay and empty polls page 32.
+    // Ack cycles advance one event per poll; replay and empty polls page.
     let limit = if ack { 1 } else { FEED_PAGE };
     let started = Instant::now();
     let page = feed
@@ -739,7 +730,8 @@ async fn run_case(
     condition: Condition,
     round: usize,
 ) -> serde_json::Value {
-    // One fresh category per condition round; nothing is ever deleted.
+    // One fresh category per condition round; nothing is ever deleted,
+    // so a rerun never collides with a previous one.
     let category = format!(
         "bench-{}-{}-r{round}",
         condition.name(),

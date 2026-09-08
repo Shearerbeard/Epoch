@@ -9,13 +9,10 @@
 //! writer is ever in flight. That makes insert order commit order by
 //! construction, which is the property the feed's plain-maximum
 //! cursor rests on: no event can become visible below an already
-//! committed value. The version check inside the funnel decides
-//! conflicts exactly as before; the funnel only serializes who may
-//! run one. The lock is transaction-scoped, so a cancelled future
-//! releases it at rollback rather than leaking. The unique position
-//! constraint in the first migration step backstops the same
-//! invariant at the storage layer, alongside a check constraint that
-//! keeps positions 1-based.
+//! committed value. The version check runs inside the funnel, so its
+//! head observation sees no concurrent writer. The lock is
+//! transaction-scoped, so a cancelled future releases it at rollback
+//! rather than leaking.
 //!
 //! The funnel's ordering theorem rests on operating assumptions the
 //! schema cannot enforce; every writer of `stream_events` must honor
@@ -50,9 +47,9 @@ use tokio_postgres::{NoTls, Row};
 use crate::decider::Event;
 
 use super::{
-    AppendError, CategoryEvent, EventBatch, EventMetadata, EventStreams, ExpectedVersion,
-    LoadError, RecordedEvent, StreamId, StreamSequence, StreamSlice, StreamState, StreamVersion,
-    VersionConflict,
+    batch::expectation_satisfied, AppendError, CategoryEvent, EventBatch, EventMetadata,
+    EventStreams, ExpectedVersion, LoadError, RecordedEvent, StreamId, StreamSequence, StreamSlice,
+    StreamState, StreamVersion, VersionConflict,
 };
 
 mod batch;
@@ -96,14 +93,10 @@ pub(crate) fn lock_timeout_ms(timeout: std::time::Duration) -> u64 {
 }
 
 /// Apply both writer timeout bounds to one event transaction before
-/// the funnel acquisition, shared by the single append and the atomic
-/// batch paths: `SET LOCAL lock_timeout` bounding the funnel wait and
-/// `SET LOCAL idle_in_transaction_session_timeout` bounding how long
-/// the transaction may sit without an active statement, both in one
-/// single command. Both are converted by [`lock_timeout_ms`], so a
-/// zero or sub-millisecond bound normalizes to the 1ms floor. A bound
-/// the server rejects as out of range fails loudly rather than
-/// saturating to the server maximum.
+/// the funnel acquisition: `SET LOCAL lock_timeout` bounding the
+/// funnel wait and `SET LOCAL idle_in_transaction_session_timeout`
+/// bounding idle time, in one command. A bound the server rejects as
+/// out of range fails loudly rather than saturating.
 async fn configure_writer_timeouts(
     tx: &tokio_postgres::Transaction<'_>,
     lock_timeout: std::time::Duration,
@@ -235,20 +228,18 @@ pub enum PgStreamsError {
 }
 
 /// Lock-timeout expiry inside an append transaction is a distinct
-/// retryable outcome, never a generic backend fault (ADR 0010's
-/// funnel contract, the append-side twin of the batch path's
-/// statement classifier). Every statement after the funnel
-/// acquisition routes its failure through here so an expiry is
-/// classified the same wherever it arises - the funnel lock itself,
-/// the head read, the inserts, and the commit can all wait on locks.
+/// retryable outcome, never a generic backend fault (ADR 0010). Every
+/// statement after the funnel acquisition routes its failure through
+/// here so an expiry is classified the same wherever it arises - the
+/// funnel lock itself, the head read, the inserts, and the commit can
+/// all wait on locks.
 fn append_statement_error(
     error: tokio_postgres::Error,
     lock_timeout: std::time::Duration,
 ) -> AppendError<PgStreamsError> {
     if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) {
         // The GUC floors zero/sub-millisecond bounds to 1ms, so the
-        // retryable payload names the bound actually in effect - the
-        // same post-floor value the feed classifier reports.
+        // retryable payload names the bound actually in effect.
         AppendError::LockTimeout(std::time::Duration::from_millis(lock_timeout_ms(
             lock_timeout,
         )))
@@ -272,9 +263,7 @@ fn stored_position(raw: i64) -> u64 {
     u64::try_from(raw).expect("stored sequences are non-negative")
 }
 
-/// Rows to records: the envelope decodes exactly as the append path
-/// encoded it, so a load hands back the stored envelope instead of a
-/// rebuilt empty one.
+/// Rows to records, each with the envelope stored beside it.
 fn decode_records<'a, E>(
     rows: impl IntoIterator<Item = &'a Row>,
 ) -> Result<Vec<RecordedEvent<E>>, serde_json::Error>
@@ -314,8 +303,6 @@ where
         if records.is_empty() {
             Ok(StreamState::Missing)
         } else {
-            // The nonempty invariant was just checked above, so the
-            // empty-batch error is unreachable.
             Ok(StreamState::Present(
                 EventBatch::from_records(records).expect("records were checked nonempty"),
             ))
@@ -362,9 +349,7 @@ where
                 .is_some_and(|sequence| stored_position(sequence) >= cursor)
         });
 
-        // The pair is consistent by construction: rows only exist for a
-        // stream whose observation is `Exact`, so the misshapen-slice
-        // error is unreachable.
+        // Rows only exist for a stream whose observation is `Exact`.
         Ok(
             StreamSlice::new(decode_records(in_range)?, version_of(stored_position(head)))
                 .expect("in-range rows imply an Exact observation"),
@@ -407,9 +392,6 @@ where
             .await
             .map_err(PgStreamsError::Connection)?;
 
-        // The funnel: exactly one event transaction runs at a time,
-        // so the head read below observes a store no rival can be
-        // concurrently appending to.
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
             .await
             .map_err(|error| append_statement_error(error, self.lock_timeout))?;
@@ -425,16 +407,7 @@ where
             .get("position");
         let observed = version_of(stored_position(position));
 
-        let satisfied = match expected {
-            ExpectedVersion::Any => true,
-            ExpectedVersion::NoStream => matches!(observed, StreamVersion::NoStream),
-            ExpectedVersion::StreamExists => matches!(observed, StreamVersion::Exact(_)),
-            ExpectedVersion::Exact(sequence) => observed == StreamVersion::Exact(sequence),
-        };
-        if !satisfied {
-            // The pair is a genuine conflict because it is only built
-            // when the check just failed, so the not-a-conflict error
-            // is unreachable.
+        if !expectation_satisfied(expected, observed) {
             return Err(AppendError::Conflict(
                 VersionConflict::new(expected, observed)
                     .expect("the expectation just failed against the observation"),
@@ -619,48 +592,65 @@ mod tests {
         .await;
     }
 
+    /// Run `attempt` against a migrated store whose funnel is wedged:
+    /// a raw holder on a second connection already holds WRITER_LOCK
+    /// in an open transaction, released after the attempt returns. The
+    /// store comes back with the outcome so the caller can assert what
+    /// the timed-out attempt stored (nothing).
+    async fn against_wedged_funnel<F, O>(
+        lock_timeout: std::time::Duration,
+        attempt: impl FnOnce(PgEventStreams<String, SomethingHappened>) -> F,
+    ) -> (PgEventStreams<String, SomethingHappened>, O)
+    where
+        F: std::future::Future<Output = O>,
+    {
+        let _ = dotenv::dotenv();
+        let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
+        let pool = pool_from_conn_str(&conn_str)
+            .await
+            .expect("pg pool from EPOCH_PG_TEST_URL");
+        let store = PgEventStreams::<String, SomethingHappened>::new(pool.clone(), "spec-funnel")
+            .with_lock_timeout(lock_timeout);
+        store.migrate().await.expect("schema migrates");
+
+        let mut holder = pool.get().await.expect("a second connection");
+        let held = holder.transaction().await.expect("holder transaction");
+        held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
+            .await
+            .expect("the holder takes the funnel lock");
+
+        let outcome = attempt(store.clone()).await;
+        held.rollback().await.expect("the holder releases");
+        (store, outcome)
+    }
+
     /// A wedged writer holding the funnel is a retryable timeout on
-    /// the append path, never a hang and never a conflict: a second
-    /// connection holds WRITER_LOCK in an open transaction, and the
-    /// append's bounded wait expires against it.
+    /// the append path, never a hang and never a conflict.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_wedged_funnel_is_a_retryable_append_timeout() {
         under_deadline(async {
-            let _ = dotenv::dotenv();
-            let conn_str =
-                std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
-            let pool = pool_from_conn_str(&conn_str)
-                .await
-                .expect("pg pool from EPOCH_PG_TEST_URL");
-            let store =
-                PgEventStreams::<String, SomethingHappened>::new(pool.clone(), "spec-funnel")
-                    .with_lock_timeout(std::time::Duration::from_millis(100));
-            store.migrate().await.expect("schema migrates");
-            let key = format!("k-{}", rusty_ulid::generate_ulid_string());
-
-            let mut holder = pool.get().await.expect("a second connection");
-            let held = holder.transaction().await.expect("holder transaction");
-            held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
-                .await
-                .expect("the holder takes the funnel lock");
-
             let bound = std::time::Duration::from_millis(100);
-            let outcome = store
-                .append(
-                    ExpectedVersion::NoStream,
-                    &key,
-                    &EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty"),
-                )
-                .await;
+            let key = format!("k-{}", rusty_ulid::generate_ulid_string());
+            let (store, outcome) = against_wedged_funnel(bound, |store| {
+                let key = key.clone();
+                async move {
+                    store
+                        .append(
+                            ExpectedVersion::NoStream,
+                            &key,
+                            &EventBatch::new(vec![SomethingHappened])
+                                .expect("one event is nonempty"),
+                        )
+                        .await
+                }
+            })
+            .await;
             assert!(
                 matches!(outcome, Err(AppendError::LockTimeout(reported)) if reported == bound),
                 "expected a retryable funnel timeout, got {outcome:?}"
             );
-
-            held.rollback().await.expect("the holder releases");
-            let state = store.load_stream(&key).await.expect("load succeeds");
             assert_eq!(
-                state,
+                store.load_stream(&key).await.expect("load succeeds"),
                 StreamState::Missing,
                 "a timed-out append stores nothing"
             );
@@ -675,51 +665,37 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_zero_funnel_bound_times_out_reporting_the_server_floor() {
         under_deadline(async {
-            let _ = dotenv::dotenv();
-            let conn_str =
-                std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
-            let pool = pool_from_conn_str(&conn_str)
-                .await
-                .expect("pg pool from EPOCH_PG_TEST_URL");
-            let store =
-                PgEventStreams::<String, SomethingHappened>::new(pool.clone(), "spec-funnel")
-                    .with_lock_timeout(std::time::Duration::ZERO);
-            store.migrate().await.expect("schema migrates");
             let key = format!("k-{}", rusty_ulid::generate_ulid_string());
-
-            let mut holder = pool.get().await.expect("a second connection");
-            let held = holder.transaction().await.expect("holder transaction");
-            held.execute("SELECT pg_advisory_xact_lock($1)", &[&WRITER_LOCK])
-                .await
-                .expect("the holder takes the funnel lock");
-
-            let outcome = store
-                .append(
-                    ExpectedVersion::NoStream,
-                    &key,
-                    &EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty"),
-                )
-                .await;
+            let (_, outcome) = against_wedged_funnel(std::time::Duration::ZERO, |store| {
+                let key = key.clone();
+                async move {
+                    store
+                        .append(
+                            ExpectedVersion::NoStream,
+                            &key,
+                            &EventBatch::new(vec![SomethingHappened])
+                                .expect("one event is nonempty"),
+                        )
+                        .await
+                }
+            })
+            .await;
             assert!(
                 matches!(outcome, Err(AppendError::LockTimeout(reported)) if reported == std::time::Duration::from_millis(1)),
                 "expected the floored 1ms bound, got {outcome:?}"
             );
-
-            held.rollback().await.expect("the holder releases");
         })
         .await;
     }
 
-    /// The funnel's discriminating proof (pre-Gate-U review round,
-    /// finding C1): a holder inside WRITER_LOCK with an uncommitted
-    /// insert blocks a rival store append - the rival is observed
-    /// waiting on the advisory lock in pg_locks, not merely
-    /// unscheduled - and a poll in that window delivers nothing the
-    /// holder or the rival wrote; after the holder rolls back, the
+    /// The funnel's discriminating proof: a holder inside WRITER_LOCK
+    /// with an uncommitted insert blocks a rival store append - the
+    /// rival is observed waiting on the advisory lock in pg_locks, not
+    /// merely unscheduled - and a poll in that window delivers nothing
+    /// the holder or the rival wrote; after the holder rolls back, the
     /// rival commits above the holder's burned value and one poll
-    /// delivers it. Under the pre-pivot per-stream locks the rival
-    /// would not have waited on the holder at all - the wait IS the
-    /// funnel's observable shadow.
+    /// delivers it. Without the funnel the rival would not wait on the
+    /// holder at all, so the observed wait is what proves serialization.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_funnel_holder_blocks_a_rival_append_until_release() {
         use crate::streams::feed::{ConsumerGroup, EventFeed, PollLimit};
@@ -781,8 +757,7 @@ mod tests {
             // its backend's pid - read before the spawn, from the one
             // pooled connection, which the append then leases - is
             // known, and the pg_locks probe below can name that exact
-            // waiter instead of any waiter with the funnel key (the
-            // same bind tests/writer_idle_timeout.rs uses).
+            // waiter instead of any waiter with the funnel key.
             let (rival_pool, rival_pid) = {
                 let config: tokio_postgres::Config =
                     conn_str.parse().expect("a valid connection string");
@@ -818,13 +793,10 @@ mod tests {
             // Establish that the rival actually waits on the funnel:
             // an ungranted advisory-lock row for WRITER_LOCK in
             // pg_locks, bound to the rival's own backend pid so an
-            // unrelated session's waiter cannot satisfy the probe. Our
-            // holder is the lock's only granted owner, so the rival
-            // queues behind it; under the pre-pivot implementation no
-            // session takes this key at all, so the probe cannot fire -
-            // which is what makes it discriminating rather than
-            // decorative (the 300ms sleep it replaces could only
-            // guess). Bounded: two seconds, then the test fails.
+            // unrelated session's waiter cannot satisfy the probe. A
+            // sleep here could only guess at scheduling; the observed
+            // row is the wait itself. Bounded: two seconds, then the
+            // test fails.
             // pg_locks stores the halves as oid (unsigned), hence u32.
             let classid = u32::try_from(WRITER_LOCK >> 32).expect("the lock key's high half");
             let objid = u32::try_from(WRITER_LOCK & 0xffff_ffff).expect("the lock key's low half");
@@ -939,37 +911,16 @@ mod tests {
         );
     }
 
-    /// The envelope a keyed append stores is the envelope both load
-    /// paths hand back: the full load and the slice return the stored
-    /// record intact, not a rebuilt empty-envelope one.
     #[tokio::test(flavor = "multi_thread")]
     async fn postgres_a_keyed_append_loads_back_with_its_envelope() {
         let store = store("spec-envelope-load").await;
-        let key = format!("stream-{}", rusty_ulid::generate_ulid_string());
-
-        let mut envelope = EventMetadata::new();
-        envelope.insert("intent", "saga-1/order-5/2");
-        let batch =
-            EventBatch::from_records(vec![RecordedEvent::keyed(SomethingHappened, envelope)])
-                .expect("one event is nonempty");
-        store
-            .append(ExpectedVersion::NoStream, &key, &batch)
-            .await
-            .expect("append succeeds");
-
-        assert_eq!(
-            store.load_stream(&key).await.expect("load succeeds"),
-            StreamState::Present(batch.clone()),
-            "the full load returns the stored envelope"
-        );
-        let slice = store
-            .load_stream_from(&key, None)
-            .await
-            .expect("slice load succeeds");
-        assert_eq!(
-            slice.records(),
-            batch.records(),
-            "the slice carries the stored envelope"
-        );
+        crate::streams::spec::under_deadline(
+            crate::streams::spec::a_keyed_append_loads_back_with_its_envelope(
+                store,
+                str::to_owned,
+                || SomethingHappened,
+            ),
+        )
+        .await;
     }
 }

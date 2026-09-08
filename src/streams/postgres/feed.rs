@@ -11,9 +11,7 @@
 //! 4). Both poll and ack run as one transaction each - the entries a
 //! poll returns and the watermark it records derive from one
 //! snapshot, and an ack's check-then-advance cannot interleave with
-//! itself. The row is locked for the transaction's life, which is
-//! also the v1 one-poller-per-group contract's backstop: a second
-//! poller contends on the row lock rather than racing the watermark.
+//! itself.
 //!
 //! Poll and ack bound their lock waits: each transaction sets a
 //! local `lock_timeout` before taking the cursor row, and an expiry
@@ -81,14 +79,8 @@ impl<E> Clone for PgEventFeed<E> {
 }
 
 /// Apply the feed's lock-wait bound to one poll/ack transaction
-/// before lock-taking work: `SET LOCAL lock_timeout` bounding the
-/// cursor row's `FOR UPDATE` and every index lock the statements
-/// take. Converted by [`lock_timeout_ms`], so a zero or
-/// sub-millisecond bound normalizes to the 1ms floor - the one
-/// "wait forever" value these paths must not set. The feed-side,
-/// lock-only counterpart of the write path's
-/// `configure_writer_timeouts`: the feed has no idle-in-transaction
-/// bound.
+/// before lock-taking work. The feed bounds lock waits only; unlike
+/// the writer paths it has no idle-in-transaction bound.
 async fn configure_feed_timeout(
     tx: &tokio_postgres::Transaction<'_>,
     bound_ms: u64,
@@ -99,16 +91,12 @@ async fn configure_feed_timeout(
 
 /// Lock-timeout expiry inside a poll or ack transaction is a distinct
 /// retryable outcome (`PgStreamsError::LockTimeout`), never a generic
-/// backend fault (ADR 0010, the feed-side twin of the append and
-/// batch statement classifiers). Every statement after the GUC is in
-/// effect routes its failure through here - the cursor row's
-/// `FOR UPDATE`, the head read, the watermark upsert, the cursor
-/// UPDATE, and the one commit each transaction makes can all wait on
-/// locks. Ack's two branches - the no-op at the cursor and the
-/// advance - each commit through this classifier. Pre-bound failures
-/// are not classified: the GUC is not yet in effect, so a pool
-/// checkout stays `PgStreamsError::Pool` and a BEGIN or config
-/// failure stays an ordinary `Connection` error.
+/// backend fault (ADR 0010). Every statement after the GUC is in
+/// effect routes its failure through here so an expiry is classified
+/// the same wherever it arises. Pre-bound failures are not
+/// classified: the GUC is not yet in effect, so a pool checkout stays
+/// `PgStreamsError::Pool` and a BEGIN or config failure stays an
+/// ordinary `Connection` error.
 fn feed_statement_error(error: tokio_postgres::Error, bound: Duration) -> PgStreamsError {
     if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) {
         PgStreamsError::LockTimeout(bound)
@@ -137,6 +125,31 @@ impl Progress {
     }
 }
 
+/// One group's progress row, locked for the transaction's life. The
+/// `FOR UPDATE` is the one-poller-per-group contract's backstop: a
+/// second poller contends on the row lock rather than racing the
+/// watermark.
+async fn lock_progress(
+    tx: &tokio_postgres::Transaction<'_>,
+    category: &str,
+    group: &ConsumerGroup,
+    bound: Duration,
+) -> Result<Progress, PgStreamsError> {
+    Ok(tx
+        .query_opt(
+            "SELECT cursor, delivered_to FROM epoch_feed_cursors \
+             WHERE category = $1 AND group_name = $2 FOR UPDATE",
+            &[&category, &group.as_str()],
+        )
+        .await
+        .map_err(|error| feed_statement_error(error, bound))?
+        .map(|row| Progress::from_row(row.get("cursor"), row.get("delivered_to")))
+        .unwrap_or(Progress {
+            cursor: 0,
+            delivered_to: 0,
+        }))
+}
+
 impl<E> EventFeed<E> for PgEventFeed<E>
 where
     E: Event + DeserializeOwned + Send + Sync + Debug,
@@ -153,23 +166,9 @@ where
         let mut conn = self.pool.get().await?;
         let tx = conn.transaction().await?;
 
-        // The bound is in effect before the cursor row's FOR UPDATE,
-        // the transaction's first lock-taking statement.
         configure_feed_timeout(&tx, bound_ms).await?;
 
-        let progress = tx
-            .query_opt(
-                "SELECT cursor, delivered_to FROM epoch_feed_cursors \
-                 WHERE category = $1 AND group_name = $2 FOR UPDATE",
-                &[&self.category, &group.as_str()],
-            )
-            .await
-            .map_err(|error| feed_statement_error(error, effective_bound))?
-            .map(|row| Progress::from_row(row.get("cursor"), row.get("delivered_to")))
-            .unwrap_or(Progress {
-                cursor: 0,
-                delivered_to: 0,
-            });
+        let progress = lock_progress(&tx, &self.category, group, effective_bound).await?;
 
         // The cursor came from an i64 column, so the conversion back
         // cannot fail; a limit beyond i64::MAX means "no limit".
@@ -240,27 +239,15 @@ where
             .await
             .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?;
 
-        // The bound is in effect before the cursor row's FOR UPDATE,
-        // the transaction's first lock-taking statement. A config
-        // failure is pre-bound: an ordinary backend error, not a
-        // classified timeout.
+        // A config failure is pre-bound: an ordinary backend error,
+        // not a classified timeout.
         configure_feed_timeout(&tx, bound_ms)
             .await
             .map_err(|e| AckError::Backend(PgStreamsError::from(e)))?;
 
-        let progress = tx
-            .query_opt(
-                "SELECT cursor, delivered_to FROM epoch_feed_cursors \
-                 WHERE category = $1 AND group_name = $2 FOR UPDATE",
-                &[&self.category, &group.as_str()],
-            )
+        let progress = lock_progress(&tx, &self.category, group, effective_bound)
             .await
-            .map_err(|error| feed_statement_error(error, effective_bound))?
-            .map(|row| Progress::from_row(row.get("cursor"), row.get("delivered_to")))
-            .unwrap_or(Progress {
-                cursor: 0,
-                delivered_to: 0,
-            });
+            .map_err(AckError::Backend)?;
 
         let attempted = position.get();
         if attempted == progress.cursor {
@@ -270,16 +257,12 @@ where
             return Ok(());
         }
         if attempted < progress.cursor {
-            // The guard just failed, so the pair is a genuine
-            // regression and the constructor cannot reject it.
             return Err(AckError::Regression(
                 Regression::new(FeedCursor::at(progress.cursor), position)
                     .expect("the position was just checked below the cursor"),
             ));
         }
         if attempted > progress.delivered_to {
-            // The guard just failed, so the position is genuinely past
-            // delivery and the constructor cannot reject it.
             return Err(AckError::NotDelivered(
                 Undelivered::new(DeliveredWatermark::at(progress.delivered_to), position)
                     .expect("the position was just checked past delivery"),

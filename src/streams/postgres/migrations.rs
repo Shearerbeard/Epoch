@@ -2,10 +2,9 @@
 //!
 //! Steps are ordered, named SQL files under `migrations/`, embedded
 //! verbatim, and recorded in an applied ledger
-//! (`epoch_schema_migrations`) inside the database - replacing the
-//! single CREATE-IF-NOT-EXISTS batch that could never amend an
-//! existing table. A database created at any earlier shape reaches
-//! the current schema through [`PgEventStreams::migrate`] alone.
+//! (`epoch_schema_migrations`) inside the database. A database
+//! created at any earlier shape reaches the current schema through
+//! [`PgEventStreams::migrate`] alone.
 //!
 //! A step file is IMMUTABLE once any database has applied it. An
 //! edit to an applied step retroactively changes what fresh
@@ -13,16 +12,12 @@
 //! ledgers, divergent schemas. Schema changes arrive as new numbered
 //! step files, never as edits to existing ones; the current shape of
 //! the schema is the composition of the steps, readable in order.
-//! (Step 0003's comment points at an allocation-ledger step this
-//! wave once chartered; the gate-S spike's pivot superseded it, and
-//! the intent-key index it would have carried landed in step 0004.
-//! The comment stays as history - the step itself is immutable.)
 //!
 //! The whole run - lock, ledger read, pending steps, ledger writes -
-//! is one transaction behind the advisory-lock discipline the append
-//! path already uses, so concurrent callers serialize and the later
-//! ones find nothing pending. DDL in postgres is transactional, so a
-//! failed step rolls everything back, the ledger table included.
+//! is one transaction behind an advisory lock, so concurrent callers
+//! serialize and the later ones find nothing pending. DDL in
+//! postgres is transactional, so a failed step rolls everything
+//! back, the ledger table included.
 
 use std::collections::HashSet;
 
@@ -293,7 +288,6 @@ mod tests {
         let fresh = pool_for("epoch_migration_fresh").await;
         let current = pool_for("epoch_migration_current").await;
 
-        // The already-current database exists before the storm hits it.
         store(&current)
             .migrate()
             .await

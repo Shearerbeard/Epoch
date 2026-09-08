@@ -24,10 +24,9 @@
 //!
 //! Honesty notes: the configured 1ms normalization floor IS tested -
 //! the bounds case pins the REPORTED duration (`Duration` equality) -
-//! but the five-second default is never timed, and the default's field
-//! wiring remains unit-test material beside `configure_feed_timeout`.
-//! The feed bounds lock waits only; nothing here claims an idle-holder
-//! or client-duration bound.
+//! but the five-second default is never timed. The feed bounds lock
+//! waits only; nothing here claims an idle-holder or client-duration
+//! bound.
 
 #![cfg(feature = "postgres")]
 
@@ -51,9 +50,9 @@ impl epoch::decider::Event for Ticked {
     fn get_id(&self) -> Self::EntityId {}
 }
 
-/// The explicitly configured lock-wait bound under test - short
-/// enough that a contended poll or ack expires in milliseconds, never
-/// the 5s default.
+/// The configured lock-wait bound under test: short enough that a
+/// contended poll or ack expires in milliseconds, never the 5s
+/// default.
 const FEED_BOUND: Duration = Duration::from_millis(100);
 
 /// The live test database, exactly as the rest of the pg suite finds
@@ -73,8 +72,8 @@ fn unique_category(prefix: &str) -> String {
     format!("{prefix}-{}", rusty_ulid::generate_ulid_string())
 }
 
-/// The default library pool: the shared writer/feed handle's pool, and
-/// - on a second call - the independent holder connections.
+/// The default library pool: the shared writer/feed handle's pool,
+/// and the independent holder connections on a second call.
 async fn feed_pool() -> PgPool {
     epoch::streams::postgres::pool_from_conn_str(&conn_str())
         .await
@@ -97,8 +96,8 @@ async fn single_feed_pool() -> PgPool {
 }
 
 /// A writer and a feed over one fresh category, both on `pool`: the
-/// feed carries `lock_timeout`; the writer is the public append path
-/// the cases seed with. Everything here is public API surface.
+/// feed carries `lock_timeout`; the writer seeds through the public
+/// append path.
 async fn writer_and_feed(
     pool: PgPool,
     category: &str,
@@ -160,8 +159,6 @@ async fn a_held_cursor_row_times_out_poll_and_ack_without_moving_state() {
             .await
             .expect("the seed append succeeds");
 
-        // The establishing poll delivers and moves only the delivered
-        // watermark; no ack follows, so the cursor stays at START.
         let first = feed
             .poll(&group, limit)
             .await
@@ -361,10 +358,6 @@ async fn bounds_normalize_clone_and_stay_transaction_local() {
         assert_eq!(established.len(), 1, "the seeded event delivers alone");
         let tip = established.last().expect("the seeded entry").position();
 
-        // Each probe gets a feed handle configured off the fixture
-        // feed (`with_lock_timeout` takes self; the handle is Clone)
-        // and its own holder on the independent pool, rolled back
-        // before the next probe.
         let zero = feed.clone().with_lock_timeout(Duration::ZERO);
         let quarter_milli = feed.clone().with_lock_timeout(Duration::from_micros(250));
         let fifty = feed.clone().with_lock_timeout(Duration::from_millis(50));

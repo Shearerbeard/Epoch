@@ -11,32 +11,26 @@
 //! The idle bound is applied by the library's own
 //! `configure_writer_timeouts` path; the test observes only
 //! server-side consequences. A raw holder takes the single-writer
-//! funnel lock; the library pool is `max_size(1)` and its backend's
-//! pid is read before the pinned write future reuses it; the pinned
-//! future is selected against a bounded `pg_locks` probe until that
-//! exact pid is the funnel's ungranted waiter, then polling stops -
-//! the future is retained, never dropped or cancelled - while the
-//! holder rolls back. The tokio_postgres driver, independent of the
-//! unpolled future, completes the lock query, leaving the backend
-//! idle in transaction; bounded probes observe the grant, the
-//! `idle in transaction` state, and the backend's disappearance at
-//! the bound's expiry. The resumed future then fails as
-//! `Backend(PgStreamsError::Connection(_))`, never `LockTimeout`, and
-//! the inner SQLSTATE is not the retryable `55P03`; the termination's
-//! own code is unpinned (the server may report `25P03`, or the
-//! failure may arrive as an already-closed connection with no
-//! SQLSTATE). The exact-pid expiry observation is the causal proof;
-//! the assertion only pins the shape. Nothing may be stored, and a
-//! fresh operation must succeed through the pool's replacement
-//! connection. The whole case runs under `under_deadline`'s 60s
-//! outer bound, and every probe polls under its own short deadline.
+//! funnel lock; the library pool is `max_size(1)`, so the pinned
+//! write future reuses one known backend, and a bounded `pg_locks`
+//! probe waits until that exact pid is the funnel's ungranted waiter.
+//! The future is then retained - never dropped or cancelled - while
+//! the holder rolls back: the tokio_postgres driver, independent of
+//! the unpolled future, completes the lock query, leaving the backend
+//! idle in transaction until the server evicts it at the bound. The
+//! resumed future fails as `Backend(PgStreamsError::Connection(_))`,
+//! never `LockTimeout`, and the inner SQLSTATE is not the retryable
+//! `55P03`; the termination's own code is unpinned (the server may
+//! report `25P03`, or the failure may arrive as an already-closed
+//! connection with no SQLSTATE). The exact-pid expiry observation is
+//! the causal proof; the assertion only pins the shape. Nothing may
+//! be stored, and a fresh operation must succeed through the pool's
+//! replacement connection.
 //!
 //! Honesty notes: the 30-second default is not tested by waiting 30
-//! seconds - the default field is private, so the wiring proof is the
-//! configured 1s bound through a CLONE of the configured handle. The
-//! config floor and the default itself remain unit-test material.
-//! Active SQL, commit, and total client duration are outside this
-//! bound by design.
+//! seconds; the wiring proof is the configured 1s bound through a
+//! clone of the configured handle. Active SQL, commit, and total
+//! client duration are outside this bound by design.
 
 #![cfg(feature = "postgres")]
 
@@ -135,8 +129,7 @@ async fn single_writer_pool() -> (PgPool, i32) {
     (pool, pid)
 }
 
-/// The eviction choreography shared by both write paths - only the
-/// pinned future differs, so one generic helper, no boolean-mode flag.
+/// The eviction choreography shared by both write paths.
 /// `pinned` is the caller's `Box::pin`ned library write future
 /// (`append` or `transact`); the helper polls it only until the
 /// library backend is provably the funnel's waiter, then stops
@@ -182,12 +175,10 @@ async fn hold_then_starve_then_expire(
         let _ = monitor_connection.await;
     });
 
-    // pg_locks stores the halves as oid (unsigned), hence u32 - the
-    // same split the existing funnel proof uses.
+    // pg_locks stores the halves as oid (unsigned), hence u32.
     let classid = u32::try_from(WRITER_LOCK >> 32).expect("the lock key's high half");
     let objid = u32::try_from(WRITER_LOCK & 0xffff_ffff).expect("the lock key's low half");
 
-    // The advisory-key halves, shared by both funnel probes.
     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&classid, &objid];
 
     // Hold: the raw holder takes the funnel inside a transaction it
@@ -333,13 +324,10 @@ async fn hold_then_starve_then_expire(
     .await
     .expect("the configured idle bound evicts the writer backend");
 
-    // Cleanup: the holder already ended rolled back; dropping the raw
-    // clients closes both sockets, which ends the spawned driver
-    // tasks (a panic unwind drops them the same way, so the detached
-    // drivers still land). The happy path awaits both preserved
-    // JoinHandles under a bounded deadline instead of leaning on the
-    // case's outer bound. The pinned future is the caller's borrow
-    // and is left untouched for resumption.
+    // Cleanup: dropping the raw clients closes both sockets, which
+    // ends the spawned driver tasks (a panic unwind drops them the
+    // same way). The pinned future is the caller's borrow and is left
+    // untouched for resumption.
     drop(holder);
     drop(monitor);
     tokio::time::timeout(PROBE_DEADLINE, async {
@@ -374,8 +362,7 @@ async fn an_idle_append_holder_is_evicted_and_the_append_fails_as_a_session_faul
 
         let key = format!("idle-{}", rusty_ulid::generate_ulid_string());
         // The pinned future rides a CLONE: the case doubles as the
-        // clone-carries-the-bound wiring proof. The batch is bound
-        // because the pinned future borrows it.
+        // clone-carries-the-bound wiring proof.
         let writer = store.clone();
         let batch = EventBatch::new(vec![IdleWriter]).expect("one event is nonempty");
         let mut pinned = Box::pin(writer.append(ExpectedVersion::NoStream, &key, &batch));
@@ -407,8 +394,6 @@ async fn an_idle_append_holder_is_evicted_and_the_append_fails_as_a_session_faul
             "the evicted append stored nothing"
         );
 
-        // bb8 discards the dead connection on checkout, so this fresh
-        // append rides the pool's replacement backend.
         store
             .append(
                 ExpectedVersion::NoStream,
@@ -454,7 +439,7 @@ async fn an_idle_batch_holder_is_evicted_and_the_transact_fails_as_a_session_fau
         reader_a.migrate().await.expect("schema migrates");
 
         let db = PgDatabase::new(pool.clone()).with_idle_transaction_timeout(IDLE_BOUND);
-        let batch = {
+        let two_stream_batch = || {
             let mut builder = db.batch();
             builder
                 .write(
@@ -479,7 +464,7 @@ async fn an_idle_batch_holder_is_evicted_and_the_transact_fails_as_a_session_fau
         // the case doubles as the clone-carries-the-bound wiring
         // proof.
         let writer = db.clone();
-        let mut pinned = Box::pin(writer.transact(batch));
+        let mut pinned = Box::pin(writer.transact(two_stream_batch()));
 
         hold_then_starve_then_expire(pid, &mut pinned, IDLE_BOUND).await;
 
@@ -513,29 +498,7 @@ async fn an_idle_batch_holder_is_evicted_and_the_transact_fails_as_a_session_fau
             "no partial batch: the second stream holds nothing"
         );
 
-        // bb8 discards the dead connection on checkout, so this fresh
-        // transact rides the pool's replacement backend.
-        let fresh = {
-            let mut builder = db.batch();
-            builder
-                .write(
-                    &category_a,
-                    &key_a,
-                    ExpectedVersion::NoStream,
-                    &EventBatch::new(vec![IdleWriter]).expect("one event is nonempty"),
-                )
-                .expect("the first stream's write encodes");
-            builder
-                .write(
-                    &category_b,
-                    &key_b,
-                    ExpectedVersion::NoStream,
-                    &EventBatch::new(vec![IdleWriter]).expect("one event is nonempty"),
-                )
-                .expect("the second stream's write encodes");
-            builder.build().expect("the batch has writes")
-        };
-        db.transact(fresh)
+        db.transact(two_stream_batch())
             .await
             .expect("a fresh transact commits through the replacement connection");
         assert_eq!(

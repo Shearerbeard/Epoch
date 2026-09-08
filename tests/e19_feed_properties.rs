@@ -2,9 +2,9 @@
 //! poll/ack invariants over the in-memory feed, and live-postgres
 //! proofs for the properties only a real backend can exhibit - an
 //! aborted append burning a sequence value the cursor passes without
-//! waiting, committed positions staying contiguous under concurrent
-//! writers (the single-writer funnel's observable shadow), and a
-//! crashed consumer redelivered through a fresh handle.
+//! waiting, complete delivery with no latecomer under concurrent
+//! writers, and a crashed consumer redelivered through a fresh
+//! handle.
 //!
 //! ```sh
 //! cargo test --features postgres --test e19_feed_properties -- --nocapture
@@ -272,10 +272,10 @@ mod postgres_properties {
     /// a point in time, not the funnel's ordering theorem: every
     /// writer joins before the first poll, so a pre-funnel
     /// implementation would pass it too, and `global_sequence >
-    /// cursor` could never reveal a latecomer below the cursor
-    /// (review-round finding C1). The discriminating proof for the
-    /// funnel itself is `a_funnel_holder_blocks_a_rival_append_until_release`
-    /// in `src/streams/postgres.rs`. Literal position contiguity is
+    /// cursor` could never reveal a latecomer below the cursor. The
+    /// discriminating proof for the funnel itself is
+    /// `a_funnel_holder_blocks_a_rival_append_until_release` in
+    /// `src/streams/postgres.rs`. Literal position contiguity is
     /// not assertable on a shared database (the sequence is global
     /// and other categories' appends interleave draws); no-skip and
     /// no-latecomer is the property the feed actually promises.
@@ -350,8 +350,8 @@ mod postgres_properties {
     }
 
     /// A consumer that crashes between delivery and ack redelivers:
-    /// the original handle dropped, a fresh handle polls the same
-    /// group and receives the same entries.
+    /// no ack arrives for the group, and a fresh handle polls the
+    /// same entries again.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_crashed_consumer_redelivers_through_a_fresh_handle() {
         let category = unique("feed-prop-crash");

@@ -1,25 +1,11 @@
 //! The PostgreSQL [`AtomicStreams`] implementation (ADR 0006, under
 //! ADR 0010's post-pivot single-writer funnel).
 //!
-//! One transaction does the whole batch. Its first statement takes
-//! the one global writer lock every event transaction shares - the
-//! same funnel single append runs through - so exactly one writer is
-//! ever in flight and insert order is commit order by construction.
-//! The version checks and the head observations that back them run
-//! inside the funnel, exactly as before; only who may run one at a
-//! time changed.
-//!
-//! Waiting is bounded by a transaction-scoped `lock_timeout` on the
-//! funnel acquisition, and an
-//! `idle_in_transaction_session_timeout` evicts a transaction that
-//! sits without an active statement - idle-only, so active SQL, the
-//! commit, and total client duration stay outside it. Expiry of the
-//! funnel wait is its own retryable outcome
-//! ([`TransactError::LockTimeout`]), never a version conflict: the
-//! transaction rolls back whole and its xact-scoped lock releases
-//! with it. Every check runs before the first insert and the
-//! transaction is only committed once they all pass, so a rejected
-//! batch leaves no partial rows.
+//! One transaction does the whole batch under the one global writer
+//! lock every event transaction shares, so insert order is commit
+//! order by construction (the module doc in `super` carries the
+//! theorem and its operating assumptions). Every check runs before
+//! the first insert, so a rejected batch leaves no partial rows.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -162,16 +148,15 @@ fn statement_error(
 ) -> TransactError<PgStreamsError> {
     if error.code() == Some(&SqlState::LOCK_NOT_AVAILABLE) {
         // The GUC floors zero/sub-millisecond bounds to 1ms, so the
-        // payload names the bound actually in effect - the same
-        // post-floor value the append and feed classifiers report.
+        // payload names the bound actually in effect.
         TransactError::LockTimeout(Duration::from_millis(super::lock_timeout_ms(lock_timeout)))
     } else {
         TransactError::Backend(PgStreamsError::Connection(error))
     }
 }
 
-/// Every addressed stream's head inside the funnel, the same
-/// `COALESCE(MAX(sequence), 0)` observation single append makes.
+/// Every addressed stream's head inside the funnel, in one grouped
+/// query.
 async fn locked_heads(
     tx: &Transaction<'_>,
     categories: &[String],
@@ -229,16 +214,12 @@ impl AtomicStreams for PgDatabase {
             .await
             .map_err(|error| TransactError::Backend(PgStreamsError::Connection(error)))?;
 
-        // Bound the funnel acquisition below, and bound how long the
-        // transaction may sit without an active statement. A setup
-        // failure here is a connection error, never a lock-wait
+        // A setup failure here is a connection error, never a lock-wait
         // classification.
         configure_writer_timeouts(&tx, self.lock_timeout, self.idle_transaction_timeout)
             .await
             .map_err(|error| TransactError::Backend(PgStreamsError::Connection(error)))?;
 
-        // The funnel: one global writer lock, the same one single
-        // append takes, so insert order is commit order.
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&super::WRITER_LOCK])
             .await
             .map_err(|error| statement_error(error, self.lock_timeout))?;
@@ -385,8 +366,6 @@ mod postgres_tests {
     }
 
     fn kid_event() -> EventBatch<KidHoldsCard> {
-        // A single-element batch is trivially nonempty, so the
-        // empty-batch error is unreachable.
         EventBatch::new(vec![KidHoldsCard]).expect("a single event is nonempty")
     }
 
@@ -395,9 +374,8 @@ mod postgres_tests {
     }
 
     /// A draw: one write in each of two categories, both expecting the
-    /// streams to be untouched. `reversed` flips the order the streams
-    /// are declared in, which the batch's own lock ordering must make
-    /// irrelevant.
+    /// streams to be untouched. `reversed` flips the declaration
+    /// order; the outcome must be the same either way.
     fn draw(db: &PgDatabase, kid: &str, chore: &str, reversed: bool) -> PgBatch {
         let mut builder = db.batch();
         let write_kid = |builder: &mut PgBatchBuilder| {
@@ -447,15 +425,14 @@ mod postgres_tests {
     }
 
     /// The consumer-shaped smoke test. Two batches want the same two
-    /// streams and declare them in opposite orders: the sorted
-    /// acquisition is what keeps them from deadlocking, and the shared
-    /// pre-batch head is what makes exactly one of them lose.
+    /// streams and declare them in opposite orders: exactly one wins,
+    /// the other conflicts on the shared pre-batch head, and no
+    /// partial rows survive.
     ///
     /// Both batches are built before either transacts and the two tasks
     /// release together on a barrier, so the transactions genuinely
-    /// overlap in lock acquisition rather than one finishing before the
-    /// other begins - which is the only arrangement in which an
-    /// unsorted acquisition could deadlock.
+    /// contend on the funnel rather than one finishing before the
+    /// other begins.
     #[tokio::test(flavor = "multi_thread")]
     async fn overlapping_batches_leave_exactly_one_winner() {
         under_deadline(async {
@@ -635,8 +612,7 @@ mod postgres_tests {
                     ),
                 }
 
-                // Whoever won, the contested stream holds one event: the
-                // two writers took the same lock and read the same head.
+                // Whoever won, the contested stream holds one event.
                 assert_eq!(
                     kid_state(&fixture, &kid).await,
                     StreamState::Present(
@@ -648,38 +624,51 @@ mod postgres_tests {
         .await;
     }
 
+    /// Run a two-stream draw with `bound` against a wedged funnel: a
+    /// raw holder on a second connection already holds the global
+    /// writer lock in an open transaction, released after the transact
+    /// returns. The fixture and the kid key come back with the outcome
+    /// so the caller can assert nothing was stored.
+    async fn transact_against_wedged_funnel(
+        bound: Duration,
+    ) -> (Fixture, String, Result<(), TransactError<PgStreamsError>>) {
+        let fixture = fixture().await;
+        let (kid, chore) = (unique("kid"), unique("chore"));
+
+        // The holder's connection borrows its pool, so the pool is a
+        // local clone: nothing may borrow `fixture` when it is
+        // returned below.
+        let pool = fixture.pool.clone();
+        let mut holder = pool.get().await.expect("a second connection");
+        let held = holder.transaction().await.expect("holder transaction");
+        held.execute(
+            "SELECT pg_advisory_xact_lock($1)",
+            &[&super::super::WRITER_LOCK],
+        )
+        .await
+        .expect("the holder takes the funnel lock");
+
+        let outcome = fixture
+            .db
+            .clone()
+            .with_lock_timeout(bound)
+            .transact(draw(&fixture.db, &kid, &chore, false))
+            .await;
+        held.rollback().await.expect("the holder releases");
+        (fixture, kid, outcome)
+    }
+
     /// A lock the batch cannot take inside its bound is a retryable
-    /// timeout, not a conflict. A second connection holds the stream's
-    /// advisory lock in an open transaction; the batch's `SET LOCAL
-    /// lock_timeout` expires against it.
+    /// timeout, not a conflict.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unavailable_lock_is_a_retryable_timeout() {
         under_deadline(async {
-            let fixture = fixture().await;
-            let (kid, chore) = (unique("kid"), unique("chore"));
             let bound = Duration::from_millis(100);
-
-            let mut holder = fixture.pool.get().await.expect("a second connection");
-            let held = holder.transaction().await.expect("holder transaction");
-            held.execute(
-                "SELECT pg_advisory_xact_lock($1)",
-                &[&super::super::WRITER_LOCK],
-            )
-            .await
-            .expect("the holder takes the funnel lock");
-
-            let outcome = fixture
-                .db
-                .clone()
-                .with_lock_timeout(bound)
-                .transact(draw(&fixture.db, &kid, &chore, false))
-                .await;
+            let (fixture, kid, outcome) = transact_against_wedged_funnel(bound).await;
             assert!(
                 matches!(outcome, Err(TransactError::LockTimeout(reported)) if reported == bound),
                 "expected a retryable lock timeout, got {outcome:?}"
             );
-
-            held.rollback().await.expect("the holder releases");
             assert_eq!(
                 kid_state(&fixture, &kid).await,
                 StreamState::Missing,
@@ -691,35 +680,16 @@ mod postgres_tests {
 
     /// A zero configured bound is floored to 1ms server-side, and the
     /// timeout payload reports that effective bound, not the zero the
-    /// caller configured - the batch twin of the append path's floor
-    /// case.
+    /// caller configured.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_zero_funnel_bound_times_out_reporting_the_server_floor() {
         under_deadline(async {
-            let fixture = fixture().await;
-            let (kid, chore) = (unique("kid"), unique("chore"));
-
-            let mut holder = fixture.pool.get().await.expect("a second connection");
-            let held = holder.transaction().await.expect("holder transaction");
-            held.execute(
-                "SELECT pg_advisory_xact_lock($1)",
-                &[&super::super::WRITER_LOCK],
-            )
-            .await
-            .expect("the holder takes the funnel lock");
-
-            let outcome = fixture
-                .db
-                .clone()
-                .with_lock_timeout(Duration::ZERO)
-                .transact(draw(&fixture.db, &kid, &chore, false))
-                .await;
+            let (fixture, kid, outcome) =
+                transact_against_wedged_funnel(Duration::ZERO).await;
             assert!(
                 matches!(outcome, Err(TransactError::LockTimeout(reported)) if reported == Duration::from_millis(1)),
                 "expected the floored 1ms bound, got {outcome:?}"
             );
-
-            held.rollback().await.expect("the holder releases");
             assert_eq!(
                 kid_state(&fixture, &kid).await,
                 StreamState::Missing,
@@ -769,9 +739,9 @@ mod postgres_tests {
         .await;
     }
 
-    /// A satisfied constraint over a stream the batch does not write,
-    /// and a write onto an existing stream: the batch commits at the
-    /// next sequence, exactly as an append would have.
+    /// A satisfied constraint and two writes, one onto an existing
+    /// stream: the batch commits at the next sequence, exactly as an
+    /// append would have.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_satisfied_batch_commits_every_write() {
         under_deadline(async {

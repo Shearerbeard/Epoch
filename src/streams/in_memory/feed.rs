@@ -3,8 +3,7 @@
 //! The root's mutex is the single writer: appends and batches commit
 //! under one lock, so the log's arrival order is its commit order and
 //! a log index is a feed position (1-based). No abort burns a value,
-//! so positions are contiguous - the honest in-memory analogue of the
-//! single-writer funnel postgres now enforces with one advisory lock.
+//! so positions are contiguous.
 //!
 //! Per-group progress (ack cursor and delivered watermark) lives in
 //! the root beside the log, keyed by the feed's category and the
@@ -87,8 +86,7 @@ where
         // acknowledged positions, so scanning starts at its offset. A
         // cursor that does not fit usize exceeds every log length the
         // target can hold, so starting at the end is the exact empty
-        // page - a refinement over the old `as` cast, which could
-        // wrap and redeliver already-acked entries.
+        // page (an `as` cast could wrap and redeliver).
         let mut scan = usize::try_from(cursor).unwrap_or(root.log.len());
         while entries.len() < limit.get() && scan < root.log.len() {
             let stored = &root.log[scan];
@@ -142,16 +140,12 @@ where
             return Ok(());
         }
         if position.get() < progress.cursor {
-            // The guard just failed, so the pair is a genuine
-            // regression and the constructor cannot reject it.
             return Err(AckError::Regression(
                 Regression::new(FeedCursor::at(progress.cursor), position)
                     .expect("the position was just checked below the cursor"),
             ));
         }
         if position.get() > progress.delivered_to {
-            // The guard just failed, so the position is genuinely past
-            // delivery and the constructor cannot reject it.
             return Err(AckError::NotDelivered(
                 Undelivered::new(DeliveredWatermark::at(progress.delivered_to), position)
                     .expect("the position was just checked past delivery"),

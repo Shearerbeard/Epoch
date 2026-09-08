@@ -1,7 +1,7 @@
 //! Generic feed conformance cases over any [`EventFeed`]
 //! implementation paired with an [`EventStreams`] writer into the same
-//! store (the E11 pattern: backends wire their own test modules
-//! through these cases unchanged).
+//! store; backends wire their own test modules through these cases
+//! unchanged.
 //!
 //! Every case generates a unique consumer group per call (a ULID
 //! nonce in the group name) and a unique stream id, so cursor state
@@ -9,11 +9,7 @@
 //! assume their category holds only the events they seeded: a wiring
 //! must give each case a fresh store (or a fresh category) rather
 //! than a shared log, because the count assertions read the whole
-//! category tail. Cases pair a writer and a
-//! feed view over one store: the writer appends through the ordinary
-//! streams surface, the feed delivers through the polling surface,
-//! and the cases pin the at-least-once and monotonic-ack contract
-//! ADR 0010 states.
+//! category tail.
 
 use std::fmt::Debug;
 
@@ -27,8 +23,6 @@ use super::{
 
 /// A unique group name per call, so runs never collide.
 fn unique_group(prefix: &str) -> ConsumerGroup {
-    // Group names are non-empty by construction here, so the parse
-    // error is unreachable.
     ConsumerGroup::new(format!("{prefix}-{}", rusty_ulid::generate_ulid_string()))
         .expect("a ULID nonce names a non-empty group")
 }
@@ -40,8 +34,6 @@ fn unique_stream_id<Id>(prefix: &str, make_id: impl Fn(&str) -> Id) -> Id {
 }
 
 fn limit(raw: usize) -> PollLimit {
-    // The case constants are nonzero, so the zero-limit error is
-    // unreachable.
     PollLimit::new(raw).expect("case limits are nonzero")
 }
 

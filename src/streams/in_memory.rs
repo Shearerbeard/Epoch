@@ -246,7 +246,8 @@ where
     }
 }
 
-/// Hand-written because the erased payloads in the root are not `Debug`.
+/// Hand-written so the derive's spurious `E: Debug` bound is not
+/// required of callers, and so the erased log is not dumped.
 impl<E> Debug for InMemoryEventStreams<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InMemoryEventStreams")
@@ -282,6 +283,19 @@ where
         .clone()
 }
 
+/// One stream's records from the locked root, oldest first, each
+/// with the envelope its append stored.
+fn stream_records<E>(root: &Root, category: &str, key: &str) -> Vec<RecordedEvent<E>>
+where
+    E: Clone + 'static,
+{
+    root.log
+        .iter()
+        .filter(|stored| stored.category == category && stored.key == key)
+        .map(|stored| RecordedEvent::keyed(stored_event(&stored.payload), stored.metadata.clone()))
+        .collect()
+}
+
 impl<E> EventStreams<E> for InMemoryEventStreams<E>
 where
     E: Event + Clone + Send + Sync + Debug + 'static,
@@ -291,21 +305,11 @@ where
 
     async fn load_stream(&self, id: &Self::Id) -> Result<StreamState<E>, Self::Error> {
         let root = self.root.lock().expect("event store lock poisoned");
-        let key = id.stream_key();
-        let records: Vec<RecordedEvent<E>> = root
-            .log
-            .iter()
-            .filter(|stored| stored.category == self.category && stored.key == key)
-            .map(|stored| {
-                RecordedEvent::keyed(stored_event(&stored.payload), stored.metadata.clone())
-            })
-            .collect();
+        let records = stream_records(&root, &self.category, &id.stream_key());
 
         if records.is_empty() {
             Ok(StreamState::Missing)
         } else {
-            // The nonempty invariant was just checked above, so the
-            // empty-batch error is unreachable.
             Ok(StreamState::Present(
                 EventBatch::from_records(records).expect("records were checked nonempty"),
             ))
@@ -318,15 +322,7 @@ where
         from: Option<StreamSequence>,
     ) -> Result<StreamSlice<E>, Self::Error> {
         let root = self.root.lock().expect("event store lock poisoned");
-        let key = id.stream_key();
-        let history: Vec<RecordedEvent<E>> = root
-            .log
-            .iter()
-            .filter(|stored| stored.category == self.category && stored.key == key)
-            .map(|stored| {
-                RecordedEvent::keyed(stored_event(&stored.payload), stored.metadata.clone())
-            })
-            .collect();
+        let history = stream_records(&root, &self.category, &id.stream_key());
 
         let at = version_of(history.len() as u64);
         // `from` is 1-based and inclusive; a cursor past the tail reads
@@ -338,9 +334,8 @@ where
             history[start..].to_vec()
         };
 
-        // The pair is consistent by construction: nonempty records only
-        // come from a nonempty history, whose observation is `Exact`,
-        // so the misshapen-slice error is unreachable.
+        // Nonempty records only come from a nonempty history, whose
+        // observation is `Exact`.
         Ok(StreamSlice::new(records, at).expect("nonempty records imply an Exact observation"))
     }
 
@@ -375,9 +370,6 @@ where
         let observed = root.head(&self.category, &key);
 
         if !super::batch::expectation_satisfied(expected, observed) {
-            // The pair is a genuine conflict because it is only built
-            // when the check just failed, so the not-a-conflict error
-            // is unreachable.
             return Err(AppendError::Conflict(
                 VersionConflict::new(expected, observed)
                     .expect("the expectation just failed against the observation"),
@@ -452,49 +444,26 @@ mod tests {
         );
     }
 
-    /// The envelope a keyed append stores is the envelope both load
-    /// paths hand back: the full load and the slice return the stored
-    /// record intact, not a rebuilt empty-envelope one.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_keyed_append_loads_back_with_its_envelope() {
         let db = InMemoryDatabase::new();
         let store = db
             .category::<Noted>("envelope-load")
             .expect("fresh category");
-
-        let mut envelope = EventMetadata::new();
-        envelope.insert("intent", "saga-1/order-5/2");
-        let batch = EventBatch::from_records(vec![RecordedEvent::keyed(Noted, envelope)])
-            .expect("one event is nonempty");
-        store
-            .append(ExpectedVersion::NoStream, &"s".to_owned(), &batch)
-            .await
-            .expect("append succeeds");
-
-        assert_eq!(
-            store
-                .load_stream(&"s".to_owned())
-                .await
-                .expect("load succeeds"),
-            StreamState::Present(batch.clone()),
-            "the full load returns the stored envelope"
-        );
-        let slice = store
-            .load_stream_from(&"s".to_owned(), None)
-            .await
-            .expect("slice load succeeds");
-        assert_eq!(
-            slice.records(),
-            batch.records(),
-            "the slice carries the stored envelope"
-        );
+        crate::streams::spec::under_deadline(
+            crate::streams::spec::a_keyed_append_loads_back_with_its_envelope(
+                store,
+                str::to_owned,
+                || Noted,
+            ),
+        )
+        .await;
     }
 
     /// Documented v1 divergence, not an endorsement: the saga-outbox
     /// intent-key uniqueness is postgres-storage-level only (ADR
     /// 0010), so two appends carrying the same intent both succeed
-    /// here. Whether the backends must reach parity is the saga runner
-    /// card's gate A call.
+    /// here.
     #[tokio::test(flavor = "multi_thread")]
     async fn duplicate_intents_are_accepted_in_memory() {
         let db = InMemoryDatabase::new();

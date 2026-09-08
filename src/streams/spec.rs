@@ -22,8 +22,8 @@ use tokio::sync::Barrier;
 use crate::decider::Event;
 
 use super::{
-    AppendError, EventBatch, EventStreams, ExpectedVersion, StreamSequence, StreamState,
-    StreamVersion,
+    AppendError, EventBatch, EventMetadata, EventStreams, ExpectedVersion, RecordedEvent,
+    StreamSequence, StreamState, StreamVersion,
 };
 
 const RACE_ITERATIONS: usize = 20;
@@ -266,6 +266,44 @@ pub async fn flash_sale_sells_exactly_the_stock<S, E>(
         );
         assert_stored_event_count(&store, &id, FLASH_SALE_STOCK as u64 + 1).await;
     }
+}
+
+/// A keyed append's stored envelope is the envelope both load paths
+/// hand back: the full load returns the batch intact and the slice
+/// carries the same records. A backend must not rebuild a loaded
+/// record with an empty envelope when storage holds a keyed one.
+pub async fn a_keyed_append_loads_back_with_its_envelope<S, E>(
+    store: S,
+    make_id: impl Fn(&str) -> S::Id,
+    make_event: impl Fn() -> E,
+) where
+    S: EventStreams<E>,
+    E: Event + Clone + PartialEq + Send + Sync + Debug + 'static,
+{
+    let id = make_id(&unique_stream_id("envelope-load", 0));
+    let mut envelope = EventMetadata::new();
+    envelope.insert("intent", "saga-1/order-5/2");
+    let batch = EventBatch::from_records(vec![RecordedEvent::keyed(make_event(), envelope)])
+        .expect("one event is nonempty");
+    store
+        .append(ExpectedVersion::NoStream, &id, &batch)
+        .await
+        .expect("append succeeds");
+
+    assert_eq!(
+        store.load_stream(&id).await.expect("load succeeds"),
+        StreamState::Present(batch.clone()),
+        "the full load returns the stored envelope"
+    );
+    let slice = store
+        .load_stream_from(&id, None)
+        .await
+        .expect("slice load succeeds");
+    assert_eq!(
+        slice.records(),
+        batch.records(),
+        "the slice carries the stored envelope"
+    );
 }
 
 fn unique_stream_id(configuration: &str, iteration: usize) -> String {

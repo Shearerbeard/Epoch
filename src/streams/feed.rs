@@ -2,23 +2,17 @@
 //! durable cursors over the committed log, at-least-once delivery,
 //! and monotonic acknowledgement.
 //!
-//! The gate-S spike measured the allocation ledger's cost at 4.444x
-//! p99 on the single-append path against a pre-registered 2x limit,
-//! so the wave pivoted to the single-writer fallback the record names:
-//! every event transaction funnels through one serialized writer,
-//! which makes insert order commit order by construction. The cursor
-//! is a plain maximum over `global_sequence` - no ledger
-//! ranges, no reaper, no prefix machinery. A committed event below
-//! the log's maximum is always visible (nothing may be in flight
-//! below a committed value under one writer), so a cursor that reads
+//! Every event transaction funnels through one serialized writer, so
+//! insert order is commit order by construction and the cursor is a
+//! plain maximum over `global_sequence`. A committed event below the
+//! log's maximum is always visible (nothing may be in flight below a
+//! committed value under one writer), so a cursor that reads
 //! `WHERE global_sequence > cursor` can neither skip a committed
 //! event nor wait on a hole an abort burned permanently.
 //!
 //! Delivery is at-least-once: a crash between delivery and
 //! acknowledgement replays, and idempotency is the consumer's
-//! documented obligation. v1 pins ONE active poller per group - the
-//! Axon tracking-processor model; concurrent pollers per group are a
-//! later, separately chartered extension.
+//! documented obligation. v1 assumes ONE active poller per group.
 
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
@@ -118,7 +112,6 @@ impl ConsumerGroup {
         }
     }
 
-    /// The group's name.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -163,7 +156,6 @@ pub struct FeedEntry<E> {
 }
 
 impl<E> FeedEntry<E> {
-    /// Assemble an entry.
     pub fn new(position: FeedPosition, stream: StreamRef, record: RecordedEvent<E>) -> Self {
         Self {
             position,
@@ -187,7 +179,6 @@ impl<E> FeedEntry<E> {
         &self.record
     }
 
-    /// Consume the entry into its parts.
     pub fn into_parts(self) -> (FeedPosition, StreamRef, RecordedEvent<E>) {
         (self.position, self.stream, self.record)
     }
@@ -318,14 +309,11 @@ where
 }
 
 /// Delivery over the committed log for consumer groups (ADR 0010).
-/// Native async-fn-in-trait under the same `Send` rewrite the streams
-/// trait uses.
 ///
-/// v1 pins ONE active poller per group: an implementation may assume
-/// it, and a deployment that violates it gets at-least-once delivery
-/// at worst - the cursor still never advances past acknowledged
-/// positions. Concurrent pollers per group are a later, separately
-/// chartered extension.
+/// v1 assumes ONE active poller per group: an implementation may rely
+/// on it, and a deployment that violates it gets at-least-once
+/// delivery at worst - the cursor still never advances past
+/// acknowledged positions.
 #[trait_variant::make(Send)]
 pub trait EventFeed<E>
 where
