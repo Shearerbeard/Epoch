@@ -193,7 +193,7 @@ The golden suite is `src/streams/saga_outbox_golden.rs`
 `ReactionIndex::new` and `RenderedIntentKey::from_rendered`, behind
 the in-memory feed. Every fixture is whole-frame: a full stream's
 records, payloads and envelopes together, compared against an expected
-`RecordedEvent` list built from the spec. Seventeen fixtures cross a
+`RecordedEvent` list built from the spec. Eighteen fixtures cross a
 hole and fail on arrival (verified at the suite's landing commit:
 every failure is a `todo!()` panic at one of the four bodies); one
 constructor pin is green on arrival by design, listed below.
@@ -218,6 +218,7 @@ and step outcomes unchanged, not behavior downstream of the streams.
 | Failure appends `Failed`, cursor holds, redelivery re-performs | `a_failing_effect_appends_failed_and_holds_the_cursor` |
 | Budget exhaustion: park, hook once at park time, permanent advance, parked record is audit not trigger | `budget_exhaustion_parks_and_fires_the_hook_once` |
 | Crash between park and ack: replay re-fires the hook and appends nothing, performing never resumes past budget | `a_replayed_park_refires_the_hook_and_appends_nothing` |
+| Crash between the last failed and the park append: replay parks now with the durable count, and the hook fires once with no perform past budget | `a_crash_before_the_park_lands_parks_on_the_replay` |
 | Hook rejection at park: park stands, cursor holds, re-fire acks without a second park | `a_rejecting_hook_leaves_the_park_standing_and_refires` |
 | `run` poll loop drains the backlog (executor) | `executor_run_drains_the_backlog` |
 | Constructor rules (implemented surface, green on arrival by design) | `retry_and_budget_constructors_pin_the_spec` |

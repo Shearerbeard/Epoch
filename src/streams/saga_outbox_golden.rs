@@ -1532,6 +1532,100 @@ async fn a_rejecting_hook_leaves_the_park_standing_and_refires() {
     assert_eq!(port.calls.lock().unwrap().len(), 1);
 }
 
+/// The crash between the last `Failed` and the `Parked` append,
+/// replayed: the durable count is at the budget with no park on
+/// record, so the replay parks NOW - `Parked` with the durable count
+/// and the last recorded failure - fires the hook once, acks through,
+/// and never performs past the budget.
+#[tokio::test]
+async fn a_crash_before_the_park_lands_parks_on_the_replay() {
+    let rig = Rig::new();
+    let key = rendered("saga-15", SOURCE, "o-1", 1, 0);
+    let failed_error = "port failure: seed";
+    rig.seed_intent("saga-15", &key, Fx::Export { item: 85 })
+        .await;
+    rig.seed_failed("saga-15", &key, failed_error).await;
+    rig.seed_failed("saga-15", &key, failed_error).await;
+    let failed_position = rig.outbox_tip().await;
+
+    let port = Port::default();
+    let hook = Hook::default();
+    let executor = rig.executor("saga-15", port.clone(), hook.clone(), 2);
+
+    let step = executor.step(limit(10)).await.expect("the replay parks");
+    assert_eq!(
+        step,
+        ExecutorStep::Advanced {
+            acked_to: failed_position
+        },
+        "the park lands; the page's own entries ack through, the parked record arrives next poll"
+    );
+    let parked_position = rig.outbox_tip().await;
+    assert!(parked_position.get() > failed_position.get());
+
+    assert_eq!(
+        &*hook.fires.lock().unwrap(),
+        &[(key.clone(), 2, failed_error.to_owned())],
+        "the hook fires once at park time with the durable count and last failure"
+    );
+    assert!(
+        port.calls.lock().unwrap().is_empty(),
+        "the budget is exhausted: no further perform"
+    );
+    assert_eq!(
+        rig.outbox_records("saga-15").await,
+        vec![
+            (
+                OutboxEvent::Intent {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    request: Fx::Export { item: 85 },
+                },
+                intent_envelope(&key)
+            ),
+            (
+                OutboxEvent::Failed {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    error: failed_error.to_owned(),
+                },
+                EventMetadata::new()
+            ),
+            (
+                OutboxEvent::Failed {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    error: failed_error.to_owned(),
+                },
+                EventMetadata::new()
+            ),
+            (
+                OutboxEvent::Parked {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    attempts: NonZeroU32::new(2).expect("2 is nonzero"),
+                    error: failed_error.to_owned(),
+                },
+                EventMetadata::new()
+            ),
+        ]
+    );
+    assert_eq!(
+        executor
+            .step(limit(10))
+            .await
+            .expect("the parked record skips"),
+        ExecutorStep::Advanced {
+            acked_to: parked_position
+        }
+    );
+    assert_eq!(
+        hook.fires.lock().unwrap().len(),
+        1,
+        "an audit fact, not a trigger"
+    );
+    assert_eq!(
+        executor.step(limit(10)).await.expect("third step"),
+        ExecutorStep::Idle
+    );
+}
+
 /// The executor's poll loop drains the backlog: every intent is
 /// performed and recorded, in order, until the loop is stopped.
 #[tokio::test]
