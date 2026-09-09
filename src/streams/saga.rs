@@ -42,10 +42,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::batch::{BatchBuilder, BatchConflict, ConstraintViolation, StreamRef};
+use super::batch::{BatchBuilder, BatchConflict, ConstraintViolation, StreamRef, TransactError};
 use super::feed::{AckError, ConsumerGroup, EventFeed, FeedPosition, PollLimit};
-use super::outbox::{OutboxEvent, OUTBOX_CATEGORY};
-use super::{BatchSource, EventMetadata, EventStreams, ExpectedVersion};
+use super::outbox::{OutboxEvent, INTENT_METADATA_KEY, OUTBOX_CATEGORY};
+use super::{BatchSource, EventMetadata, EventStreams, ExpectedVersion, StreamState};
 
 /// A saga's identity: the runner's consumer-group name, the saga's
 /// outbox stream key, and the first component of every intent key the
@@ -651,12 +651,192 @@ where
     /// surfaced. Lock timeouts and indeterminate backend failures are
     /// retried under the runner's policy, then propagated, never
     /// classified.
-    #[expect(unused_variables, reason = "todo!() body; filled by E20")]
     pub async fn step(
         &self,
         limit: PollLimit,
     ) -> Result<RunnerStep, SagaError<Fld::Error, Fe::Error, Ob::Error, H::Error>> {
-        todo!()
+        let entries = self
+            .feed
+            .poll(&self.group, limit)
+            .await
+            .map_err(SagaError::Poll)?;
+        if entries.is_empty() {
+            return Ok(RunnerStep::Idle);
+        }
+
+        let mut acked_to = None;
+        for entry in &entries {
+            let position = entry.position();
+            let reactions = self.saga.react(entry.record().event());
+            if reactions.is_empty() {
+                self.feed
+                    .ack(&self.group, position)
+                    .await
+                    .map_err(SagaError::Ack)?;
+                acked_to = Some(position);
+                continue;
+            }
+
+            // The retry window. The fold consumes the groups by value
+            // and the batch type is not Clone across the generic, so
+            // every attempt regroups the same reactions: react is
+            // pure, so every attempt rebuilds an identical batch.
+            let mut delays = self.retry.delays();
+            let mut attempts_left = self.retry.attempts();
+            loop {
+                // Mint one key per reaction, in reaction order, and
+                // group as we go: commands per target stream in
+                // first-seen order, effects onto the saga's outbox
+                // stream. A second command for an already-grouped
+                // stream must agree on the expectation, or the group
+                // is rejected here - before any fold call, before any
+                // write.
+                let mut command_groups: Vec<CommandGroup<'_, S::Command>> = Vec::new();
+                let mut intents = Vec::new();
+                let mut minted_keys: Vec<RenderedIntentKey> = Vec::new();
+                for (index, reaction) in reactions.iter().enumerate() {
+                    let key = IntentKey::mint(
+                        self.saga.id(),
+                        entry.stream().clone(),
+                        position,
+                        ReactionIndex::new(index as u64),
+                    )
+                    .render();
+                    let mut envelope = EventMetadata::new();
+                    envelope.insert(INTENT_METADATA_KEY, key.as_str());
+                    match reaction {
+                        Reaction::Command(command) => {
+                            let record = KeyedPayload::new(key, envelope, command.payload());
+                            match command_groups
+                                .iter_mut()
+                                .find(|group| group.stream() == command.stream())
+                            {
+                                Some(group) => {
+                                    if group.expected() != command.expected() {
+                                        return Err(SagaError::ConflictingExpectations(
+                                            command.stream().clone(),
+                                        ));
+                                    }
+                                    group.records.push(record);
+                                }
+                                None => command_groups.push(CommandGroup::new(
+                                    command.stream().clone(),
+                                    command.expected(),
+                                    vec![record],
+                                )),
+                            }
+                        }
+                        Reaction::EffectRequest(request) => {
+                            minted_keys.push(key.clone());
+                            intents.push(KeyedPayload::new(key, envelope, request.payload()));
+                        }
+                    }
+                }
+
+                let mut builder = self.handle.builder();
+                for group in command_groups {
+                    self.fold
+                        .push_command_group(&mut builder, group)
+                        .map_err(SagaError::Fold)?;
+                }
+                if !intents.is_empty() {
+                    let group = IntentGroup::new(self.outbox_stream(), intents);
+                    self.fold
+                        .push_intent_group(&mut builder, group)
+                        .map_err(SagaError::Fold)?;
+                }
+                let batch = builder.build().expect(
+                    "the reaction set is nonempty, so the fold was handed at least \
+                     one group; a writeless batch means the fold accepted a group \
+                     and pushed no write - the fold-contract violation whose \
+                     wording gate A owns and whose variant the error surface lacks",
+                );
+
+                match self.handle.transact(batch).await {
+                    Ok(()) => {
+                        self.feed
+                            .ack(&self.group, position)
+                            .await
+                            .map_err(SagaError::Ack)?;
+                        acked_to = Some(position);
+                        break;
+                    }
+                    Err(TransactError::LockTimeout(bound)) => {
+                        attempts_left -= 1;
+                        if attempts_left == 0 {
+                            return Err(SagaError::LockTimeout(bound));
+                        }
+                        tokio::time::sleep(delays.next().expect("a wait per retry")).await;
+                    }
+                    Err(TransactError::Backend(error)) => {
+                        attempts_left -= 1;
+                        if attempts_left == 0 {
+                            return Err(SagaError::Backend(error));
+                        }
+                        tokio::time::sleep(delays.next().expect("a wait per retry")).await;
+                    }
+                    Err(
+                        abort @ (TransactError::Conflict(_)
+                        | TransactError::ConstraintViolated(_)
+                        | TransactError::DuplicateIntent(_)),
+                    ) => {
+                        // Classification runs only here, after the retry
+                        // window, on the last attempt's abort: the re-read
+                        // asks whether any of THIS entry's minted effect
+                        // keys stands on the outbox stream.
+                        let key_present = match self
+                            .outbox
+                            .load_stream(&self.saga.id().as_str().to_owned())
+                            .await
+                        {
+                            Ok(StreamState::Present(batch)) => {
+                                batch.records().iter().any(|record| {
+                                    matches!(
+                                        record.event(),
+                                        OutboxEvent::Intent { intent, .. }
+                                            if minted_keys.contains(intent)
+                                    )
+                                })
+                            }
+                            Ok(StreamState::Missing) => false,
+                            Err(error) => return Err(SagaError::OutboxRead(error)),
+                        };
+                        if key_present {
+                            // The reactions already committed in an earlier
+                            // attempt or lifetime: the abort is a redelivery
+                            // artifact, and the entry acks as a no-op.
+                            self.feed
+                                .ack(&self.group, position)
+                                .await
+                                .map_err(SagaError::Ack)?;
+                            acked_to = Some(position);
+                            break;
+                        }
+                        return Err(match abort {
+                            TransactError::Conflict(conflict) => SagaError::Conflict(conflict),
+                            TransactError::ConstraintViolated(violation) => {
+                                SagaError::ConstraintViolated(violation)
+                            }
+                            TransactError::DuplicateIntent(_) => {
+                                SagaError::IntentMissing(minted_keys.first().cloned().expect(
+                                    "the duplicate-intent outcome fires only when an \
+                                     intent write carried a key the store already \
+                                     holds, and intent writes carry exactly this \
+                                     entry's minted effect keys",
+                                ))
+                            }
+                            TransactError::LockTimeout(_) | TransactError::Backend(_) => {
+                                unreachable!("retryable aborts retry above and never classify")
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(RunnerStep::Advanced {
+            acked_to: acked_to.expect("entries were nonempty and every entry acked"),
+        })
     }
 
     /// The poll loop: `step` forever, sleeping `interval` between
