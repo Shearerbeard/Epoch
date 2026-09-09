@@ -4,7 +4,8 @@
   card's gate A, 2026-08-23, with the measured spike numbers and the
   executed pivot to option 3 - supersedes nothing, and discharges
   ADR 0007's deferral by that record's own trigger, the pull having
-  happened)
+  happened; completed at the runner card's gate A, 2026-09, with the
+  outbox-saga section)
 - Date: 2026-08 (drafted 2026-08-23 ahead of implementation, per the
   wave plan's session-order ruling; the gate-S spike is chartered below
   as this record's validation gate)
@@ -320,12 +321,82 @@ the review ledger below.
 - Deferred: the LISTEN/NOTIFY latency optimization. The shipped poll
   is pull-shaped; a wait-capable poll variant owns the optimization
   when a consumer needs it.
-- Open, each owned: final naming (the saga-outbox stream category
-  and its intent-key index are indicative until the runner card's
-  gate A). The outbox-saga section of this record - reaction format,
-  intent identity, the executor's retry and compensation contract -
-  is the runner card's gate-A deliverable and lands as a revision
-  here.
+- Open, each owned: none remain open from the feed card itself. The
+  outbox-saga section below is the runner card's gate-A revision and
+  carries the naming decisions that revision settled.
+
+### The outbox-saga section (E20's gate-A revision)
+
+The saga runner and the outbox executor are the reaction-shaped
+consumers this record promised a cursor for. Their contract, pinned
+here as the runner card's gate-A deliverable:
+
+- **Reaction format.** A [`Saga`] maps one delivered source event to
+  reactions - a command arm (events destined for a target stream,
+  under the writer's expectation) or an effect request (a payload to
+  perform outside epoch). `react` is pure (Fmodel-school): the same
+  event always yields the same reactions, which is what makes
+  redelivery safe to fold. Effects are recorded as facts and
+  performed by a separate executor (the outbox school); nothing is
+  ever performed inside the reaction.
+- **Reaction identity.** The runner mints a deterministic intent key
+  per reaction - (saga id, source stream, source committed position,
+  reaction index) - rendered canonically with component escaping so
+  the rendering is injective. The key rides the event envelope under
+  the framework-owned `intent` metadata name, and intent records
+  carry it in their payloads too (the executor never reads
+  envelopes). The storage-level uniqueness index over
+  `event_metadata->>'intent'` in the `saga-outbox` category is the
+  framework's duplicate-rejection mechanism; command-level dedupe is
+  the consumer's documented obligation (the command arm's key rides
+  its envelope so consumers can dedupe positionally). The names are
+  pinned by this revision: `saga-outbox` and `intent` are
+  framework-owned, and a rename is its own migration step - the
+  pre-revision "indicative" flags on both retire here.
+- **The fold.** One source event's reactions fold into ONE atomic
+  batch (ADR 0006): commands merged to one write per stream under
+  the single expectation they agreed on, intents merged to one write
+  on the saga's outbox stream at expectation `Any`. The feed-cursor
+  ack is a separate, explicit step after the append commits; the
+  window between them is real and closed by reaction identity.
+- **Redelivery classification.** Retryable aborts (lock timeout) and
+  indeterminate failures (backend) are retried under the runner's
+  bounded policy and then propagated - never classified. Every other
+  batch abort sends the runner back to the outbox stream for the
+  minted keys: key present means this event's reactions already
+  committed and the abort is a redelivery artifact - the typed
+  `DuplicateIntent` when the uniqueness index fired, a conflict when
+  the original commit moved a command arm's stream past its own
+  expectation - and the entry acks as a no-op. Key absent means a
+  real command-arm conflict, surfaced. A saga event with no effect
+  arms mints no outbox keys, so its aborts always classify as real;
+  reaction identity lives on the outbox stream.
+- **The executor.** A generic epoch runtime, one consumer group per
+  saga over the outbox category. Each intent performs through a
+  caller-supplied port that dedupes by the intent key (two distinct
+  reactions may carry identical payloads). Success appends `Done`;
+  each failure appends `Failed` with the rendered port error, and
+  the per-intent retry budget (default 5) is derived durably from
+  the stream's own `Failed` count for the key, so it survives
+  executor crashes. During the retry window the group cursor HOLDS
+  at the failing intent - bounded, backoff-bounded blocking with
+  order preserved. On exhaustion the intent parks TERMINAL-FAILED
+  (`Parked`, carrying the key and the durable count), the
+  compensation hook fires exactly once at park time in the executor
+  process (idempotent under replay, the same obligation effects
+  carry), and the group advances past permanently. Parking records
+  are audit facts, never a second trigger; a crash anywhere in the
+  park protocol resolves through the durable state on replay.
+- **Delivery language.** Effect delivery is ordered at-least-once;
+  "transactional" never describes it. The word belongs to the batch
+  (ADR 0006), whose atomicity is exactly what the runner buys.
+- **Backend scope.** The intent-key uniqueness is postgres-only in
+  v1; the in-memory backend accepts duplicate intents as a
+  documented divergence, pinned by its own test. The runner's
+  classification consumes keys through the feed and `load_stream`
+  alone - both envelope-preserving - and never through
+  `load_category`, so the category read's envelope gap is outside
+  the protocol.
 
 ## Links
 
@@ -337,6 +408,10 @@ the review ledger below.
   `src/streams/postgres/migrations/0001-create-stream-events.sql`,
   `src/streams/postgres.rs`, `src/streams/postgres/batch.rs`,
   and the feed surface `src/streams/feed.rs`
+- The outbox-saga section's sources: `src/streams/saga.rs` (the
+  runner), `src/streams/outbox.rs` (the executor),
+  `src/streams/batch.rs` (the typed `DuplicateIntent`), and the
+  runner card's design record `../design/e20-saga-outbox-DESIGN.md`
 - The race figure's original:
   [epoch-saga-ledger-infographic](https://shearerbeard.github.io/artifacts/epoch-saga-ledger-infographic)
   (rev 2, 2026-08-22)
@@ -405,3 +480,9 @@ model throughout: GLM-5.3 (the board owner's class).
    at drafting. The design-panel and gate reviews of the shipped
    surface live on the feed card's record; this entry closes the loop
    between the chartered validation gate and the decision it decided.
+8. The outbox-saga section, 2026-09, the runner card's gate-A
+   revision: authored by the runner card's board owner (GLM-5.3)
+   from the card's four-round reviewed spec and the design record;
+   reviewed at that card's gate A by a fresh context from a
+   different family (the card's review ledger names the model), over
+   a range whose every commit differs in family from the reviewer.
