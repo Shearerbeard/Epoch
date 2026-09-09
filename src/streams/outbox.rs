@@ -1,0 +1,362 @@
+//! The outbox executor (E20; ADR 0010's outbox-saga section, landing
+//! as that record's gate-A revision): a generic epoch runtime that
+//! consumes a saga's outbox stream through the event feed, performs
+//! effect intents through a caller-supplied port, and appends the
+//! outcome events. Ordered at-least-once is the documented delivery
+//! contract; idempotency is the consumer's documented obligation.
+//!
+//! Poison-intent policy: each intent gets a per-intent retry budget
+//! (default 5, exponential backoff), derived durably from the
+//! stream's own `Failed` records for the intent key, so it survives
+//! executor crashes. During the retry window the group cursor HOLDS
+//! at the failing intent - bounded, backoff-bounded blocking with
+//! order preserved. On exhaustion the intent is parked
+//! TERMINAL-FAILED on the outbox stream and the group advances past
+//! it permanently; the compensation hook fires at park time.
+//!
+//! Every write the executor makes goes through the store's append
+//! path, so the single-writer funnel's operating assumptions (ADR
+//! 0010, and the postgres module doc) bind deployments unchanged.
+
+#![allow(dead_code)] // E20 skeleton: removed slice by slice as the holes fill.
+
+use std::fmt;
+use std::marker::PhantomData;
+use std::num::NonZeroU32;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::decider::Event;
+
+use super::feed::{AckError, ConsumerGroup, EventFeed, FeedPosition, PollLimit};
+use super::saga::{RenderedIntentKey, RetryPolicy, SagaId};
+use super::EventStreams;
+
+/// The outbox stream category. Indicative until gate A pins final
+/// naming: the storage-level uniqueness index
+/// (`0004-feed-cursors-and-intent-key.sql`) reads this name, so a
+/// rename lands as its own migration step.
+pub const OUTBOX_CATEGORY: &str = "saga-outbox";
+
+/// The envelope key an intent's identity rides. The storage-level
+/// uniqueness index reads exactly this expression
+/// (`event_metadata->>'intent'`), so the key name is framework-owned
+/// and never consumer-configurable.
+pub const INTENT_METADATA_KEY: &str = "intent";
+
+/// One record on a saga's outbox stream: an effect intent, or the
+/// outcome of the executor's work on one. The category's event type
+/// is this enum, so intents and outcomes share one stream and one
+/// feed.
+///
+/// The intent key rides the ENVELOPE on `Intent` records (the
+/// uniqueness index reads it there) and the PAYLOAD on outcome
+/// records: an outcome carrying the key in its envelope would trip
+/// the same index that rejects duplicate intents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutboxEvent<F> {
+    /// An effect intent, appended by the saga runner inside the
+    /// reaction's atomic batch.
+    Intent(F),
+    /// The effect succeeded.
+    Done {
+        /// The intent's rendered key.
+        intent: RenderedIntentKey,
+    },
+    /// One perform attempt failed. The count of `Failed` records for
+    /// a key IS the retry budget's durable state: it survives
+    /// executor crashes because it is the stream itself.
+    Failed {
+        /// The intent's rendered key.
+        intent: RenderedIntentKey,
+        /// The port's error, rendered. Diagnostic-only: no domain
+        /// logic branches on it.
+        error: String,
+    },
+    /// TERMINAL-FAILED: the retry budget is exhausted and the group
+    /// advances past this intent permanently. Carries the key so a
+    /// crash between parking and ack replays as a no-op append. An
+    /// audit fact, not a second trigger.
+    Parked {
+        /// The intent's rendered key.
+        intent: RenderedIntentKey,
+        /// The durable failed-attempt count at park time.
+        attempts: u32,
+        /// The last failure, rendered. Diagnostic-only.
+        error: String,
+    },
+}
+
+impl<F> Event for OutboxEvent<F> {
+    type EntityId = ();
+
+    fn event_type(&self) -> String {
+        match self {
+            Self::Intent(_) => "OutboxIntent",
+            Self::Done { .. } => "OutboxDone",
+            Self::Failed { .. } => "OutboxFailed",
+            Self::Parked { .. } => "OutboxParked",
+        }
+        .to_owned()
+    }
+
+    fn get_id(&self) -> Self::EntityId {}
+}
+
+/// The per-intent retry budget: how many perform attempts an intent
+/// gets before it parks TERMINAL-FAILED. Derived durably from the
+/// stream's own `Failed` records for the intent key, so it survives
+/// executor crashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryBudget(NonZeroU32);
+
+impl RetryBudget {
+    /// Parse a budget; zero is not a budget.
+    pub fn new(raw: u32) -> Result<Self, ZeroBudget> {
+        NonZeroU32::new(raw).map(Self).ok_or(ZeroBudget)
+    }
+
+    /// The attempt count.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl Default for RetryBudget {
+    /// The card's pinned default: 5 attempts.
+    fn default() -> Self {
+        Self(NonZeroU32::new(5).expect("5 is nonzero"))
+    }
+}
+
+/// A retry budget of zero was requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("a retry budget must allow at least one attempt")]
+pub struct ZeroBudget;
+
+/// The consumer's effect port: performs one effect request. Called
+/// under at-least-once delivery - a crash between the external call
+/// and the outcome append replays the intent, and the port's
+/// idempotency absorbs the duplicate. That obligation is the
+/// consumer's, documented here.
+#[trait_variant::make(Send)]
+pub trait EffectPort<F> {
+    /// Port failure type; rendered onto the `Failed` record as
+    /// diagnostic text.
+    type Error: std::error::Error + Send + Sync;
+
+    /// Perform the effect.
+    async fn perform(&self, request: &F) -> Result<(), Self::Error>;
+}
+
+/// What the compensation hook learns at park time: the parked intent,
+/// its durable attempt count, and the last failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedNotice<F> {
+    key: RenderedIntentKey,
+    request: F,
+    attempts: u32,
+    error: String,
+}
+
+impl<F> ParkedNotice<F> {
+    pub(crate) fn new(key: RenderedIntentKey, request: F, attempts: u32, error: String) -> Self {
+        Self {
+            key,
+            request,
+            attempts,
+            error,
+        }
+    }
+
+    /// The parked intent's rendered key.
+    pub fn key(&self) -> &RenderedIntentKey {
+        &self.key
+    }
+
+    /// The effect payload that never landed.
+    pub fn request(&self) -> &F {
+        &self.request
+    }
+
+    /// The durable failed-attempt count at park time.
+    pub fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    /// The last failure, rendered. Diagnostic-only.
+    pub fn error(&self) -> &str {
+        &self.error
+    }
+}
+
+/// The consumer's compensation action, fired by the executor when an
+/// intent parks TERMINAL-FAILED. Fires at park time, in the executor
+/// process; a crash between the park append and the hook re-fires it
+/// on replay, so the hook carries the same idempotency obligation
+/// effects carry. Parking records are audit facts, never a second
+/// trigger.
+#[trait_variant::make(Send)]
+pub trait CompensationHook<F> {
+    /// Hook failure type; surfaces as [`ExecutorError::Hook`].
+    type Error: std::error::Error + Send + Sync;
+
+    /// Fire the compensation for one parked intent.
+    async fn on_parked(&self, notice: &ParkedNotice<F>) -> Result<(), Self::Error>;
+}
+
+/// The executor: polls the outbox category as the saga's executor
+/// group, performs each of the saga's intents through the port, and
+/// appends the outcome. Entries from other sagas' streams in the
+/// category, and outcome records, are skipped and acked past. During
+/// an intent's retry window the group cursor HOLDS at the failing
+/// intent; on exhaustion the intent parks and the group advances past
+/// it permanently.
+///
+/// Type parameters: `Fe` the outbox feed, `St` the outbox stream's
+/// store view (outcome appends and the failure count), `P` the port,
+/// `K` the compensation hook, `F` the effect payload.
+pub struct OutboxExecutor<Fe, St, P, K, F> {
+    feed: Fe,
+    store: St,
+    port: P,
+    hook: K,
+    saga: SagaId,
+    group: ConsumerGroup,
+    budget: RetryBudget,
+    backoff: RetryPolicy,
+    _marker: PhantomData<fn() -> F>,
+}
+
+impl<Fe, St, P, K, F> OutboxExecutor<Fe, St, P, K, F> {
+    /// Assemble an executor for one saga's outbox stream. The group
+    /// derives from the saga id: one executor group per saga, its
+    /// cursor independent of the runner's (group progress is scoped
+    /// per category).
+    pub fn new(
+        feed: Fe,
+        store: St,
+        port: P,
+        hook: K,
+        saga: SagaId,
+        budget: RetryBudget,
+        backoff: RetryPolicy,
+    ) -> Self {
+        let group = ConsumerGroup::new(saga.as_str()).expect("a saga id is a non-empty group name");
+        Self {
+            feed,
+            store,
+            port,
+            hook,
+            saga,
+            group,
+            budget,
+            backoff,
+            _marker: PhantomData,
+        }
+    }
+
+    /// The saga whose outbox stream this executor works.
+    pub fn saga(&self) -> &SagaId {
+        &self.saga
+    }
+
+    /// The executor's consumer group.
+    pub fn group(&self) -> &ConsumerGroup {
+        &self.group
+    }
+
+    /// The per-intent retry budget.
+    pub fn budget(&self) -> RetryBudget {
+        self.budget
+    }
+
+    /// The backoff schedule inside a retry window.
+    pub fn backoff(&self) -> RetryPolicy {
+        self.backoff
+    }
+}
+
+impl<Fe, St, P, K, F> OutboxExecutor<Fe, St, P, K, F>
+where
+    Fe: EventFeed<OutboxEvent<F>>,
+    St: EventStreams<OutboxEvent<F>, Id = String>,
+    P: EffectPort<F>,
+    K: CompensationHook<F>,
+    F: Send + Sync + fmt::Debug,
+{
+    /// One poll-perform-record cycle over up to `limit` delivered
+    /// entries. For one of this saga's intents: perform through the
+    /// port; on success append `Done` and ack; on failure append
+    /// `Failed` and, under budget, HOLD the cursor (the next poll
+    /// redelivers the intent after the backoff); at the budget,
+    /// append `Parked`, fire the hook, and ack past the intent
+    /// permanently. A replay that finds the `Parked` record already
+    /// present re-fires the hook (idempotent under replay) and acks:
+    /// the append is the no-op.
+    #[expect(unused_variables, reason = "todo!() body; filled by E20")]
+    pub async fn step(
+        &self,
+        limit: PollLimit,
+    ) -> Result<ExecutorStep, ExecutorError<K::Error, Fe::Error, St::Error>> {
+        todo!()
+    }
+
+    /// The poll loop: `step` forever, sleeping `interval` between
+    /// polls. Errors propagate; restarting the loop is the operator's
+    /// call.
+    #[expect(unused_variables, reason = "todo!() body; filled by E20")]
+    pub async fn run(
+        &self,
+        limit: PollLimit,
+        interval: std::time::Duration,
+    ) -> Result<(), ExecutorError<K::Error, Fe::Error, St::Error>> {
+        todo!()
+    }
+}
+
+/// What one [`OutboxExecutor::step`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutorStep {
+    /// The poll delivered nothing; the cursor did not move.
+    Idle,
+    /// Work completed and the cursor advanced to here - performed,
+    /// parked, and skipped entries included.
+    Advanced {
+        /// The position the group's cursor now stands at.
+        acked_to: FeedPosition,
+    },
+    /// An intent failed inside its retry window: its `Failed` record
+    /// is appended and the cursor HOLDS at the intent until the
+    /// backoff expires.
+    Holding {
+        /// The failing intent's rendered key.
+        intent: RenderedIntentKey,
+    },
+}
+
+/// How an [`OutboxExecutor::step`] can fail. Port failures are not
+/// here: they are `Failed` records, the retry protocol's input.
+#[derive(Debug, Error)]
+pub enum ExecutorError<HookE, FeedE, StoreE>
+where
+    HookE: std::error::Error,
+    FeedE: std::error::Error,
+    StoreE: std::error::Error,
+{
+    /// The compensation hook rejected a parked notice. The parked
+    /// record stands; the cursor does not advance, so the hook
+    /// re-fires on the next step.
+    #[error(transparent)]
+    Hook(HookE),
+    /// The outbox feed's poll failed.
+    #[error(transparent)]
+    Poll(FeedE),
+    /// The outbox feed rejected the ack.
+    #[error(transparent)]
+    Ack(#[from] AckError<FeedE>),
+    /// The outcome append or the failure-count read failed.
+    #[error(transparent)]
+    Store(StoreE),
+}

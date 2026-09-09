@@ -17,8 +17,8 @@ use tokio_postgres::Transaction;
 
 use crate::decider::Event;
 use crate::streams::batch::{
-    expectation_satisfied, AtomicStreams, Batch, BatchBuilder, BatchConflict, ConstraintViolation,
-    DuplicateWrite, StreamRef, TransactError,
+    expectation_satisfied, AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchSource,
+    ConstraintViolation, DuplicateWrite, StreamRef, TransactError,
 };
 use crate::streams::{EventBatch, ExpectedVersion, StreamId, StreamVersion};
 
@@ -90,6 +90,14 @@ impl PgDatabase {
     /// A builder for a batch this handle can commit.
     pub fn batch(&self) -> PgBatchBuilder {
         PgBatchBuilder::new()
+    }
+}
+
+impl BatchSource for PgDatabase {
+    type Wire = EncodedEvent;
+
+    fn builder(&self) -> PgBatchBuilder {
+        self.batch()
     }
 }
 

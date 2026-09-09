@@ -333,6 +333,35 @@ impl BatchConflict {
     }
 }
 
+/// A write carried an intent key the store already holds: the
+/// saga-outbox uniqueness index rejected the duplicate (E20's typed
+/// outcome, pinned by the saga card's final review). This is the
+/// framework's redelivery signal, never a version conflict: a
+/// redelivered source event re-appends its reactions, and storage
+/// rejects the second append of an intent key. Only a confirmed
+/// storage-level rejection is this outcome; the saga runner confirms
+/// the minted keys are present on the outbox stream before acking the
+/// no-op.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("duplicate intent rejected on {stream}")]
+pub struct DuplicateIntent {
+    stream: StreamRef,
+}
+
+impl DuplicateIntent {
+    /// Build the outcome on a confirmed storage-level uniqueness
+    /// rejection inside the outbox category. Backends construct it;
+    /// the saga runner consumes it.
+    pub fn new(stream: StreamRef) -> Self {
+        Self { stream }
+    }
+
+    /// The outbox stream whose write carried the duplicate key.
+    pub fn stream(&self) -> &StreamRef {
+        &self.stream
+    }
+}
+
 /// How a [`AtomicStreams::transact`] can fail. A conflict and a
 /// violated constraint each roll the whole batch back; a lock timeout
 /// is its own retryable class, never reported as a version conflict.
@@ -347,6 +376,12 @@ where
     /// A constraint was not satisfied.
     #[error(transparent)]
     ConstraintViolated(ConstraintViolation),
+    /// A write carried an intent key the store already holds. The
+    /// batch rolled back whole; the redelivered reaction is a no-op.
+    /// A backend whose store does not enforce the key never produces
+    /// this (the in-memory backend accepts duplicate intents in v1).
+    #[error(transparent)]
+    DuplicateIntent(DuplicateIntent),
     /// A lock could not be taken inside the batch's wait bound. The
     /// batch rolled back whole and the call is safe to retry.
     #[error("timed out after {0:?} waiting for the writer lock; retryable")]
@@ -378,6 +413,21 @@ pub trait AtomicStreams {
     /// write-side expectation is evaluated against the locked
     /// pre-batch heads, and any failure leaves the store untouched.
     async fn transact(&self, batch: Self::Batch) -> Result<(), TransactError<Self::Error>>;
+}
+
+/// A handle that hands out its own batch builder: ADR 0006's
+/// ownership seam extended to generic consumers such as the saga
+/// runner, which assembles a batch without naming the backend's wire
+/// form. The builder's wire form and the committed [`Batch`] are the
+/// same `W` by construction, so a batch built from this builder is
+/// always one this handle can commit.
+pub trait BatchSource: AtomicStreams<Batch = Batch<Self::Wire>> {
+    /// The backend's wire form, fixed by the builder this handle hands
+    /// out.
+    type Wire: Send;
+
+    /// A fresh builder bound to this handle's wire form.
+    fn builder(&self) -> BatchBuilder<Self::Wire>;
 }
 
 #[cfg(test)]

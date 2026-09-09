@@ -1,5 +1,7 @@
 //! Core stream surface: versioned event streams (ADRs 0001-0005), the
-//! atomic batch (ADR 0006), and the event feed (ADR 0010).
+//! atomic batch (ADR 0006), the event feed (ADR 0010), and the saga
+//! runner with its outbox executor (E20, ADR 0010's outbox-saga
+//! section).
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -14,14 +16,16 @@ mod batch;
 pub mod feed;
 #[cfg(feature = "in_memory")]
 pub mod in_memory;
+pub mod outbox;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+pub mod saga;
 pub mod spec;
 
 pub use batch::{
-    AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchConstraint, BatchWrite,
-    ConstraintViolation, DuplicateWrite, StreamConstraint, StreamRef, TransactError,
-    WritelessBatch,
+    AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchConstraint, BatchSource, BatchWrite,
+    ConstraintViolation, DuplicateIntent, DuplicateWrite, StreamConstraint, StreamRef,
+    TransactError, WritelessBatch,
 };
 
 /// Two-way typed contract between a consumer's stream id types and the
