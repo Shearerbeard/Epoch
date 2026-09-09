@@ -352,8 +352,17 @@ impl DuplicateIntent {
     /// Build the outcome on a confirmed storage-level uniqueness
     /// rejection inside the outbox category. Crate-internal: only the
     /// backends construct it, so a consumer cannot mint a redelivery
-    /// signal.
-    #[expect(dead_code, reason = "constructed by the E20 postgres fill")]
+    /// signal. Reached only by the postgres backend's intent-index
+    /// mapping; without the postgres feature no backend enforces the
+    /// key (the in-memory divergence), so the constructor is dead by
+    /// feature rather than by oversight.
+    #[cfg_attr(
+        not(feature = "postgres"),
+        expect(
+            dead_code,
+            reason = "constructed only by the postgres intent-index mapping"
+        )
+    )]
     pub(crate) fn new(stream: StreamRef) -> Self {
         Self { stream }
     }

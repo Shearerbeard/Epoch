@@ -12,13 +12,13 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
-use tokio_postgres::error::SqlState;
+use tokio_postgres::error::{DbError, SqlState};
 use tokio_postgres::Transaction;
 
 use crate::decider::Event;
 use crate::streams::batch::{
     expectation_satisfied, AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchSource,
-    ConstraintViolation, DuplicateWrite, StreamRef, TransactError,
+    ConstraintViolation, DuplicateIntent, DuplicateWrite, StreamRef, TransactError,
 };
 use crate::streams::{EventBatch, ExpectedVersion, StreamId, StreamVersion};
 
@@ -163,6 +163,31 @@ fn statement_error(
     }
 }
 
+/// The storage-level intent-key index (migration
+/// `0004-feed-cursors-and-intent-key.sql`): unique on the keyed
+/// envelope, partial on the outbox category, so only a duplicate
+/// outbox intent write can ever name it.
+const OUTBOX_INTENT_INDEX: &str = "stream_events_outbox_intent";
+
+/// A per-event insert's failure. The intent-key index rejecting the
+/// row is the saga runner's typed redelivery signal on the write's
+/// stream; every other failure - including any other unique violation,
+/// such as the primary key - falls through to the shared statement
+/// classification unchanged.
+fn insert_error(
+    error: tokio_postgres::Error,
+    stream: &StreamRef,
+    lock_timeout: Duration,
+) -> TransactError<PgStreamsError> {
+    if error.code() == Some(&SqlState::UNIQUE_VIOLATION)
+        && error.as_db_error().and_then(DbError::constraint) == Some(OUTBOX_INTENT_INDEX)
+    {
+        TransactError::DuplicateIntent(DuplicateIntent::new(stream.clone()))
+    } else {
+        statement_error(error, lock_timeout)
+    }
+}
+
 /// Every addressed stream's head inside the funnel, in one grouped
 /// query.
 async fn locked_heads(
@@ -279,7 +304,7 @@ impl AtomicStreams for PgDatabase {
                     ],
                 )
                 .await
-                .map_err(|error| statement_error(error, self.lock_timeout))?;
+                .map_err(|error| insert_error(error, stream, self.lock_timeout))?;
             }
         }
 
