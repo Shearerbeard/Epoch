@@ -137,8 +137,9 @@ are wired through the public handle traits only.
   conventions (group identity = saga id), documented, not enforced.
 - **The executor polls the whole outbox category** and skips foreign
   streams: O(sagas x tail) per poll in v1.
-- **The runner's retry values** (5 attempts, 50ms base, 2s cap) are
-  indicative until gate A.
+- **The runner's retry values** (5 attempts, 50ms base, 2s cap) were
+  indicative until gate A; gate A passed over them unchanged and the
+  defaults are now the shipped values.
 - **The executor's failure-count derivation reads the whole outbox
   stream** per failing intent; fine at lab scale, a candidate for a
   per-intent index if a consumer's stream grows long.

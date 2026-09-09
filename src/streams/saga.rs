@@ -489,7 +489,7 @@ impl BackoffSchedule {
 }
 
 impl Default for BackoffSchedule {
-    /// 50ms base, 2s cap. Indicative until gate A.
+    /// 50ms base, 2s cap - the shipped values gate A accepted.
     fn default() -> Self {
         Self {
             base: Duration::from_millis(50),
@@ -544,8 +544,8 @@ impl RetryPolicy {
 }
 
 impl Default for RetryPolicy {
-    /// The default policy: 5 attempts under the default schedule.
-    /// Indicative until gate A.
+    /// The default policy: 5 attempts under the default schedule -
+    /// the shipped values gate A accepted.
     fn default() -> Self {
         Self {
             attempts: NonZeroU32::new(5).expect("5 is nonzero"),
@@ -642,13 +642,12 @@ where
     /// the outbox stream for the minted keys. Key present means this
     /// source event's reactions already committed and the abort is a
     /// redelivery artifact - the typed `TransactError::DuplicateIntent`
-    /// when the uniqueness index fired, a conflict or violated
-    /// constraint when the original commit moved a command arm's
-    /// stream past the arm's own expectation - and the entry acks as
-    /// a no-op. Key absent means a real command-arm failure,
-    /// surfaced. Lock timeouts and indeterminate backend failures are
-    /// retried under the runner's policy, then propagated, never
-    /// classified.
+    /// when the uniqueness index fired, a conflict when the original
+    /// commit moved a command arm's stream past the arm's own
+    /// expectation - and the entry acks as a no-op. Key absent means
+    /// a real command-arm failure, surfaced. Lock timeouts and
+    /// indeterminate backend failures are retried under the runner's
+    /// policy, then propagated, never classified.
     pub async fn step(
         &self,
         limit: PollLimit,
