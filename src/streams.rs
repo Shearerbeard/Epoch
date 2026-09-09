@@ -22,6 +22,9 @@ pub mod postgres;
 pub mod saga;
 pub mod spec;
 
+#[cfg(all(test, feature = "in_memory"))]
+mod saga_outbox_golden;
+
 pub use batch::{
     AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchConstraint, BatchSource, BatchWrite,
     ConstraintViolation, DuplicateIntent, DuplicateWrite, StreamConstraint, StreamRef,

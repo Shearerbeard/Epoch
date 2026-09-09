@@ -185,3 +185,62 @@ this skeleton; golden tests from the card's spec land next and fail on
 arrival; then fills - runner step, runner classification, executor
 step, executor park path - each sweeping its own markers and
 accounting for its inventory lines.
+
+## Layer-2 coverage manifest
+
+The golden suite is `src/streams/saga_outbox_golden.rs`
+(`cargo test --lib saga_outbox_golden`), in-crate so it can reach
+`ReactionIndex::new` and `RenderedIntentKey::from_rendered`, behind
+the in-memory feed. Every fixture is whole-frame: a full stream's
+records, payloads and envelopes together, compared against an expected
+`RecordedEvent` list built from the spec. Seventeen fixtures cross a
+hole and fail on arrival (verified at the suite's landing commit:
+every failure is a `todo!()` panic at one of the four bodies); one
+constructor pin is green on arrival by design, listed below.
+
+Scope of the identity claim: a green fixture proves the stored frames
+and step outcomes unchanged, not behavior downstream of the streams.
+
+| Surface / branch | Fixture |
+| --- | --- |
+| Happy-path fold: commands and intents in one batch with keys on the envelopes, then the ack | `runner_step_folds_reactions_into_one_batch_and_acks` |
+| One write per stream: merged command group and merged intent group, reaction order | `commands_to_one_stream_merge_into_one_write` (fold log pins one group per stream) |
+| Split expectation rejected before the fold, entry not acked | `a_split_expectation_is_rejected_before_the_fold` |
+| Empty reaction set acks without a batch | `an_empty_reaction_set_acks_as_a_noop_without_a_batch` |
+| Idle poll | `a_poll_with_no_entries_is_idle` |
+| Redelivery through the conflict path (expectation-sensitive replay): committed reactions re-polled, no-op ack, nothing doubled | `a_replayed_no_stream_command_acks_as_a_noop_through_the_conflict_path` |
+| Real conflict: keys absent on re-read, surfaced, whole-batch rollback, no ack | `a_real_conflict_surfaces_and_does_not_ack` |
+| Per-entry acks: an error mid-step leaves earlier entries acked | `a_conflict_mid_step_leaves_earlier_entries_acked` |
+| Key rendering injectivity under adversarial components | `key_rendering_escapes_components_injectively` |
+| `run` poll loop drains the backlog (runner) | `runner_run_drains_the_backlog` |
+| Executor perform, keyed port call, `Done`, ack past | `executor_performs_intents_and_appends_done` |
+| Foreign sagas' streams skipped and acked | `executor_skips_foreign_sagas_streams` |
+| Failure appends `Failed`, cursor holds, redelivery re-performs | `a_failing_effect_appends_failed_and_holds_the_cursor` |
+| Budget exhaustion: park, hook once at park time, permanent advance, parked record is audit not trigger | `budget_exhaustion_parks_and_fires_the_hook_once` |
+| Crash between park and ack: replay re-fires the hook and appends nothing, performing never resumes past budget | `a_replayed_park_refires_the_hook_and_appends_nothing` |
+| Hook rejection at park: park stands, cursor holds, re-fire acks without a second park | `a_rejecting_hook_leaves_the_park_standing_and_refires` |
+| `run` poll loop drains the backlog (executor) | `executor_run_drains_the_backlog` |
+| Constructor rules (implemented surface, green on arrival by design) | `retry_and_budget_constructors_pin_the_spec` |
+
+Exclusion rows, each naming why the suite leaves the surface to
+another owner:
+
+- The typed `DuplicateIntent` arm and `SagaError::IntentMissing`: the
+  in-memory backend never constructs the outcome (documented v1
+  divergence), so these arms are unreachable here. Gate M owns them on
+  live postgres, where the uniqueness index fires.
+- The runner's retry loop over `LockTimeout` and backend failures: no
+  retryable failure exists on the in-memory backend. The schedule is
+  pinned by the constructor fixture; gate M injects real contention.
+- Real crash windows: simulated here by state construction plus a
+  fresh group cursor (the equivalent observable state); live crash
+  proofs are gate M's crash table.
+- The postgres transact's unique-violation mapping to
+  `DuplicateIntent`: needs the live index; gate M.
+- `RenderedIntentKey` deserialization trusting storage: a documented
+  residual risk the panel accepted (seat 1 finding 6); no behavioral
+  fixture can exist without a hostile store, so gate A confirms the
+  trust boundary as a review item.
+- A fold violating its copy obligation: consumer-defect territory; the
+  obligation is documented on `ReactionFold` and gate A checks the
+  wording, per confirmation-round finding C2.
