@@ -30,8 +30,8 @@ use thiserror::Error;
 use crate::decider::Event;
 
 use super::feed::{AckError, ConsumerGroup, EventFeed, FeedPosition, PollLimit};
-use super::saga::{RenderedIntentKey, RetryPolicy, SagaId};
-use super::EventStreams;
+use super::saga::{BackoffSchedule, RenderedIntentKey, SagaId};
+use super::{AppendError, EventStreams};
 
 /// The outbox stream category. Indicative until gate A pins final
 /// naming: the storage-level uniqueness index
@@ -48,17 +48,28 @@ pub const INTENT_METADATA_KEY: &str = "intent";
 /// One record on a saga's outbox stream: an effect intent, or the
 /// outcome of the executor's work on one. The category's event type
 /// is this enum, so intents and outcomes share one stream and one
-/// feed.
+/// feed. Every record carries the intent key in its PAYLOAD - the
+/// executor never reads envelopes - and `Intent` records additionally
+/// carry the key in the ENVELOPE, because the storage-level
+/// uniqueness index reads `event_metadata->>'intent'`. An outcome
+/// carrying the key in its envelope would trip the same index that
+/// rejects duplicate intents, so the envelope copy exists on intents
+/// alone.
 ///
-/// The intent key rides the ENVELOPE on `Intent` records (the
-/// uniqueness index reads it there) and the PAYLOAD on outcome
-/// records: an outcome carrying the key in its envelope would trip
-/// the same index that rejects duplicate intents.
+/// One category holds one event type, so every saga sharing this
+/// category shares the effect payload type `F`: a deployment with
+/// several sagas defines one consumer-wide effect enum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutboxEvent<F> {
     /// An effect intent, appended by the saga runner inside the
     /// reaction's atomic batch.
-    Intent(F),
+    Intent {
+        /// The intent's rendered key; the runner also copies it into
+        /// the envelope for the uniqueness index.
+        intent: RenderedIntentKey,
+        /// The effect payload the executor performs.
+        request: F,
+    },
     /// The effect succeeded.
     Done {
         /// The intent's rendered key.
@@ -81,8 +92,9 @@ pub enum OutboxEvent<F> {
     Parked {
         /// The intent's rendered key.
         intent: RenderedIntentKey,
-        /// The durable failed-attempt count at park time.
-        attempts: u32,
+        /// The durable failed-attempt count at park time; a parked
+        /// intent failed at least once.
+        attempts: NonZeroU32,
         /// The last failure, rendered. Diagnostic-only.
         error: String,
     },
@@ -93,7 +105,7 @@ impl<F> Event for OutboxEvent<F> {
 
     fn event_type(&self) -> String {
         match self {
-            Self::Intent(_) => "OutboxIntent",
+            Self::Intent { .. } => "OutboxIntent",
             Self::Done { .. } => "OutboxDone",
             Self::Failed { .. } => "OutboxFailed",
             Self::Parked { .. } => "OutboxParked",
@@ -139,15 +151,18 @@ pub struct ZeroBudget;
 /// under at-least-once delivery - a crash between the external call
 /// and the outcome append replays the intent, and the port's
 /// idempotency absorbs the duplicate. That obligation is the
-/// consumer's, documented here.
+/// consumer's, documented here, and the port dedupes BY THE KEY: two
+/// distinct reactions may carry identical payloads, so the intent key
+/// is the only replay-safe identity.
 #[trait_variant::make(Send)]
 pub trait EffectPort<F> {
     /// Port failure type; rendered onto the `Failed` record as
     /// diagnostic text.
     type Error: std::error::Error + Send + Sync;
 
-    /// Perform the effect.
-    async fn perform(&self, request: &F) -> Result<(), Self::Error>;
+    /// Perform the effect. `intent` is the intent's rendered key -
+    /// the port's idempotency identity.
+    async fn perform(&self, intent: &RenderedIntentKey, request: &F) -> Result<(), Self::Error>;
 }
 
 /// What the compensation hook learns at park time: the parked intent,
@@ -156,12 +171,17 @@ pub trait EffectPort<F> {
 pub struct ParkedNotice<F> {
     key: RenderedIntentKey,
     request: F,
-    attempts: u32,
+    attempts: NonZeroU32,
     error: String,
 }
 
 impl<F> ParkedNotice<F> {
-    pub(crate) fn new(key: RenderedIntentKey, request: F, attempts: u32, error: String) -> Self {
+    pub(crate) fn new(
+        key: RenderedIntentKey,
+        request: F,
+        attempts: NonZeroU32,
+        error: String,
+    ) -> Self {
         Self {
             key,
             request,
@@ -181,7 +201,7 @@ impl<F> ParkedNotice<F> {
     }
 
     /// The durable failed-attempt count at park time.
-    pub fn attempts(&self) -> u32 {
+    pub fn attempts(&self) -> NonZeroU32 {
         self.attempts
     }
 
@@ -225,7 +245,7 @@ pub struct OutboxExecutor<Fe, St, P, K, F> {
     saga: SagaId,
     group: ConsumerGroup,
     budget: RetryBudget,
-    backoff: RetryPolicy,
+    backoff: BackoffSchedule,
     _marker: PhantomData<fn() -> F>,
 }
 
@@ -241,7 +261,7 @@ impl<Fe, St, P, K, F> OutboxExecutor<Fe, St, P, K, F> {
         hook: K,
         saga: SagaId,
         budget: RetryBudget,
-        backoff: RetryPolicy,
+        backoff: BackoffSchedule,
     ) -> Self {
         let group = ConsumerGroup::new(saga.as_str()).expect("a saga id is a non-empty group name");
         Self {
@@ -273,7 +293,7 @@ impl<Fe, St, P, K, F> OutboxExecutor<Fe, St, P, K, F> {
     }
 
     /// The backoff schedule inside a retry window.
-    pub fn backoff(&self) -> RetryPolicy {
+    pub fn backoff(&self) -> BackoffSchedule {
         self.backoff
     }
 }
@@ -287,7 +307,8 @@ where
     F: Send + Sync + fmt::Debug,
 {
     /// One poll-perform-record cycle over up to `limit` delivered
-    /// entries. For one of this saga's intents: perform through the
+    /// entries. For one of this saga's intents - the key read from
+    /// the record's payload, never the envelope: perform through the
     /// port; on success append `Done` and ack; on failure append
     /// `Failed` and, under budget, HOLD the cursor (the next poll
     /// redelivers the intent after the backoff); at the budget,
@@ -356,7 +377,11 @@ where
     /// The outbox feed rejected the ack.
     #[error(transparent)]
     Ack(#[from] AckError<FeedE>),
-    /// The outcome append or the failure-count read failed.
+    /// The failure-count read failed.
     #[error(transparent)]
-    Store(StoreE),
+    Read(StoreE),
+    /// An outcome append failed. The append error's own variants stay
+    /// intact: a lock timeout is retryable, a conflict is not.
+    #[error(transparent)]
+    Append(#[from] AppendError<StoreE>),
 }

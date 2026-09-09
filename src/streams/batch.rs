@@ -350,9 +350,11 @@ pub struct DuplicateIntent {
 
 impl DuplicateIntent {
     /// Build the outcome on a confirmed storage-level uniqueness
-    /// rejection inside the outbox category. Backends construct it;
-    /// the saga runner consumes it.
-    pub fn new(stream: StreamRef) -> Self {
+    /// rejection inside the outbox category. Crate-internal: only the
+    /// backends construct it, so a consumer cannot mint a redelivery
+    /// signal.
+    #[expect(dead_code, reason = "constructed by the E20 postgres fill")]
+    pub(crate) fn new(stream: StreamRef) -> Self {
         Self { stream }
     }
 
@@ -418,9 +420,12 @@ pub trait AtomicStreams {
 /// A handle that hands out its own batch builder: ADR 0006's
 /// ownership seam extended to generic consumers such as the saga
 /// runner, which assembles a batch without naming the backend's wire
-/// form. The builder's wire form and the committed [`Batch`] are the
-/// same `W` by construction, so a batch built from this builder is
-/// always one this handle can commit.
+/// form. The supertrait binding makes the builder's wire form and the
+/// committed [`Batch`] the same `W`, so builder and `transact` always
+/// agree on the wire form. What the type does NOT pin is handle
+/// identity: two handles of one backend share a wire form, so which
+/// database a batch commits against stays the caller's discipline,
+/// exactly as on E3's concrete path.
 pub trait BatchSource: AtomicStreams<Batch = Batch<Self::Wire>> {
     /// The backend's wire form, fixed by the builder this handle hands
     /// out.

@@ -16,15 +16,18 @@
 //! is real: a crash there redelivers the source event, and the
 //! re-run's reactions re-append. Reaction identity closes the window:
 //! the runner mints a deterministic [`IntentKey`] per reaction -
-//! (saga id, source stream, source position, reaction index) - and
-//! storage rejects the second append of an intent key as a typed
-//! [`DuplicateIntent`], which the runner classifies as the no-op it
-//! is (after confirming the minted keys are present on the outbox
-//! stream) and acks. A version conflict on a command arm is a real
-//! conflict and surfaces; retryable aborts
-//! (`TransactError::LockTimeout`) and indeterminate failures are
-//! retried under the runner's [`RetryPolicy`] and then propagated,
-//! never classified as conflicts.
+//! (saga id, source stream, source position, reaction index) - and a
+//! redelivery is recognized by those keys. After the retry window,
+//! every batch abort sends the runner back to the outbox stream for
+//! the minted keys: key present means this source event's reactions
+//! already committed, so the abort is a redelivery artifact - the
+//! typed [`DuplicateIntent`] when the uniqueness index fired, a
+//! conflict when the original commit moved a command arm's stream
+//! past the arm's own expectation - and the entry acks as a no-op.
+//! Key absent means a real command-arm conflict, surfaced as an
+//! error. Retryable aborts (`TransactError::LockTimeout`) and
+//! indeterminate failures are retried under the runner's
+//! [`RetryPolicy`] and then propagated, never classified.
 //!
 //! Every write the runner makes goes through the atomic batch, so the
 //! single-writer funnel's operating assumptions (ADR 0010, and the
@@ -301,18 +304,32 @@ pub trait Saga {
 }
 
 /// One reaction payload paired with the envelope the runner minted
-/// for it. The envelope carries the reaction's intent key under the
-/// framework-owned `intent` metadata key; a fold attaches it
-/// unchanged.
+/// for it and the reaction's rendered intent key. The envelope
+/// carries the key under the framework-owned `intent` metadata key;
+/// a fold attaches it unchanged. Intent records additionally carry
+/// the key in their payload, so the executor never reads the
+/// envelope.
 #[derive(Debug, Clone)]
 pub struct KeyedPayload<'a, P> {
+    key: RenderedIntentKey,
     metadata: EventMetadata,
     payload: &'a P,
 }
 
 impl<'a, P> KeyedPayload<'a, P> {
-    pub(crate) fn new(metadata: EventMetadata, payload: &'a P) -> Self {
-        Self { metadata, payload }
+    pub(crate) fn new(key: RenderedIntentKey, metadata: EventMetadata, payload: &'a P) -> Self {
+        Self {
+            key,
+            metadata,
+            payload,
+        }
+    }
+
+    /// The reaction's rendered intent key. Intent folds copy it into
+    /// the record payload (`OutboxEvent::Intent`); command folds
+    /// leave it in the envelope alone.
+    pub fn key(&self) -> &RenderedIntentKey {
+        &self.key
     }
 
     /// The runner-minted envelope: attach unchanged, one per record.
@@ -418,10 +435,11 @@ pub trait ReactionFold<B> {
     ) -> Result<(), Self::Error>;
 
     /// Push one merged intent group as ONE write of
-    /// [`OutboxEvent::Intent`] records to the saga's outbox stream,
-    /// attaching each record's envelope unchanged. The intent key
-    /// rides the envelope, never the payload: the storage-level
-    /// uniqueness index reads `event_metadata->>'intent'`.
+    /// [`OutboxEvent::Intent`] records to the saga's outbox stream.
+    /// Each record carries its key twice: in the payload (the
+    /// executor's read source) copied from [`KeyedPayload::key`], and
+    /// in the envelope attached unchanged (the storage-level
+    /// uniqueness index reads `event_metadata->>'intent'`).
     fn push_intent_group(
         &self,
         builder: &mut B,
@@ -429,38 +447,28 @@ pub trait ReactionFold<B> {
     ) -> Result<(), Self::Error>;
 }
 
-/// The runner's in-memory retry policy for retryable aborts
-/// (`TransactError::LockTimeout`) and indeterminate failures
-/// (connection loss, deadlock): bounded exponential backoff, then
-/// propagate. Classification never happens inside the retry window -
-/// the redelivery rule applies only after retryable aborts are
-/// retried.
+/// A bounded exponential backoff schedule: each wait doubles from
+/// `base`, never exceeding `cap`. Carries no attempt count - the
+/// runner's policy and the executor's budget each own their own
+/// count, so the two can never disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetryPolicy {
-    attempts: NonZeroU32,
+pub struct BackoffSchedule {
     base: Duration,
     cap: Duration,
 }
 
-impl RetryPolicy {
-    /// A policy of `attempts` total tries, doubling from `base`,
-    /// capped at `cap`. Zero attempts is not a policy.
-    pub fn new(attempts: u32, base: Duration, cap: Duration) -> Result<Self, ZeroAttempts> {
-        NonZeroU32::new(attempts)
-            .map(|attempts| Self {
-                attempts,
-                base,
-                cap,
-            })
-            .ok_or(ZeroAttempts)
+impl BackoffSchedule {
+    /// A schedule doubling from `base`, capped at `cap`. A base above
+    /// its cap is not a schedule.
+    pub fn new(base: Duration, cap: Duration) -> Result<Self, BaseExceedsCap> {
+        if base > cap {
+            Err(BaseExceedsCap)
+        } else {
+            Ok(Self { base, cap })
+        }
     }
 
-    /// Total tries, including the first.
-    pub fn attempts(&self) -> u32 {
-        self.attempts.get()
-    }
-
-    /// The first retry's wait.
+    /// The first wait.
     pub fn base(&self) -> Duration {
         self.base
     }
@@ -470,8 +478,8 @@ impl RetryPolicy {
         self.cap
     }
 
-    /// The waits between tries: `attempts - 1` of them, doubling from
-    /// the base and capped.
+    /// The waits, doubling from the base and capped: an unbounded
+    /// stream; the caller's own count bounds it.
     pub fn delays(&self) -> impl Iterator<Item = Duration> {
         let (mut delay, cap) = (self.base, self.cap);
         std::iter::from_fn(move || {
@@ -479,18 +487,71 @@ impl RetryPolicy {
             delay = delay.saturating_mul(2).min(cap);
             Some(current)
         })
-        .take((self.attempts.get() - 1) as usize)
+    }
+}
+
+impl Default for BackoffSchedule {
+    /// 50ms base, 2s cap. Indicative until gate A.
+    fn default() -> Self {
+        Self {
+            base: Duration::from_millis(50),
+            cap: Duration::from_secs(2),
+        }
+    }
+}
+
+/// A backoff schedule whose base exceeds its cap was requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("the backoff base exceeds its cap")]
+pub struct BaseExceedsCap;
+
+/// The runner's in-memory retry policy for retryable aborts
+/// (`TransactError::LockTimeout`) and indeterminate failures
+/// (connection loss, deadlock): a bounded count of tries under a
+/// backoff schedule, then propagate. Classification never happens
+/// inside the retry window - the redelivery rule applies only after
+/// retryable aborts are retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    attempts: NonZeroU32,
+    schedule: BackoffSchedule,
+}
+
+impl RetryPolicy {
+    /// A policy of `attempts` total tries under `schedule`. Zero
+    /// attempts is not a policy.
+    pub fn new(attempts: u32, schedule: BackoffSchedule) -> Result<Self, ZeroAttempts> {
+        NonZeroU32::new(attempts)
+            .map(|attempts| Self { attempts, schedule })
+            .ok_or(ZeroAttempts)
+    }
+
+    /// Total tries, including the first.
+    pub fn attempts(&self) -> u32 {
+        self.attempts.get()
+    }
+
+    /// The backoff schedule between tries.
+    pub fn schedule(&self) -> BackoffSchedule {
+        self.schedule
+    }
+
+    /// The waits between tries: `attempts - 1` of them, doubling from
+    /// the schedule's base and capped.
+    pub fn delays(&self) -> impl Iterator<Item = Duration> {
+        self.schedule
+            .delays()
+            .take((self.attempts.get() - 1) as usize)
     }
 }
 
 impl Default for RetryPolicy {
-    /// The default policy: 5 attempts from a 50ms base, capped at 2s.
+    /// The default policy: 5 attempts under the default schedule.
     /// Indicative until gate A.
     fn default() -> Self {
         Self {
             attempts: NonZeroU32::new(5).expect("5 is nonzero"),
-            base: Duration::from_millis(50),
-            cap: Duration::from_secs(2),
+            schedule: BackoffSchedule::default(),
         }
     }
 }
@@ -578,14 +639,18 @@ where
     /// after its batch commits. An empty reaction set acks without a
     /// batch.
     ///
-    /// Redelivery classification, per the card's pinned rule: a typed
-    /// `TransactError::DuplicateIntent` after the retry window means
-    /// this source event's reactions already committed - confirmed by
-    /// re-reading the outbox stream for the minted keys - and the
-    /// entry acks as a no-op. A conflict or violated constraint is a
-    /// real command-arm failure and surfaces. Lock timeouts and
-    /// indeterminate backend failures are retried under the runner's
-    /// policy, then propagated, never classified.
+    /// Redelivery classification, per the card's pinned rule: after
+    /// the retry window, every batch abort sends the runner back to
+    /// the outbox stream for the minted keys. Key present means this
+    /// source event's reactions already committed and the abort is a
+    /// redelivery artifact - the typed `TransactError::DuplicateIntent`
+    /// when the uniqueness index fired, a conflict or violated
+    /// constraint when the original commit moved a command arm's
+    /// stream past the arm's own expectation - and the entry acks as
+    /// a no-op. Key absent means a real command-arm failure,
+    /// surfaced. Lock timeouts and indeterminate backend failures are
+    /// retried under the runner's policy, then propagated, never
+    /// classified.
     #[expect(unused_variables, reason = "todo!() body; filled by E20")]
     pub async fn step(
         &self,
@@ -654,7 +719,10 @@ where
     /// a real conflict, never a redelivery artifact.
     #[error(transparent)]
     Conflict(#[from] BatchConflict),
-    /// A batch constraint was not satisfied.
+    /// A batch constraint was not satisfied. Reactions carry no
+    /// constraints, so this is reachable only when a fold exceeds its
+    /// contract and adds one; surfaced rather than panicked, because
+    /// the fold is consumer code.
     #[error(transparent)]
     ConstraintViolated(#[from] ConstraintViolation),
     /// The typed duplicate-intent outcome fired but a minted key was
