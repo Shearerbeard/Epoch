@@ -31,7 +31,7 @@ use crate::decider::Event;
 
 use super::feed::{AckError, ConsumerGroup, EventFeed, FeedPosition, PollLimit};
 use super::saga::{BackoffSchedule, RenderedIntentKey, SagaId};
-use super::{AppendError, EventStreams};
+use super::{AppendError, EventBatch, EventStreams, ExpectedVersion, StreamState};
 
 /// The outbox stream category. Indicative until gate A pins final
 /// naming: the storage-level uniqueness index
@@ -316,12 +316,191 @@ where
     /// permanently. A replay that finds the `Parked` record already
     /// present re-fires the hook (idempotent under replay) and acks:
     /// the append is the no-op.
-    #[expect(unused_variables, reason = "todo!() body; filled by E20")]
     pub async fn step(
         &self,
         limit: PollLimit,
     ) -> Result<ExecutorStep, ExecutorError<K::Error, Fe::Error, St::Error>> {
-        todo!()
+        let entries = self
+            .feed
+            .poll(&self.group, limit)
+            .await
+            .map_err(ExecutorError::Poll)?;
+        if entries.is_empty() {
+            return Ok(ExecutorStep::Idle);
+        }
+
+        let mut acked_to = None;
+        for entry in entries {
+            let (position, stream, record) = entry.into_parts();
+            if stream.key() != self.saga.as_str() {
+                // Another saga's stream in the shared category:
+                // consume the entry, never perform it.
+                self.feed.ack(&self.group, position).await?;
+                acked_to = Some(position);
+                continue;
+            }
+
+            let (event, _) = record.into_parts();
+            match event {
+                // Outcome records are audit facts, not triggers.
+                OutboxEvent::Done { .. }
+                | OutboxEvent::Failed { .. }
+                | OutboxEvent::Parked { .. } => {
+                    self.feed.ack(&self.group, position).await?;
+                    acked_to = Some(position);
+                }
+                OutboxEvent::Intent { intent, request } => {
+                    // The budget's durable state is the saga's own
+                    // stream: its `Failed` records for this intent key.
+                    let stored = match self.store.load_stream(&self.saga.as_str().to_owned()).await
+                    {
+                        Ok(StreamState::Present(batch)) => batch.into_records(),
+                        Ok(StreamState::Missing) => Vec::new(),
+                        Err(error) => return Err(ExecutorError::Read(error)),
+                    };
+                    let mut failed_count = 0u32;
+                    let mut last_failed_error: Option<String> = None;
+                    let mut parked: Option<(NonZeroU32, String)> = None;
+                    for record in stored {
+                        let (event, _) = record.into_parts();
+                        match event {
+                            OutboxEvent::Failed {
+                                intent: failed,
+                                error,
+                            } if failed == intent => {
+                                failed_count += 1;
+                                last_failed_error = Some(error);
+                            }
+                            OutboxEvent::Parked {
+                                intent: parked_key,
+                                attempts,
+                                error,
+                            } if parked_key == intent => {
+                                parked = Some((attempts, error));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // The crash between park and ack, replayed: the
+                    // park stands, the append is the no-op, and the
+                    // hook - the park's idempotent side effect -
+                    // re-fires before the entry acks.
+                    if let Some((attempts, error)) = parked {
+                        let notice = ParkedNotice::new(intent, request, attempts, error);
+                        self.hook
+                            .on_parked(&notice)
+                            .await
+                            .map_err(ExecutorError::Hook)?;
+                        self.feed.ack(&self.group, position).await?;
+                        acked_to = Some(position);
+                        continue;
+                    }
+
+                    // The crash between the last Failed and the Parked
+                    // append, replayed: the budget is spent durably, so
+                    // park now - the port is never asked past it.
+                    if failed_count >= self.budget.get() {
+                        let attempts = NonZeroU32::new(failed_count)
+                            .expect("the budget is nonzero and the count reached it");
+                        let error = last_failed_error.unwrap_or_default();
+                        let park = OutboxEvent::Parked {
+                            intent: intent.clone(),
+                            attempts,
+                            error: error.clone(),
+                        };
+                        let batch = EventBatch::new(vec![park]).expect("one event is nonempty");
+                        self.store
+                            .append(ExpectedVersion::Any, &self.saga.as_str().to_owned(), &batch)
+                            .await?;
+                        let notice = ParkedNotice::new(intent, request, attempts, error);
+                        self.hook
+                            .on_parked(&notice)
+                            .await
+                            .map_err(ExecutorError::Hook)?;
+                        self.feed.ack(&self.group, position).await?;
+                        acked_to = Some(position);
+                        continue;
+                    }
+
+                    match self.port.perform(&intent, &request).await {
+                        Ok(()) => {
+                            let done = OutboxEvent::Done {
+                                intent: intent.clone(),
+                            };
+                            let batch = EventBatch::new(vec![done]).expect("one event is nonempty");
+                            self.store
+                                .append(
+                                    ExpectedVersion::Any,
+                                    &self.saga.as_str().to_owned(),
+                                    &batch,
+                                )
+                                .await?;
+                            self.feed.ack(&self.group, position).await?;
+                            acked_to = Some(position);
+                        }
+                        Err(port_err) => {
+                            let attempts = failed_count + 1;
+                            let failure = OutboxEvent::Failed {
+                                intent: intent.clone(),
+                                error: port_err.to_string(),
+                            };
+                            let batch =
+                                EventBatch::new(vec![failure]).expect("one event is nonempty");
+                            self.store
+                                .append(
+                                    ExpectedVersion::Any,
+                                    &self.saga.as_str().to_owned(),
+                                    &batch,
+                                )
+                                .await?;
+                            if attempts < self.budget.get() {
+                                // The retry window holds: the failing
+                                // entry stays unacked and redelivers
+                                // after the backoff, order preserved.
+                                let delay = self
+                                    .backoff
+                                    .delays()
+                                    .nth(failed_count as usize)
+                                    .expect("the delay stream is unbounded");
+                                tokio::time::sleep(delay).await;
+                                return Ok(ExecutorStep::Holding { intent });
+                            }
+
+                            // The budget is spent on this fresh
+                            // failure: park and fire the hook.
+                            let attempts = NonZeroU32::new(attempts)
+                                .expect("the budget is nonzero and the count reached it");
+                            let error = port_err.to_string();
+                            let park = OutboxEvent::Parked {
+                                intent: intent.clone(),
+                                attempts,
+                                error: error.clone(),
+                            };
+                            let batch = EventBatch::new(vec![park]).expect("one event is nonempty");
+                            self.store
+                                .append(
+                                    ExpectedVersion::Any,
+                                    &self.saga.as_str().to_owned(),
+                                    &batch,
+                                )
+                                .await?;
+                            let notice = ParkedNotice::new(intent, request, attempts, error);
+                            self.hook
+                                .on_parked(&notice)
+                                .await
+                                .map_err(ExecutorError::Hook)?;
+                            self.feed.ack(&self.group, position).await?;
+                            acked_to = Some(position);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ExecutorStep::Advanced {
+            acked_to: acked_to.expect("entries were nonempty and every entry acked or returned"),
+        })
     }
 
     /// The poll loop: `step` forever, sleeping `interval` between
