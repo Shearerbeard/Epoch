@@ -31,8 +31,8 @@ use super::feed::{AckError, ConsumerGroup, EventFeed, FeedPosition, PollLimit};
 use super::saga::{BackoffSchedule, RenderedIntentKey, SagaId};
 use super::{AppendError, EventBatch, EventStreams, ExpectedVersion, StreamState};
 
-/// The outbox stream category. Indicative until gate A pins final
-/// naming: the storage-level uniqueness index
+/// The outbox stream category, pinned framework-owned by ADR 0010's
+/// outbox-saga section: the storage-level uniqueness index
 /// (`0004-feed-cursors-and-intent-key.sql`) reads this name, so a
 /// rename lands as its own migration step.
 pub const OUTBOX_CATEGORY: &str = "saga-outbox";

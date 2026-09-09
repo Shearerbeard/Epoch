@@ -62,11 +62,13 @@ sends the runner back to the outbox stream for the minted keys:
 - Key present: this source event's reactions already committed, so
   the abort is a redelivery artifact. That abort arrives as the typed
   `DuplicateIntent` when the uniqueness index fired, and as a
-  conflict or violated constraint when the original commit moved a
-  command arm's stream past the arm's own expectation (the batch
-  checks expectations before its inserts reach the index, so a replay
-  of a `NoStream` command arm conflicts before the duplicate intent
-  is ever seen). Either way the entry acks as a no-op.
+  conflict when the original commit moved a command arm's stream
+  past the arm's own expectation (the batch checks expectations
+  before its inserts reach the index, so a replay of a `NoStream`
+  command arm conflicts before the duplicate intent is ever seen; a
+  constraint outcome reaches the same re-read only through a fold
+  that added a constraint, which the reactions themselves never do).
+  Either way the entry acks as a no-op.
 - Key absent: a real command-arm failure, surfaced.
 
 The panel's alternative - a batch-contract change giving the

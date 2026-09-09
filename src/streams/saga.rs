@@ -613,8 +613,8 @@ where
     }
 
     /// The saga's outbox stream: the outbox category, keyed by saga
-    /// id. The category name is indicative until gate A (the migration
-    /// owns the storage-level name).
+    /// id. The category name is pinned framework-owned by ADR 0010's
+    /// outbox-saga section; a rename lands as its own migration step.
     pub fn outbox_stream(&self) -> StreamRef {
         StreamRef::new(OUTBOX_CATEGORY, &self.saga.id().as_str().to_owned())
     }
