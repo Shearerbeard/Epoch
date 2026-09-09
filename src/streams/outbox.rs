@@ -18,8 +18,6 @@
 //! path, so the single-writer funnel's operating assumptions (ADR
 //! 0010, and the postgres module doc) bind deployments unchanged.
 
-#![allow(dead_code)] // E20 skeleton: removed slice by slice as the holes fill.
-
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
@@ -506,13 +504,15 @@ where
     /// The poll loop: `step` forever, sleeping `interval` between
     /// polls. Errors propagate; restarting the loop is the operator's
     /// call.
-    #[expect(unused_variables, reason = "todo!() body; filled by E20")]
     pub async fn run(
         &self,
         limit: PollLimit,
         interval: std::time::Duration,
     ) -> Result<(), ExecutorError<K::Error, Fe::Error, St::Error>> {
-        todo!()
+        loop {
+            self.step(limit).await?;
+            tokio::time::sleep(interval).await;
+        }
     }
 }
 
