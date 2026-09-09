@@ -100,7 +100,7 @@ crate is pre-1.0 under ADR 0001's breaking-change budget.
 | Item | Visibility | Reaches into |
 | --- | --- | --- |
 | `streams::saga` | public module | `streams::batch` (`BatchBuilder`, `StreamRef`, the conflict payloads), `streams::feed` (`EventFeed`, `ConsumerGroup`, `FeedPosition`, `PollLimit`, `AckError`), `streams` root (`BatchSource`, `EventMetadata`, `EventStreams`, `ExpectedVersion`), `streams::outbox` (`OutboxEvent`, `OUTBOX_CATEGORY`) |
-| `streams::outbox` | public module | `streams::feed`, `streams::saga` (`RenderedIntentKey`, `RetryPolicy`, `SagaId`), `streams` root (`EventStreams`), `decider::Event` |
+| `streams::outbox` | public module | `streams::feed`, `streams::saga` (`BackoffSchedule`, `RenderedIntentKey`, `SagaId`), `streams` root (`AppendError`, `EventStreams`), `decider::Event` |
 | `batch::DuplicateIntent`, `batch::BatchSource` | public, re-exported at the streams root | `StreamRef`, `AtomicStreams`, `BatchBuilder` |
 | `BatchSource` impls | `in_memory::batch`, `postgres::batch` | the handles' existing `batch()` constructors |
 
@@ -148,9 +148,14 @@ are wired through the public handle traits only.
   payload types.
 - **The intent key exists twice on intent records**: the payload copy
   is the executor's read source, the envelope copy is what the
-  uniqueness index reads. The runner mints both from one `IntentKey`;
-  a disagreement is possible only through a foreign write, which the
-  funnel's operating assumptions already forbid.
+  uniqueness index reads. The runner mints both from one `IntentKey`
+  and hands them to the fold as one `KeyedPayload`; the fold's copy
+  obligation (payload key from `KeyedPayload::key`, envelope attached
+  unchanged) is what keeps them in agreement. A fold that violates
+  the obligation produces a disagreement through the normal batch
+  path, so the obligation is documented on `ReactionFold` and checked
+  at gate A; a foreign write is the other way to disagree, and the
+  funnel's operating assumptions already forbid it.
 - **`RenderedIntentKey` deserialization trusts storage.** Any stored
   string becomes the type at the read boundary (serde transparent);
   a non-canonical stored value would silently never match a fresh
