@@ -1116,20 +1116,22 @@ async fn key_rendering_escapes_components_injectively() {
 #[tokio::test]
 async fn runner_run_drains_the_backlog() {
     let rig = Rig::new();
-    let saga = Scripted::new(
-        "saga-run",
-        vec![(
-            Src::Placed { item: 20 },
-            vec![
-                Reaction::Command(Command::new(
-                    StreamRef::new(LEDGER, &"o-r".to_owned()),
-                    ExpectedVersion::Any,
-                    Cmd::Reserved { item: 20 },
-                )),
-                Reaction::EffectRequest(EffectRequest::new(Fx::Export { item: 20 })),
-            ],
-        )],
-    );
+    let script: Vec<(Src, Vec<Reaction<Cmd, Fx>>)> = (20..23)
+        .map(|item| {
+            (
+                Src::Placed { item },
+                vec![
+                    Reaction::Command(Command::new(
+                        StreamRef::new(LEDGER, &"o-r".to_owned()),
+                        ExpectedVersion::Any,
+                        Cmd::Reserved { item },
+                    )),
+                    Reaction::EffectRequest(EffectRequest::new(Fx::Export { item })),
+                ],
+            )
+        })
+        .collect();
+    let saga = Scripted::new("saga-run", script);
     for item in 20..23 {
         rig.place(Src::Placed { item }).await;
     }
