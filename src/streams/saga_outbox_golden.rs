@@ -332,15 +332,22 @@ fn probe() -> ConsumerGroup {
     ConsumerGroup::new("probe").expect("a test group is nonempty")
 }
 
+type MemRunner = Runner<
+    InMemoryDatabase,
+    InMemoryEventFeed<Src>,
+    InMemoryEventStreams<Record<Fx>>,
+    Scripted,
+    MemFold,
+>;
+
+type MemExecutor =
+    Executor<InMemoryEventFeed<Record<Fx>>, InMemoryEventStreams<Record<Fx>>, Port, Hook, Fx>;
+
 impl Rig {
     fn new() -> Self {
-        Self::with_source_category(SOURCE)
-    }
-
-    fn with_source_category(name: &str) -> Self {
         let db = InMemoryDatabase::new();
-        let source = db.category::<Src>(name).expect("fresh source category");
-        let source_feed = db.feed::<Src>(name).expect("claimed source category");
+        let source = db.category::<Src>(SOURCE).expect("fresh source category");
+        let source_feed = db.feed::<Src>(SOURCE).expect("claimed source category");
         let outbox = db
             .category::<Record<Fx>>(OUTBOX_CATEGORY)
             .expect("fresh outbox category");
@@ -394,18 +401,7 @@ impl Rig {
             .position()
     }
 
-    #[allow(clippy::type_complexity)]
-    fn runner(
-        &self,
-        saga: Scripted,
-        fold: MemFold,
-    ) -> Runner<
-        InMemoryDatabase,
-        InMemoryEventFeed<Src>,
-        InMemoryEventStreams<Record<Fx>>,
-        Scripted,
-        MemFold,
-    > {
+    fn runner(&self, saga: Scripted, fold: MemFold) -> MemRunner {
         Runner::new(
             saga,
             self.db.clone(),
@@ -416,15 +412,7 @@ impl Rig {
         )
     }
 
-    #[allow(clippy::type_complexity)]
-    fn executor(
-        &self,
-        saga: &str,
-        port: Port,
-        hook: Hook,
-        budget: u32,
-    ) -> Executor<InMemoryEventFeed<Record<Fx>>, InMemoryEventStreams<Record<Fx>>, Port, Hook, Fx>
-    {
+    fn executor(&self, saga: &str, port: Port, hook: Hook, budget: u32) -> MemExecutor {
         Executor::new(
             self.outbox_feed.clone(),
             self.outbox.clone(),

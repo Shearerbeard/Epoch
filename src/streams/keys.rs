@@ -36,6 +36,18 @@ impl SagaId {
     }
 }
 
+impl fmt::Display for SagaId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for SagaId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A saga id was constructed with the empty string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("a saga id must not be empty")]
@@ -141,5 +153,11 @@ impl RenderedIntentKey {
 impl fmt::Display for RenderedIntentKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for RenderedIntentKey {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }

@@ -217,6 +217,7 @@ pub struct Executor<Fe, St, P, K, F> {
     hook: K,
     saga: SagaId,
     group: ConsumerGroup,
+    saga_key: String,
     policy: RetryPolicy,
     _marker: PhantomData<fn() -> F>,
 }
@@ -228,6 +229,7 @@ impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F> {
     /// per category).
     pub fn new(feed: Fe, store: St, port: P, hook: K, saga: SagaId, policy: RetryPolicy) -> Self {
         let group = ConsumerGroup::new(saga.as_str()).expect("a saga id is a non-empty group name");
+        let saga_key = saga.as_str().to_owned();
         Self {
             feed,
             store,
@@ -235,6 +237,7 @@ impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F> {
             hook,
             saga,
             group,
+            saga_key,
             policy,
             _marker: PhantomData,
         }
@@ -313,8 +316,7 @@ where
                 Record::Intent { intent, request } => {
                     // The budget's durable state is the saga's own
                     // stream: its `Failed` records for this intent key.
-                    let stored = match self.store.load_stream(&self.saga.as_str().to_owned()).await
-                    {
+                    let stored = match self.store.load_stream(&self.saga_key).await {
                         Ok(StreamState::Present(batch)) => batch.into_records(),
                         Ok(StreamState::Missing) => Vec::new(),
                         Err(error) => return Err(ExecutorError::Read(error)),
@@ -380,7 +382,7 @@ where
                         };
                         let batch = EventBatch::new(vec![park]).expect("one event is nonempty");
                         self.store
-                            .append(ExpectedVersion::Any, &self.saga.as_str().to_owned(), &batch)
+                            .append(ExpectedVersion::Any, &self.saga_key, &batch)
                             .await?;
                         let notice = ParkedNotice::new(intent, request, attempts, error);
                         self.hook
@@ -399,11 +401,7 @@ where
                             };
                             let batch = EventBatch::new(vec![done]).expect("one event is nonempty");
                             self.store
-                                .append(
-                                    ExpectedVersion::Any,
-                                    &self.saga.as_str().to_owned(),
-                                    &batch,
-                                )
+                                .append(ExpectedVersion::Any, &self.saga_key, &batch)
                                 .await?;
                             self.feed.ack(&self.group, position).await?;
                             acked_to = Some(position);
@@ -417,11 +415,7 @@ where
                             let batch =
                                 EventBatch::new(vec![failure]).expect("one event is nonempty");
                             self.store
-                                .append(
-                                    ExpectedVersion::Any,
-                                    &self.saga.as_str().to_owned(),
-                                    &batch,
-                                )
+                                .append(ExpectedVersion::Any, &self.saga_key, &batch)
                                 .await?;
                             if attempts < self.policy.budget().get() {
                                 // The retry window holds: the failing
@@ -449,11 +443,7 @@ where
                             };
                             let batch = EventBatch::new(vec![park]).expect("one event is nonempty");
                             self.store
-                                .append(
-                                    ExpectedVersion::Any,
-                                    &self.saga.as_str().to_owned(),
-                                    &batch,
-                                )
+                                .append(ExpectedVersion::Any, &self.saga_key, &batch)
                                 .await?;
                             let notice = ParkedNotice::new(intent, request, attempts, error);
                             self.hook

@@ -393,6 +393,12 @@ struct Rig {
     ledger: PgEventStreams<String, Cmd>,
 }
 
+type PgRunner =
+    Runner<PgDatabase, PgEventFeed<Src>, PgEventStreams<String, Record<Fx>>, Scripted, PgFold>;
+
+type PgExecutor =
+    Executor<PgEventFeed<Record<Fx>>, PgEventStreams<String, Record<Fx>>, Port, Hook, Fx>;
+
 impl Rig {
     async fn new() -> Self {
         let pool = pool_from_conn_str(&conn_str())
@@ -413,12 +419,7 @@ impl Rig {
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn runner(
-        &self,
-        saga: Scripted,
-    ) -> Runner<PgDatabase, PgEventFeed<Src>, PgEventStreams<String, Record<Fx>>, Scripted, PgFold>
-    {
+    fn runner(&self, saga: Scripted) -> PgRunner {
         Runner::new(
             saga,
             self.db.clone(),
@@ -429,14 +430,7 @@ impl Rig {
         )
     }
 
-    #[allow(clippy::type_complexity)]
-    fn executor(
-        &self,
-        saga: &str,
-        port: Port,
-        hook: Hook,
-        budget: u32,
-    ) -> Executor<PgEventFeed<Record<Fx>>, PgEventStreams<String, Record<Fx>>, Port, Hook, Fx> {
+    fn executor(&self, saga: &str, port: Port, hook: Hook, budget: u32) -> PgExecutor {
         Executor::new(
             self.outbox_feed.clone(),
             self.outbox.clone(),

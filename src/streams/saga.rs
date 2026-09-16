@@ -314,6 +314,7 @@ pub struct Runner<H, Fe, Ob, S, Fld> {
     outbox: Ob,
     fold: Fld,
     group: ConsumerGroup,
+    saga_key: String,
     retry: RetryPolicy,
 }
 
@@ -326,6 +327,7 @@ where
     pub fn new(saga: S, handle: H, feed: Fe, outbox: Ob, fold: Fld, retry: RetryPolicy) -> Self {
         let group =
             ConsumerGroup::new(saga.id().as_str()).expect("a saga id is a non-empty group name");
+        let saga_key = saga.id().as_str().to_owned();
         Self {
             saga,
             handle,
@@ -333,6 +335,7 @@ where
             outbox,
             fold,
             group,
+            saga_key,
             retry,
         }
     }
@@ -356,7 +359,7 @@ where
     /// id. The category name is pinned framework-owned by ADR 0010's
     /// outbox-saga section; a rename lands as its own migration step.
     pub fn outbox_stream(&self) -> StreamRef {
-        StreamRef::new(OUTBOX_CATEGORY, &self.saga.id().as_str().to_owned())
+        StreamRef::new(OUTBOX_CATEGORY, &self.saga_key)
     }
 }
 
@@ -406,10 +409,7 @@ where
             let position = entry.position();
             let reactions = self.saga.react(entry.record().event());
             if reactions.is_empty() {
-                self.feed
-                    .ack(&self.group, position)
-                    .await
-                    .map_err(Error::Ack)?;
+                self.feed.ack(&self.group, position).await?;
                 acked_to = Some(position);
                 continue;
             }
@@ -491,10 +491,7 @@ where
 
                 match self.handle.transact(batch).await {
                     Ok(()) => {
-                        self.feed
-                            .ack(&self.group, position)
-                            .await
-                            .map_err(Error::Ack)?;
+                        self.feed.ack(&self.group, position).await?;
                         acked_to = Some(position);
                         break;
                     }
@@ -521,11 +518,7 @@ where
                         // window, on the last attempt's abort: the re-read
                         // asks whether any of THIS entry's minted effect
                         // keys stands on the outbox stream.
-                        let key_present = match self
-                            .outbox
-                            .load_stream(&self.saga.id().as_str().to_owned())
-                            .await
-                        {
+                        let key_present = match self.outbox.load_stream(&self.saga_key).await {
                             Ok(StreamState::Present(batch)) => {
                                 batch.records().iter().any(|record| {
                                     matches!(
@@ -542,10 +535,7 @@ where
                             // The reactions already committed in an earlier
                             // attempt or lifetime: the abort is a redelivery
                             // artifact, and the entry acks as a no-op.
-                            self.feed
-                                .ack(&self.group, position)
-                                .await
-                                .map_err(Error::Ack)?;
+                            self.feed.ack(&self.group, position).await?;
                             acked_to = Some(position);
                             break;
                         }
