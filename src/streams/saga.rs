@@ -15,7 +15,7 @@
 //! The append is crash-atomic, but the window between it and the ack
 //! is real: a crash there redelivers the source event, and the
 //! re-run's reactions re-append. Reaction identity closes the window:
-//! the runner mints a deterministic [`IntentKey`] per reaction -
+//! the runner mints a deterministic `IntentKey` per reaction -
 //! (saga id, source stream, source position, reaction index) - and a
 //! redelivery is recognized by those keys. After the retry window,
 //! every batch abort sends the runner back to the outbox stream for
@@ -45,8 +45,11 @@ use super::{BatchSource, EventMetadata, EventStreams, ExpectedVersion, StreamSta
 
 // The identity and retry vocabulary lives in the private `keys` and
 // `retry` modules; these re-exports keep the paths this module
-// published before the split resolving.
-pub use super::keys::{EmptySagaId, IntentKey, ReactionIndex, RenderedIntentKey, SagaId};
+// published before the split resolving. `IntentKey` and
+// `ReactionIndex` are crate-internal: they appear in no public
+// signature, only the runner mints.
+pub use super::keys::{EmptySagaId, RenderedIntentKey, SagaId};
+pub(crate) use super::keys::{IntentKey, ReactionIndex};
 pub use super::retry::{BackoffSchedule, BaseExceedsCap, RetryPolicy};
 
 /// What one source event produces: commands to append to target

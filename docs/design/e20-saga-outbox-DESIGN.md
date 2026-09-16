@@ -113,9 +113,9 @@ crate is pre-1.0 under ADR 0001's breaking-change budget.
 
 | Item | Visibility | Reaches into |
 | --- | --- | --- |
-| `streams::keys` | private module, items re-exported flat at the streams root | `streams::batch` (`StreamRef`), `streams::feed` (`FeedPosition`) |
+| `streams::keys` | private module; `SagaId`, `EmptySagaId`, `RenderedIntentKey` re-exported flat at the streams root; `IntentKey` and `ReactionIndex` crate-internal (no public signature; only the runner mints) | `streams::batch` (`StreamRef`), `streams::feed` (`FeedPosition`) |
 | `streams::retry` | private module, items re-exported flat at the streams root | nothing in-crate (`std` only) |
-| `streams::saga` | public module; facade re-exports keep the pre-split `streams::saga::{SagaId, IntentKey, ReactionIndex, RenderedIntentKey, RetryPolicy, BackoffSchedule, BaseExceedsCap}` paths resolving | `streams::batch` (`BatchBuilder`, `StreamRef`, the conflict payloads), `streams::feed` (`EventFeed`, `ConsumerGroup`, `FeedPosition`, `PollLimit`, `AckError`), `streams` root (`BatchSource`, `EventMetadata`, `EventStreams`, `ExpectedVersion`), `streams::outbox` (`Record`, `OUTBOX_CATEGORY`), `streams::keys`, `streams::retry` |
+| `streams::saga` | public module; facade re-exports keep the pre-split `streams::saga::{SagaId, RenderedIntentKey, RetryPolicy, BackoffSchedule, BaseExceedsCap}` paths resolving | `streams::batch` (`BatchBuilder`, `StreamRef`, the conflict payloads), `streams::feed` (`EventFeed`, `ConsumerGroup`, `FeedPosition`, `PollLimit`, `AckError`), `streams` root (`BatchSource`, `EventMetadata`, `EventStreams`, `ExpectedVersion`), `streams::outbox` (`Record`, `OUTBOX_CATEGORY`), `streams::keys`, `streams::retry` |
 | `streams::outbox` | public module; facade re-export keeps the `streams::outbox::{RetryBudget, ZeroBudget}` paths resolving | `streams::feed`, `streams::keys` (`RenderedIntentKey`, `SagaId`), `streams::retry` (`RetryPolicy`, `BackoffSchedule`), `streams` root (`AppendError`, `EventStreams`), `decider::Event` |
 | `batch::DuplicateIntent`, `batch::BatchSource` | public, re-exported at the streams root | `StreamRef`, `AtomicStreams`, `BatchBuilder` |
 | `BatchSource` impls | `in_memory::batch`, `postgres::batch` | the handles' existing `batch()` constructors |

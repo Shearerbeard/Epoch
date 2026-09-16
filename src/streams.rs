@@ -32,7 +32,7 @@ pub use batch::{
     ConstraintViolation, DuplicateIntent, DuplicateWrite, StreamConstraint, StreamRef,
     TransactError, WritelessBatch,
 };
-pub use keys::{EmptySagaId, IntentKey, ReactionIndex, RenderedIntentKey, SagaId};
+pub use keys::{EmptySagaId, RenderedIntentKey, SagaId};
 pub use retry::{BackoffSchedule, BaseExceedsCap, RetryBudget, RetryPolicy, ZeroBudget};
 
 /// Two-way typed contract between a consumer's stream id types and the

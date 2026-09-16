@@ -45,7 +45,7 @@ pub struct EmptySagaId;
 /// distinguishes two reactions of the same source event from each
 /// other. Zero-based, matching the vector the saga returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ReactionIndex(u64);
+pub(crate) struct ReactionIndex(u64);
 
 impl ReactionIndex {
     pub(crate) fn new(raw: u64) -> Self {
@@ -70,7 +70,7 @@ impl ReactionIndex {
 /// sequences, and the position is unique per source event and stable
 /// under redelivery.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct IntentKey {
+pub(crate) struct IntentKey {
     saga: SagaId,
     source: StreamRef,
     position: FeedPosition,
@@ -79,9 +79,8 @@ pub struct IntentKey {
 
 impl IntentKey {
     /// Mint the key for one reaction of one delivered source event.
-    /// The runner mints in production; the constructor is public so
-    /// conformance tests can pin the rendering.
-    pub fn mint(
+    /// The runner is the only caller.
+    pub(crate) fn mint(
         saga: &SagaId,
         source: StreamRef,
         position: FeedPosition,
@@ -93,26 +92,6 @@ impl IntentKey {
             position,
             index,
         }
-    }
-
-    /// The saga the reaction belongs to.
-    pub fn saga(&self) -> &SagaId {
-        &self.saga
-    }
-
-    /// The source event's stream.
-    pub fn source(&self) -> &StreamRef {
-        &self.source
-    }
-
-    /// The source event's committed position.
-    pub fn position(&self) -> FeedPosition {
-        self.position
-    }
-
-    /// The reaction's index in the source event's `react` output.
-    pub fn index(&self) -> ReactionIndex {
-        self.index
     }
 
     /// Render the key to its canonical envelope form. The rule: inside
@@ -140,7 +119,7 @@ fn escape_key_component(component: &str) -> String {
 
 /// An intent key in its canonical rendered form: the string that rides
 /// the `intent` envelope key and the outbox outcome payloads. Compared
-/// bytewise, never parsed - the structured form is [`IntentKey`].
+/// bytewise, never parsed - the structured form is `IntentKey`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RenderedIntentKey(String);
@@ -151,7 +130,7 @@ impl RenderedIntentKey {
         &self.0
     }
 
-    /// Wrap an already-rendered key. [`IntentKey::render`] is the only
+    /// Wrap an already-rendered key. `IntentKey::render` is the only
     /// production source; stored facts are trusted at the read
     /// boundary, as any stored payload is.
     pub(crate) fn from_rendered(rendered: String) -> Self {
