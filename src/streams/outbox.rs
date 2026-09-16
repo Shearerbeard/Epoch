@@ -339,7 +339,11 @@ where
                             } if parked_key == intent => {
                                 parked = Some((attempts, error));
                             }
-                            _ => {}
+                            // Failed and Parked records for other
+                            // intent keys do not count toward this
+                            // intent's budget.
+                            Record::Failed { .. } | Record::Parked { .. } => {}
+                            Record::Intent { .. } | Record::Done { .. } => {}
                         }
                     }
 
@@ -364,7 +368,11 @@ where
                     if failed_count >= self.policy.budget().get() {
                         let attempts = NonZeroU32::new(failed_count)
                             .expect("the budget is nonzero and the count reached it");
-                        let error = last_failed_error.unwrap_or_default();
+                        let error = last_failed_error.expect(
+                            "the count reached the nonzero budget only by counting \
+                             this key's Failed records, each of which set the last \
+                             failure",
+                        );
                         let park = Record::Parked {
                             intent: intent.clone(),
                             attempts,
