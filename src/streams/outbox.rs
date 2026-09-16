@@ -58,7 +58,7 @@ pub const INTENT_METADATA_KEY: &str = "intent";
 /// category shares the effect payload type `F`: a deployment with
 /// several sagas defines one consumer-wide effect enum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OutboxEvent<F> {
+pub enum Record<F> {
     /// An effect intent, appended by the saga runner inside the
     /// reaction's atomic batch.
     Intent {
@@ -98,7 +98,7 @@ pub enum OutboxEvent<F> {
     },
 }
 
-impl<F> Event for OutboxEvent<F> {
+impl<F> Event for Record<F> {
     type EntityId = ();
 
     fn event_type(&self) -> String {
@@ -235,7 +235,7 @@ pub trait CompensationHook<F> {
 /// Type parameters: `Fe` the outbox feed, `St` the outbox stream's
 /// store view (outcome appends and the failure count), `P` the port,
 /// `K` the compensation hook, `F` the effect payload.
-pub struct OutboxExecutor<Fe, St, P, K, F> {
+pub struct Executor<Fe, St, P, K, F> {
     feed: Fe,
     store: St,
     port: P,
@@ -247,7 +247,7 @@ pub struct OutboxExecutor<Fe, St, P, K, F> {
     _marker: PhantomData<fn() -> F>,
 }
 
-impl<Fe, St, P, K, F> OutboxExecutor<Fe, St, P, K, F> {
+impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F> {
     /// Assemble an executor for one saga's outbox stream. The group
     /// derives from the saga id: one executor group per saga, its
     /// cursor independent of the runner's (group progress is scoped
@@ -296,10 +296,10 @@ impl<Fe, St, P, K, F> OutboxExecutor<Fe, St, P, K, F> {
     }
 }
 
-impl<Fe, St, P, K, F> OutboxExecutor<Fe, St, P, K, F>
+impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F>
 where
-    Fe: EventFeed<OutboxEvent<F>>,
-    St: EventStreams<OutboxEvent<F>, Id = String>,
+    Fe: EventFeed<Record<F>>,
+    St: EventStreams<Record<F>, Id = String>,
     P: EffectPort<F>,
     K: CompensationHook<F>,
     F: Send + Sync + fmt::Debug,
@@ -341,13 +341,11 @@ where
             let (event, _) = record.into_parts();
             match event {
                 // Outcome records are audit facts, not triggers.
-                OutboxEvent::Done { .. }
-                | OutboxEvent::Failed { .. }
-                | OutboxEvent::Parked { .. } => {
+                Record::Done { .. } | Record::Failed { .. } | Record::Parked { .. } => {
                     self.feed.ack(&self.group, position).await?;
                     acked_to = Some(position);
                 }
-                OutboxEvent::Intent { intent, request } => {
+                Record::Intent { intent, request } => {
                     // The budget's durable state is the saga's own
                     // stream: its `Failed` records for this intent key.
                     let stored = match self.store.load_stream(&self.saga.as_str().to_owned()).await
@@ -362,14 +360,14 @@ where
                     for record in stored {
                         let (event, _) = record.into_parts();
                         match event {
-                            OutboxEvent::Failed {
+                            Record::Failed {
                                 intent: failed,
                                 error,
                             } if failed == intent => {
                                 failed_count += 1;
                                 last_failed_error = Some(error);
                             }
-                            OutboxEvent::Parked {
+                            Record::Parked {
                                 intent: parked_key,
                                 attempts,
                                 error,
@@ -402,7 +400,7 @@ where
                         let attempts = NonZeroU32::new(failed_count)
                             .expect("the budget is nonzero and the count reached it");
                         let error = last_failed_error.unwrap_or_default();
-                        let park = OutboxEvent::Parked {
+                        let park = Record::Parked {
                             intent: intent.clone(),
                             attempts,
                             error: error.clone(),
@@ -423,7 +421,7 @@ where
 
                     match self.port.perform(&intent, &request).await {
                         Ok(()) => {
-                            let done = OutboxEvent::Done {
+                            let done = Record::Done {
                                 intent: intent.clone(),
                             };
                             let batch = EventBatch::new(vec![done]).expect("one event is nonempty");
@@ -439,7 +437,7 @@ where
                         }
                         Err(port_err) => {
                             let attempts = failed_count + 1;
-                            let failure = OutboxEvent::Failed {
+                            let failure = Record::Failed {
                                 intent: intent.clone(),
                                 error: port_err.to_string(),
                             };
@@ -470,7 +468,7 @@ where
                             let attempts = NonZeroU32::new(attempts)
                                 .expect("the budget is nonzero and the count reached it");
                             let error = port_err.to_string();
-                            let park = OutboxEvent::Parked {
+                            let park = Record::Parked {
                                 intent: intent.clone(),
                                 attempts,
                                 error: error.clone(),
@@ -516,7 +514,7 @@ where
     }
 }
 
-/// What one [`OutboxExecutor::step`] did.
+/// What one [`Executor::step`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutorStep {
     /// The poll delivered nothing; the cursor did not move.
@@ -536,7 +534,7 @@ pub enum ExecutorStep {
     },
 }
 
-/// How an [`OutboxExecutor::step`] can fail. Port failures are not
+/// How an [`Executor::step`] can fail. Port failures are not
 /// here: they are `Failed` records, the retry protocol's input.
 #[derive(Debug, Error)]
 pub enum ExecutorError<HookE, FeedE, StoreE>

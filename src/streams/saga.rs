@@ -42,7 +42,7 @@ use thiserror::Error;
 
 use super::batch::{BatchBuilder, BatchConflict, ConstraintViolation, StreamRef, TransactError};
 use super::feed::{AckError, ConsumerGroup, EventFeed, FeedPosition, PollLimit};
-use super::outbox::{OutboxEvent, INTENT_METADATA_KEY, OUTBOX_CATEGORY};
+use super::outbox::{Record, INTENT_METADATA_KEY, OUTBOX_CATEGORY};
 use super::{BatchSource, EventMetadata, EventStreams, ExpectedVersion, StreamState};
 
 /// A saga's identity: the runner's consumer-group name, the saga's
@@ -324,7 +324,7 @@ impl<'a, P> KeyedPayload<'a, P> {
     }
 
     /// The reaction's rendered intent key. Intent folds copy it into
-    /// the record payload (`OutboxEvent::Intent`); command folds
+    /// the record payload (`Record::Intent`); command folds
     /// leave it in the envelope alone.
     pub fn key(&self) -> &RenderedIntentKey {
         &self.key
@@ -421,7 +421,7 @@ pub trait ReactionFold<B> {
     type Command;
     /// The consumer's effect payload type.
     type Effect;
-    /// Fold failure type; surfaces as [`SagaError::Fold`].
+    /// Fold failure type; surfaces as [`Error::Fold`].
     type Error: std::error::Error + Send + Sync;
 
     /// Push one merged command group as ONE write to its stream,
@@ -433,7 +433,7 @@ pub trait ReactionFold<B> {
     ) -> Result<(), Self::Error>;
 
     /// Push one merged intent group as ONE write of
-    /// [`OutboxEvent::Intent`] records to the saga's outbox stream.
+    /// [`Record::Intent`] records to the saga's outbox stream.
     /// Each record carries its key twice: in the payload (the
     /// executor's read source) copied from [`KeyedPayload::key`], and
     /// in the envelope attached unchanged (the storage-level
@@ -567,7 +567,7 @@ pub struct ZeroAttempts;
 /// Type parameters: `H` the batch handle, `Fe` the source feed, `Ob`
 /// the outbox stream's store view (the classification re-read), `S`
 /// the saga, `Fld` the consumer's fold.
-pub struct SagaRunner<H, Fe, Ob, S, Fld> {
+pub struct Runner<H, Fe, Ob, S, Fld> {
     saga: S,
     handle: H,
     feed: Fe,
@@ -577,7 +577,7 @@ pub struct SagaRunner<H, Fe, Ob, S, Fld> {
     retry: RetryPolicy,
 }
 
-impl<H, Fe, Ob, S, Fld> SagaRunner<H, Fe, Ob, S, Fld>
+impl<H, Fe, Ob, S, Fld> Runner<H, Fe, Ob, S, Fld>
 where
     S: Saga,
 {
@@ -620,11 +620,11 @@ where
     }
 }
 
-impl<H, Fe, Ob, S, Fld> SagaRunner<H, Fe, Ob, S, Fld>
+impl<H, Fe, Ob, S, Fld> Runner<H, Fe, Ob, S, Fld>
 where
     H: BatchSource,
     Fe: EventFeed<S::Event>,
-    Ob: EventStreams<OutboxEvent<S::Effect>, Id = String>,
+    Ob: EventStreams<Record<S::Effect>, Id = String>,
     S: Saga,
     S::Event: Send + Sync + fmt::Debug,
     S::Effect: Send + Sync + fmt::Debug,
@@ -651,12 +651,12 @@ where
     pub async fn step(
         &self,
         limit: PollLimit,
-    ) -> Result<RunnerStep, SagaError<Fld::Error, Fe::Error, Ob::Error, H::Error>> {
+    ) -> Result<RunnerStep, Error<Fld::Error, Fe::Error, Ob::Error, H::Error>> {
         let entries = self
             .feed
             .poll(&self.group, limit)
             .await
-            .map_err(SagaError::Poll)?;
+            .map_err(Error::Poll)?;
         if entries.is_empty() {
             return Ok(RunnerStep::Idle);
         }
@@ -669,7 +669,7 @@ where
                 self.feed
                     .ack(&self.group, position)
                     .await
-                    .map_err(SagaError::Ack)?;
+                    .map_err(Error::Ack)?;
                 acked_to = Some(position);
                 continue;
             }
@@ -710,7 +710,7 @@ where
                             {
                                 Some(group) => {
                                     if group.expected() != command.expected() {
-                                        return Err(SagaError::ConflictingExpectations(
+                                        return Err(Error::ConflictingExpectations(
                                             command.stream().clone(),
                                         ));
                                     }
@@ -734,13 +734,13 @@ where
                 for group in command_groups {
                     self.fold
                         .push_command_group(&mut builder, group)
-                        .map_err(SagaError::Fold)?;
+                        .map_err(Error::Fold)?;
                 }
                 if !intents.is_empty() {
                     let group = IntentGroup::new(self.outbox_stream(), intents);
                     self.fold
                         .push_intent_group(&mut builder, group)
-                        .map_err(SagaError::Fold)?;
+                        .map_err(Error::Fold)?;
                 }
                 let batch = builder.build().expect(
                     "the reaction set is nonempty, so the fold was handed at least \
@@ -754,21 +754,21 @@ where
                         self.feed
                             .ack(&self.group, position)
                             .await
-                            .map_err(SagaError::Ack)?;
+                            .map_err(Error::Ack)?;
                         acked_to = Some(position);
                         break;
                     }
                     Err(TransactError::LockTimeout(bound)) => {
                         attempts_left -= 1;
                         if attempts_left == 0 {
-                            return Err(SagaError::LockTimeout(bound));
+                            return Err(Error::LockTimeout(bound));
                         }
                         tokio::time::sleep(delays.next().expect("a wait per retry")).await;
                     }
                     Err(TransactError::Backend(error)) => {
                         attempts_left -= 1;
                         if attempts_left == 0 {
-                            return Err(SagaError::Backend(error));
+                            return Err(Error::Backend(error));
                         }
                         tokio::time::sleep(delays.next().expect("a wait per retry")).await;
                     }
@@ -790,13 +790,13 @@ where
                                 batch.records().iter().any(|record| {
                                     matches!(
                                         record.event(),
-                                        OutboxEvent::Intent { intent, .. }
+                                        Record::Intent { intent, .. }
                                             if minted_keys.contains(intent)
                                     )
                                 })
                             }
                             Ok(StreamState::Missing) => false,
-                            Err(error) => return Err(SagaError::OutboxRead(error)),
+                            Err(error) => return Err(Error::OutboxRead(error)),
                         };
                         if key_present {
                             // The reactions already committed in an earlier
@@ -805,17 +805,17 @@ where
                             self.feed
                                 .ack(&self.group, position)
                                 .await
-                                .map_err(SagaError::Ack)?;
+                                .map_err(Error::Ack)?;
                             acked_to = Some(position);
                             break;
                         }
                         return Err(match abort {
-                            TransactError::Conflict(conflict) => SagaError::Conflict(conflict),
+                            TransactError::Conflict(conflict) => Error::Conflict(conflict),
                             TransactError::ConstraintViolated(violation) => {
-                                SagaError::ConstraintViolated(violation)
+                                Error::ConstraintViolated(violation)
                             }
                             TransactError::DuplicateIntent(_) => {
-                                SagaError::IntentMissing(minted_keys.first().cloned().expect(
+                                Error::IntentMissing(minted_keys.first().cloned().expect(
                                     "the duplicate-intent outcome fires only when an \
                                      intent write carried a key the store already \
                                      holds, and intent writes carry exactly this \
@@ -843,7 +843,7 @@ where
         &self,
         limit: PollLimit,
         interval: Duration,
-    ) -> Result<(), SagaError<Fld::Error, Fe::Error, Ob::Error, H::Error>> {
+    ) -> Result<(), Error<Fld::Error, Fe::Error, Ob::Error, H::Error>> {
         loop {
             self.step(limit).await?;
             tokio::time::sleep(interval).await;
@@ -851,7 +851,7 @@ where
     }
 }
 
-/// What one [`SagaRunner::step`] did.
+/// What one [`Runner::step`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerStep {
     /// The poll delivered nothing; the cursor did not move.
@@ -865,13 +865,13 @@ pub enum RunnerStep {
     },
 }
 
-/// How a [`SagaRunner::step`] can fail. A version conflict or
+/// How a [`Runner::step`] can fail. A version conflict or
 /// constraint violation is a real command-arm failure, surfaced per
 /// the classification rule; a lock timeout past the retry budget is
 /// still retryable by the caller; a backend failure is indeterminate
 /// and was already retried.
 #[derive(Debug, Error)]
-pub enum SagaError<FoldE, FeedE, StoreE, BatchE>
+pub enum Error<FoldE, FeedE, StoreE, BatchE>
 where
     FoldE: std::error::Error,
     FeedE: std::error::Error,

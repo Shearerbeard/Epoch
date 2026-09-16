@@ -27,12 +27,12 @@ use crate::streams::in_memory::{
     InMemoryBatchBuilder, InMemoryDatabase, InMemoryEventFeed, InMemoryEventStreams,
 };
 use crate::streams::outbox::{
-    CompensationHook, EffectPort, ExecutorError, ExecutorStep, OutboxEvent, OutboxExecutor,
-    ParkedNotice, RetryBudget, INTENT_METADATA_KEY, OUTBOX_CATEGORY,
+    CompensationHook, EffectPort, Executor, ExecutorError, ExecutorStep, ParkedNotice, Record,
+    RetryBudget, INTENT_METADATA_KEY, OUTBOX_CATEGORY,
 };
 use crate::streams::saga::{
-    BackoffSchedule, Command, CommandGroup, EffectRequest, IntentGroup, Reaction, ReactionFold,
-    RenderedIntentKey, RetryPolicy, RunnerStep, Saga, SagaError, SagaId, SagaRunner,
+    BackoffSchedule, Command, CommandGroup, EffectRequest, Error, IntentGroup, Reaction,
+    ReactionFold, RenderedIntentKey, RetryPolicy, Runner, RunnerStep, Saga, SagaId,
 };
 use crate::streams::{
     EventBatch, EventMetadata, EventStreams, ExpectedVersion, RecordedEvent, StreamState,
@@ -189,12 +189,12 @@ impl ReactionFold<InMemoryBatchBuilder> for MemFold {
         builder: &mut InMemoryBatchBuilder,
         group: IntentGroup<'_, Fx>,
     ) -> Result<(), FoldErr> {
-        let records: Vec<RecordedEvent<OutboxEvent<Fx>>> = group
+        let records: Vec<RecordedEvent<Record<Fx>>> = group
             .records()
             .iter()
             .map(|record| {
                 RecordedEvent::keyed(
-                    OutboxEvent::Intent {
+                    Record::Intent {
                         intent: record.key().clone(),
                         request: record.payload().clone(),
                     },
@@ -322,8 +322,8 @@ struct Rig {
     db: InMemoryDatabase,
     source: InMemoryEventStreams<Src>,
     source_feed: InMemoryEventFeed<Src>,
-    outbox: InMemoryEventStreams<OutboxEvent<Fx>>,
-    outbox_feed: InMemoryEventFeed<OutboxEvent<Fx>>,
+    outbox: InMemoryEventStreams<Record<Fx>>,
+    outbox_feed: InMemoryEventFeed<Record<Fx>>,
     ledger: InMemoryEventStreams<Cmd>,
 }
 
@@ -342,10 +342,10 @@ impl Rig {
         let source = db.category::<Src>(name).expect("fresh source category");
         let source_feed = db.feed::<Src>(name).expect("claimed source category");
         let outbox = db
-            .category::<OutboxEvent<Fx>>(OUTBOX_CATEGORY)
+            .category::<Record<Fx>>(OUTBOX_CATEGORY)
             .expect("fresh outbox category");
         let outbox_feed = db
-            .feed::<OutboxEvent<Fx>>(OUTBOX_CATEGORY)
+            .feed::<Record<Fx>>(OUTBOX_CATEGORY)
             .expect("claimed outbox category");
         let ledger = db.category::<Cmd>(LEDGER).expect("fresh ledger category");
         Self {
@@ -399,14 +399,14 @@ impl Rig {
         &self,
         saga: Scripted,
         fold: MemFold,
-    ) -> SagaRunner<
+    ) -> Runner<
         InMemoryDatabase,
         InMemoryEventFeed<Src>,
-        InMemoryEventStreams<OutboxEvent<Fx>>,
+        InMemoryEventStreams<Record<Fx>>,
         Scripted,
         MemFold,
     > {
-        SagaRunner::new(
+        Runner::new(
             saga,
             self.db.clone(),
             self.source_feed.clone(),
@@ -423,14 +423,9 @@ impl Rig {
         port: Port,
         hook: Hook,
         budget: u32,
-    ) -> OutboxExecutor<
-        InMemoryEventFeed<OutboxEvent<Fx>>,
-        InMemoryEventStreams<OutboxEvent<Fx>>,
-        Port,
-        Hook,
-        Fx,
-    > {
-        OutboxExecutor::new(
+    ) -> Executor<InMemoryEventFeed<Record<Fx>>, InMemoryEventStreams<Record<Fx>>, Port, Hook, Fx>
+    {
+        Executor::new(
             self.outbox_feed.clone(),
             self.outbox.clone(),
             port,
@@ -444,7 +439,7 @@ impl Rig {
 
     /// The saga's outbox stream, whole: payload and envelope per
     /// record, oldest first.
-    async fn outbox_records(&self, saga: &str) -> Vec<(OutboxEvent<Fx>, EventMetadata)> {
+    async fn outbox_records(&self, saga: &str) -> Vec<(Record<Fx>, EventMetadata)> {
         records_of(&self.outbox, &saga.to_owned())
             .await
             .into_iter()
@@ -480,7 +475,7 @@ impl Rig {
     /// text, with the envelope a runner would have attached.
     async fn seed_intent(&self, saga: &str, key: &str, request: Fx) {
         let record = RecordedEvent::keyed(
-            OutboxEvent::Intent {
+            Record::Intent {
                 intent: RenderedIntentKey::from_rendered(key.to_owned()),
                 request,
             },
@@ -491,7 +486,7 @@ impl Rig {
 
     /// A bare failed record on a saga's outbox stream.
     async fn seed_failed(&self, saga: &str, key: &str, error: &str) {
-        let record = RecordedEvent::new(OutboxEvent::Failed {
+        let record = RecordedEvent::new(Record::Failed {
             intent: RenderedIntentKey::from_rendered(key.to_owned()),
             error: error.to_owned(),
         });
@@ -500,7 +495,7 @@ impl Rig {
 
     /// A bare parked record on a saga's outbox stream.
     async fn seed_parked(&self, saga: &str, key: &str, attempts: u32, error: &str) {
-        let record = RecordedEvent::new(OutboxEvent::Parked {
+        let record = RecordedEvent::new(Record::Parked {
             intent: RenderedIntentKey::from_rendered(key.to_owned()),
             attempts: NonZeroU32::new(attempts).expect("a parked count is nonzero"),
             error: error.to_owned(),
@@ -508,7 +503,7 @@ impl Rig {
         self.append_outbox(saga, record).await;
     }
 
-    async fn append_outbox(&self, saga: &str, record: RecordedEvent<OutboxEvent<Fx>>) {
+    async fn append_outbox(&self, saga: &str, record: RecordedEvent<Record<Fx>>) {
         let batch = EventBatch::from_records(vec![record]).expect("one record is nonempty");
         self.outbox
             .append(ExpectedVersion::Any, &saga.to_owned(), &batch)
@@ -656,7 +651,7 @@ async fn runner_step_folds_reactions_into_one_batch_and_acks() {
     assert_eq!(
         rig.outbox_records("saga-1").await,
         vec![(
-            OutboxEvent::Intent {
+            Record::Intent {
                 intent: RenderedIntentKey::from_rendered(key2.clone()),
                 request: Fx::Export { item: 7 },
             },
@@ -733,14 +728,14 @@ async fn commands_to_one_stream_merge_into_one_write() {
         rig.outbox_records("saga-2").await,
         vec![
             (
-                OutboxEvent::Intent {
+                Record::Intent {
                     intent: RenderedIntentKey::from_rendered(key2.clone()),
                     request: Fx::Export { item: 8 },
                 },
                 intent_envelope(&key2)
             ),
             (
-                OutboxEvent::Intent {
+                Record::Intent {
                     intent: RenderedIntentKey::from_rendered(key3.clone()),
                     request: Fx::Notify { item: 8 },
                 },
@@ -793,7 +788,7 @@ async fn a_split_expectation_is_rejected_before_the_fold() {
         .step(limit(10))
         .await
         .expect_err("the group conflicts");
-    assert!(matches!(error, SagaError::ConflictingExpectations(_)));
+    assert!(matches!(error, Error::ConflictingExpectations(_)));
 
     assert!(rig.ledger_records("o-3").await.is_empty());
     assert!(rig.outbox_records("saga-3").await.is_empty());
@@ -876,7 +871,7 @@ async fn a_replayed_no_stream_command_acks_as_a_noop_through_the_conflict_path()
             &"saga-6".to_owned(),
             ExpectedVersion::Any,
             &EventBatch::from_records(vec![RecordedEvent::keyed(
-                OutboxEvent::Intent {
+                Record::Intent {
                     intent: RenderedIntentKey::from_rendered(key1.clone()),
                     request: Fx::Export { item: 11 },
                 },
@@ -922,7 +917,7 @@ async fn a_replayed_no_stream_command_acks_as_a_noop_through_the_conflict_path()
     assert_eq!(
         rig.outbox_records("saga-6").await,
         vec![(
-            OutboxEvent::Intent {
+            Record::Intent {
                 intent: RenderedIntentKey::from_rendered(key1.clone()),
                 request: Fx::Export { item: 11 },
             },
@@ -964,7 +959,7 @@ async fn a_real_conflict_surfaces_and_does_not_ack() {
         .step(limit(10))
         .await
         .expect_err("the conflict surfaces");
-    assert!(matches!(error, SagaError::Conflict(_)));
+    assert!(matches!(error, Error::Conflict(_)));
 
     assert_eq!(
         rig.ledger_records("o-5").await,
@@ -1019,7 +1014,7 @@ async fn a_conflict_mid_step_leaves_earlier_entries_acked() {
         .step(limit(10))
         .await
         .expect_err("the second entry conflicts");
-    assert!(matches!(error, SagaError::Conflict(_)));
+    assert!(matches!(error, Error::Conflict(_)));
 
     let key0 = rendered("saga-8", SOURCE, "o-1", first.get(), 0);
     assert_eq!(
@@ -1159,7 +1154,7 @@ async fn runner_run_drains_the_backlog() {
     assert_eq!(outbox_records.len(), 3);
     assert!(outbox_records
         .iter()
-        .all(|(event, _)| matches!(event, OutboxEvent::Intent { .. })));
+        .all(|(event, _)| matches!(event, Record::Intent { .. })));
     assert_eq!(rig.ledger_records("o-r").await.len(), 3);
     task.abort();
 }
@@ -1195,14 +1190,14 @@ async fn executor_performs_intents_and_appends_done() {
         rig.outbox_records("saga-9").await,
         vec![
             (
-                OutboxEvent::Intent {
+                Record::Intent {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     request: Fx::Export { item: 30 },
                 },
                 intent_envelope(&key)
             ),
             (
-                OutboxEvent::Done {
+                Record::Done {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                 },
                 EventMetadata::new()
@@ -1268,14 +1263,14 @@ async fn executor_skips_foreign_sagas_streams() {
         rig.outbox_records("saga-b").await,
         vec![
             (
-                OutboxEvent::Intent {
+                Record::Intent {
                     intent: RenderedIntentKey::from_rendered(own_key.clone()),
                     request: Fx::Export { item: 41 },
                 },
                 intent_envelope(&own_key)
             ),
             (
-                OutboxEvent::Done {
+                Record::Done {
                     intent: RenderedIntentKey::from_rendered(own_key),
                 },
                 EventMetadata::new()
@@ -1309,14 +1304,14 @@ async fn a_failing_effect_appends_failed_and_holds_the_cursor() {
         rig.outbox_records("saga-11").await,
         vec![
             (
-                OutboxEvent::Intent {
+                Record::Intent {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     request: Fx::Export { item: 50 },
                 },
                 intent_envelope(&key)
             ),
             (
-                OutboxEvent::Failed {
+                Record::Failed {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     error: PortErr::flaky().text(),
                 },
@@ -1376,21 +1371,21 @@ async fn budget_exhaustion_parks_and_fires_the_hook_once() {
         rig.outbox_records("saga-12").await,
         vec![
             (
-                OutboxEvent::Intent {
+                Record::Intent {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     request: Fx::Export { item: 60 },
                 },
                 intent_envelope(&key)
             ),
             (
-                OutboxEvent::Failed {
+                Record::Failed {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     error: PortErr::flaky().text(),
                 },
                 EventMetadata::new()
             ),
             (
-                OutboxEvent::Parked {
+                Record::Parked {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     attempts: NonZeroU32::new(1).expect("1 is nonzero"),
                     error: PortErr::flaky().text(),
@@ -1576,28 +1571,28 @@ async fn a_crash_before_the_park_lands_parks_on_the_replay() {
         rig.outbox_records("saga-15").await,
         vec![
             (
-                OutboxEvent::Intent {
+                Record::Intent {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     request: Fx::Export { item: 85 },
                 },
                 intent_envelope(&key)
             ),
             (
-                OutboxEvent::Failed {
+                Record::Failed {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     error: failed_error.to_owned(),
                 },
                 EventMetadata::new()
             ),
             (
-                OutboxEvent::Failed {
+                Record::Failed {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     error: failed_error.to_owned(),
                 },
                 EventMetadata::new()
             ),
             (
-                OutboxEvent::Parked {
+                Record::Parked {
                     intent: RenderedIntentKey::from_rendered(key.clone()),
                     attempts: NonZeroU32::new(2).expect("2 is nonzero"),
                     error: failed_error.to_owned(),
@@ -1668,8 +1663,8 @@ async fn executor_run_drains_the_backlog() {
     );
     let records = rig.outbox_records("saga-19").await;
     assert_eq!(records.len(), 4);
-    assert!(matches!(records[2].0, OutboxEvent::Done { .. }));
-    assert!(matches!(records[3].0, OutboxEvent::Done { .. }));
+    assert!(matches!(records[2].0, Record::Done { .. }));
+    assert!(matches!(records[3].0, Record::Done { .. }));
     task.abort();
 }
 

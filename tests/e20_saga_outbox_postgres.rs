@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,15 +36,15 @@ use serde::{Deserialize, Serialize};
 use epoch::decider::Event;
 use epoch::streams::feed::{ConsumerGroup, EventFeed, FeedPosition, PollLimit};
 use epoch::streams::outbox::{
-    CompensationHook, EffectPort, ExecutorStep, OutboxEvent, OutboxExecutor, ParkedNotice,
-    RetryBudget, INTENT_METADATA_KEY, OUTBOX_CATEGORY,
+    CompensationHook, EffectPort, Executor, ExecutorStep, ParkedNotice, Record, RetryBudget,
+    INTENT_METADATA_KEY, OUTBOX_CATEGORY,
 };
 use epoch::streams::postgres::{
     pool_from_conn_str, PgBatchBuilder, PgDatabase, PgEventFeed, PgEventStreams,
 };
 use epoch::streams::saga::{
-    BackoffSchedule, Command, CommandGroup, EffectRequest, IntentGroup, Reaction, ReactionFold,
-    RenderedIntentKey, RetryPolicy, RunnerStep, Saga, SagaError, SagaId, SagaRunner,
+    BackoffSchedule, Command, CommandGroup, EffectRequest, Error, IntentGroup, Reaction,
+    ReactionFold, RenderedIntentKey, RetryPolicy, Runner, RunnerStep, Saga, SagaId,
 };
 use epoch::streams::spec::under_deadline;
 use epoch::streams::{
@@ -219,12 +220,12 @@ impl ReactionFold<PgBatchBuilder> for PgFold {
         builder: &mut PgBatchBuilder,
         group: IntentGroup<'_, Fx>,
     ) -> Result<(), FoldErr> {
-        let records: Vec<RecordedEvent<OutboxEvent<Fx>>> = group
+        let records: Vec<RecordedEvent<Record<Fx>>> = group
             .records()
             .iter()
             .map(|record| {
                 RecordedEvent::keyed(
-                    OutboxEvent::Intent {
+                    Record::Intent {
                         intent: record.key().clone(),
                         request: record.payload().clone(),
                     },
@@ -387,8 +388,8 @@ struct Rig {
     db: PgDatabase,
     source: PgEventStreams<String, Src>,
     source_feed: PgEventFeed<Src>,
-    outbox: PgEventStreams<String, OutboxEvent<Fx>>,
-    outbox_feed: PgEventFeed<OutboxEvent<Fx>>,
+    outbox: PgEventStreams<String, Record<Fx>>,
+    outbox_feed: PgEventFeed<Record<Fx>>,
     ledger: PgEventStreams<String, Cmd>,
 }
 
@@ -416,14 +417,9 @@ impl Rig {
     fn runner(
         &self,
         saga: Scripted,
-    ) -> SagaRunner<
-        PgDatabase,
-        PgEventFeed<Src>,
-        PgEventStreams<String, OutboxEvent<Fx>>,
-        Scripted,
-        PgFold,
-    > {
-        SagaRunner::new(
+    ) -> Runner<PgDatabase, PgEventFeed<Src>, PgEventStreams<String, Record<Fx>>, Scripted, PgFold>
+    {
+        Runner::new(
             saga,
             self.db.clone(),
             self.source_feed.clone(),
@@ -440,14 +436,8 @@ impl Rig {
         port: Port,
         hook: Hook,
         budget: u32,
-    ) -> OutboxExecutor<
-        PgEventFeed<OutboxEvent<Fx>>,
-        PgEventStreams<String, OutboxEvent<Fx>>,
-        Port,
-        Hook,
-        Fx,
-    > {
-        OutboxExecutor::new(
+    ) -> Executor<PgEventFeed<Record<Fx>>, PgEventStreams<String, Record<Fx>>, Port, Hook, Fx> {
+        Executor::new(
             self.outbox_feed.clone(),
             self.outbox.clone(),
             port,
@@ -483,7 +473,7 @@ impl Rig {
 
     /// The saga's outbox stream, whole: payload and envelope per
     /// record, oldest first.
-    async fn outbox_records(&self, saga: &str) -> Vec<(OutboxEvent<Fx>, EventMetadata)> {
+    async fn outbox_records(&self, saga: &str) -> Vec<(Record<Fx>, EventMetadata)> {
         stream_records(&self.outbox, saga).await
     }
 
@@ -547,9 +537,9 @@ fn is_command_record(record: &(Cmd, EventMetadata), payload: &Cmd, key: &str) ->
 
 /// One intent record: the key in payload AND envelope, the request
 /// the saga recorded.
-fn is_intent_record(record: &(OutboxEvent<Fx>, EventMetadata), key: &str, payload: &Fx) -> bool {
+fn is_intent_record(record: &(Record<Fx>, EventMetadata), key: &str, payload: &Fx) -> bool {
     match record {
-        (OutboxEvent::Intent { intent, request }, metadata) => {
+        (Record::Intent { intent, request }, metadata) => {
             intent.as_str() == key && request == payload && metadata == &intent_envelope(key)
         }
         _ => false,
@@ -557,19 +547,19 @@ fn is_intent_record(record: &(OutboxEvent<Fx>, EventMetadata), key: &str, payloa
 }
 
 /// One Done record: the key in the payload, no envelope.
-fn is_done_record(record: &(OutboxEvent<Fx>, EventMetadata), key: &str) -> bool {
+fn is_done_record(record: &(Record<Fx>, EventMetadata), key: &str) -> bool {
     match record {
-        (OutboxEvent::Done { intent }, metadata) => intent.as_str() == key && metadata.is_empty(),
+        (Record::Done { intent }, metadata) => intent.as_str() == key && metadata.is_empty(),
         _ => false,
     }
 }
 
 /// One Failed record: the key and the rendered port error, no
 /// envelope.
-fn is_failed_record(record: &(OutboxEvent<Fx>, EventMetadata), key: &str, error: &str) -> bool {
+fn is_failed_record(record: &(Record<Fx>, EventMetadata), key: &str, error: &str) -> bool {
     match record {
         (
-            OutboxEvent::Failed {
+            Record::Failed {
                 intent,
                 error: text,
             },
@@ -582,14 +572,14 @@ fn is_failed_record(record: &(OutboxEvent<Fx>, EventMetadata), key: &str, error:
 /// One Parked record: the key, the durable attempt count, the last
 /// rendered failure, no envelope.
 fn is_parked_record(
-    record: &(OutboxEvent<Fx>, EventMetadata),
+    record: &(Record<Fx>, EventMetadata),
     key: &str,
     attempts: u32,
     error: &str,
 ) -> bool {
     match record {
         (
-            OutboxEvent::Parked {
+            Record::Parked {
                 intent,
                 attempts: parked,
                 error: text,
@@ -695,7 +685,7 @@ async fn crash_between_append_and_ack_rejects_the_duplicate_intent() {
                 &saga_id,
                 ExpectedVersion::Any,
                 &EventBatch::from_records(vec![RecordedEvent::keyed(
-                    OutboxEvent::Intent {
+                    Record::Intent {
                         intent: key_of(key1.clone()),
                         request: Fx::Export { item: 7 },
                     },
@@ -799,7 +789,7 @@ async fn replayed_no_stream_command_acks_through_the_conflict_path() {
                 &saga_id,
                 ExpectedVersion::Any,
                 &EventBatch::from_records(vec![RecordedEvent::keyed(
-                    OutboxEvent::Intent {
+                    Record::Intent {
                         intent: key_of(key1.clone()),
                         request: Fx::Export { item: 11 },
                     },
@@ -899,7 +889,7 @@ async fn a_real_conflict_on_postgres_surfaces() {
             .step(limit(10))
             .await
             .expect_err("the conflict surfaces");
-        assert!(matches!(error, SagaError::Conflict(_)));
+        assert!(matches!(error, Error::Conflict(_)));
 
         assert!(
             rig.outbox_records(&saga_id).await.is_empty(),
@@ -1164,4 +1154,113 @@ async fn repeated_failure_parks_and_fires_the_hook_on_postgres() {
         assert_eq!(port.calls.lock().unwrap().len(), 2);
     })
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// Wire-format fixtures (no database)
+// ---------------------------------------------------------------------------
+
+/// The record enum's serde variant names are the persisted wire
+/// format: they are the JSONB payloads in `stream_events`, so a type
+/// rename must leave them untouched. Frozen structural JSON for all
+/// four variants.
+#[test]
+fn wire_format_record_variants_serialize_to_the_frozen_json() {
+    let key = key_of("saga-1/orders/o-1/7/0".to_owned());
+    let error = PortErr::flaky().text();
+    let cases: Vec<(Record<Fx>, serde_json::Value)> = vec![
+        (
+            Record::Intent {
+                intent: key.clone(),
+                request: Fx::Export { item: 7 },
+            },
+            serde_json::json!({
+                "Intent": {
+                    "intent": "saga-1/orders/o-1/7/0",
+                    "request": { "Export": { "item": 7 } },
+                }
+            }),
+        ),
+        (
+            Record::Done {
+                intent: key.clone(),
+            },
+            serde_json::json!({
+                "Done": { "intent": "saga-1/orders/o-1/7/0" }
+            }),
+        ),
+        (
+            Record::Failed {
+                intent: key.clone(),
+                error: error.clone(),
+            },
+            serde_json::json!({
+                "Failed": {
+                    "intent": "saga-1/orders/o-1/7/0",
+                    "error": "port failure: flaky",
+                }
+            }),
+        ),
+        (
+            Record::Parked {
+                intent: key,
+                attempts: NonZeroU32::new(2).expect("2 is nonzero"),
+                error,
+            },
+            serde_json::json!({
+                "Parked": {
+                    "intent": "saga-1/orders/o-1/7/0",
+                    "attempts": 2,
+                    "error": "port failure: flaky",
+                }
+            }),
+        ),
+    ];
+    for (record, expected) in cases {
+        assert_eq!(
+            serde_json::to_value(&record).expect("a record serializes"),
+            expected
+        );
+    }
+}
+
+/// The four `event_type()` strings name the rows' type column in
+/// `stream_events`: wire format like the variant names, pinned so a
+/// type rename cannot drift them.
+#[test]
+fn wire_format_event_type_strings_are_pinned() {
+    let key = key_of("saga-1/orders/o-1/7/0".to_owned());
+    let cases: Vec<(Record<Fx>, &str)> = vec![
+        (
+            Record::Intent {
+                intent: key.clone(),
+                request: Fx::Export { item: 7 },
+            },
+            "OutboxIntent",
+        ),
+        (
+            Record::Done {
+                intent: key.clone(),
+            },
+            "OutboxDone",
+        ),
+        (
+            Record::Failed {
+                intent: key.clone(),
+                error: "e".to_owned(),
+            },
+            "OutboxFailed",
+        ),
+        (
+            Record::Parked {
+                intent: key,
+                attempts: NonZeroU32::new(1).expect("1 is nonzero"),
+                error: "e".to_owned(),
+            },
+            "OutboxParked",
+        ),
+    ];
+    for (record, expected) in cases {
+        assert_eq!(record.event_type(), expected);
+    }
 }
