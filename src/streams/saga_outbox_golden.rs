@@ -1,7 +1,5 @@
-//! E20 golden frames (Layer 2, typed-holes): whole-frame spec tests
-//! for the saga runner and the outbox executor, written from the E20
-//! card's four-round reviewed spec BEFORE the bodies were filled, so
-//! every fixture that crosses a hole fails on arrival. The coverage
+//! Golden frames for the saga runner and the outbox executor:
+//! whole-frame spec tests against the in-memory backend. The coverage
 //! manifest, including the exclusion rows, lives in
 //! `docs/design/e20-saga-outbox-DESIGN.md`.
 //!
@@ -1659,7 +1657,7 @@ async fn executor_run_drains_the_backlog() {
 }
 
 // ---------------------------------------------------------------------------
-// Constructor pins (implemented surface; green on arrival by design)
+// Constructor pins
 // ---------------------------------------------------------------------------
 
 /// The retry and budget constructors enforce their documented rules,

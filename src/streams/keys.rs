@@ -70,14 +70,14 @@ impl ReactionIndex {
     }
 }
 
-/// The deterministic identity of one reaction append (the card's
-/// reaction-identity pin): the saga, the source event's stream, the
+/// The deterministic identity of one reaction append (ADR 0010's
+/// reaction-identity rule): the saga, the source event's stream, the
 /// source event's committed position, and the reaction's index in that
 /// event's `react` output. A redelivered source event re-mints exactly
 /// the same keys, which is what makes storage's duplicate rejection a
 /// no-op signal rather than a failure.
 ///
-/// The spec's "source sequence" is realized as the source entry's
+/// ADR 0010's "source sequence" is realized as the source entry's
 /// committed-log position: the feed delivers positions, not per-stream
 /// sequences, and the position is unique per source event and stable
 /// under redelivery.

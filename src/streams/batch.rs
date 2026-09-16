@@ -334,8 +334,7 @@ impl BatchConflict {
 }
 
 /// A write carried an intent key the store already holds: the
-/// saga-outbox uniqueness index rejected the duplicate (E20's typed
-/// outcome, pinned by the saga card's final review). This is the
+/// saga-outbox uniqueness index rejected the duplicate. This is the
 /// framework's redelivery signal, never a version conflict: a
 /// redelivered source event re-appends its reactions, and storage
 /// rejects the second append of an intent key. Only a confirmed
@@ -352,10 +351,7 @@ impl DuplicateIntent {
     /// Build the outcome on a confirmed storage-level uniqueness
     /// rejection inside the outbox category. Crate-internal: only the
     /// backends construct it, so a consumer cannot mint a redelivery
-    /// signal. Reached only by the postgres backend's intent-index
-    /// mapping; without the postgres feature no backend enforces the
-    /// key (the in-memory divergence), so the constructor is dead by
-    /// feature rather than by oversight.
+    /// signal.
     #[cfg_attr(
         not(feature = "postgres"),
         expect(
@@ -434,7 +430,7 @@ pub trait AtomicStreams {
 /// agree on the wire form. What the type does NOT pin is handle
 /// identity: two handles of one backend share a wire form, so which
 /// database a batch commits against stays the caller's discipline,
-/// exactly as on E3's concrete path.
+/// exactly as on ADR 0006's concrete path.
 pub trait BatchSource: AtomicStreams<Batch = Batch<Self::Wire>> {
     /// The backend's wire form, fixed by the builder this handle hands
     /// out.

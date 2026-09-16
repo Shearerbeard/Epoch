@@ -234,7 +234,7 @@ and step outcomes unchanged, not behavior downstream of the streams.
 | Happy-path fold: commands and intents in one batch with keys on the envelopes, then the ack | `runner_step_folds_reactions_into_one_batch_and_acks` |
 | One write per stream: merged command group and merged intent group, reaction order | `commands_to_one_stream_merge_into_one_write` (fold log pins one group per stream) |
 | Split expectation rejected before the fold, entry not acked | `a_split_expectation_is_rejected_before_the_fold` |
-| Empty reaction set acks without a batch | `an_empty_reaction_set_acks_as_a_noop_without_a_batch` |
+| Empty reaction set acks without a batch | `an_empty_reaction_set_acks_without_a_batch` |
 | Idle poll | `a_poll_with_no_entries_is_idle` |
 | Redelivery through the conflict path (expectation-sensitive replay): committed reactions re-polled, no-op ack, nothing doubled | `a_replayed_no_stream_command_acks_as_a_noop_through_the_conflict_path` |
 | Real conflict: keys absent on re-read, surfaced, whole-batch rollback, no ack | `a_real_conflict_surfaces_and_does_not_ack` |

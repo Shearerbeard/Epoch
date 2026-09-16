@@ -1,7 +1,7 @@
-//! E20 gate-M (the live-postgres crash table): the five crash windows
-//! of the saga runner and the outbox executor, proven against the live
-//! compose postgres - the store whose intent-key uniqueness index and
-//! global feed positions the in-memory golden harness
+//! The live-postgres crash table: the five crash windows of the saga
+//! runner and the outbox executor, proven against the live compose
+//! postgres - the store whose intent-key uniqueness index and global
+//! feed positions the in-memory golden harness
 //! (`src/streams/saga_outbox_golden.rs`) cannot exhibit. The consumer
 //! harness here mirrors the golden's shapes - `Src`/`Cmd`/`Fx`, a
 //! scripted saga, a `ReactionFold`, an `EffectPort`, a
@@ -746,12 +746,12 @@ async fn crash_between_append_and_ack_rejects_the_duplicate_intent() {
     .await;
 }
 
-/// The panel's expectation-sensitive scenario: the same crash replay,
-/// but the command arm carries `ExpectedVersion::NoStream`. The
-/// manual pre-commit creates the command stream, so the replay's
-/// batch aborts as a Conflict - the expectation check runs before the
-/// inserts ever reach the index - and the classification finds the
-/// intent key present and acks the no-op.
+/// The expectation-sensitive replay: the same crash replay, but the
+/// command arm carries `ExpectedVersion::NoStream`. The manual
+/// pre-commit creates the command stream, so the replay's batch aborts
+/// as a Conflict - the expectation check runs before the inserts ever
+/// reach the index - and the classification finds the intent key
+/// present and acks the no-op.
 #[tokio::test(flavor = "multi_thread")]
 async fn replayed_no_stream_command_acks_through_the_conflict_path() {
     under_deadline(async {

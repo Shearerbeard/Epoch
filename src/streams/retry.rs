@@ -52,7 +52,7 @@ impl BackoffSchedule {
 }
 
 impl Default for BackoffSchedule {
-    /// 50ms base, 2s cap - the shipped values gate A accepted.
+    /// 50ms base, 2s cap.
     fn default() -> Self {
         Self {
             base: Duration::from_millis(50),
@@ -87,7 +87,7 @@ impl RetryBudget {
 }
 
 impl Default for RetryBudget {
-    /// The card's pinned default: 5 attempts.
+    /// 5 attempts.
     fn default() -> Self {
         Self(NonZeroU32::new(5).expect("5 is nonzero"))
     }
@@ -146,8 +146,7 @@ impl RetryPolicy {
 }
 
 impl Default for RetryPolicy {
-    /// The default policy: 5 attempts under the default schedule -
-    /// the shipped values gate A accepted.
+    /// The default policy: 5 attempts under the default schedule.
     fn default() -> Self {
         Self {
             budget: RetryBudget::default(),

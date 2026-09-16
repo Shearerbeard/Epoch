@@ -1,7 +1,6 @@
 //! Core stream surface: versioned event streams (ADRs 0001-0005), the
 //! atomic batch (ADR 0006), the event feed (ADR 0010), and the saga
-//! runner with its outbox executor (E20, ADR 0010's outbox-saga
-//! section).
+//! runner with its outbox executor (ADR 0010's outbox-saga section).
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;

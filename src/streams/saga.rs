@@ -1,7 +1,7 @@
-//! The saga runner (E20; ADR 0010's outbox-saga section, landing as
-//! that record's gate-A revision): a consumer's pure reaction folded
-//! into ONE atomic batch append, with the feed-cursor ack as a
-//! separate, explicit step after the append succeeds.
+//! The saga runner (ADR 0010's outbox-saga section): a consumer's
+//! pure reaction folded into ONE atomic batch append, with the
+//! feed-cursor ack as a separate, explicit step after the append
+//! succeeds.
 //!
 //! A [`Saga`] maps one delivered source event to reactions:
 //! [`Reaction::Command`] arms append events to their target streams,
@@ -17,17 +17,10 @@
 //! re-run's reactions re-append. Reaction identity closes the window:
 //! the runner mints a deterministic `IntentKey` per reaction -
 //! (saga id, source stream, source position, reaction index) - and a
-//! redelivery is recognized by those keys. After the retry window,
-//! every batch abort sends the runner back to the outbox stream for
-//! the minted keys: key present means this source event's reactions
-//! already committed, so the abort is a redelivery artifact - the
-//! typed [`DuplicateIntent`] when the uniqueness index fired, a
-//! conflict when the original commit moved a command arm's stream
-//! past the arm's own expectation - and the entry acks as a no-op.
-//! Key absent means a real command-arm conflict, surfaced as an
-//! error. Retryable aborts (`TransactError::LockTimeout`) and
-//! indeterminate failures are retried under the runner's
-//! [`RetryPolicy`] and then propagated, never classified.
+//! redelivery is recognized by those keys. How an abort classifies
+//! against them - redelivery artifact, real conflict, the typed
+//! [`DuplicateIntent`](crate::streams::DuplicateIntent) - is the rule
+//! [`Runner::step`] owns.
 //!
 //! Every write the runner makes goes through the atomic batch, so the
 //! single-writer funnel's operating assumptions (ADR 0010, and the
@@ -356,8 +349,7 @@ where
     }
 
     /// The saga's outbox stream: the outbox category, keyed by saga
-    /// id. The category name is pinned framework-owned by ADR 0010's
-    /// outbox-saga section; a rename lands as its own migration step.
+    /// id.
     pub fn outbox_stream(&self) -> StreamRef {
         StreamRef::new(OUTBOX_CATEGORY, &self.saga_key)
     }
@@ -380,17 +372,18 @@ where
     /// after its batch commits. An empty reaction set acks without a
     /// batch.
     ///
-    /// Redelivery classification, per the card's pinned rule: after
-    /// the retry window, every batch abort sends the runner back to
-    /// the outbox stream for the minted keys. Key present means this
-    /// source event's reactions already committed and the abort is a
-    /// redelivery artifact - the typed `TransactError::DuplicateIntent`
-    /// when the uniqueness index fired, a conflict when the original
-    /// commit moved a command arm's stream past the arm's own
-    /// expectation - and the entry acks as a no-op. Key absent means
-    /// a real command-arm failure, surfaced. Lock timeouts and
-    /// indeterminate backend failures are retried under the runner's
-    /// policy, then propagated, never classified.
+    /// Redelivery classification, per ADR 0010's outbox-saga section:
+    /// after the retry window, every batch abort sends the runner back
+    /// to the outbox stream for the minted keys. Key present means
+    /// this source event's reactions already committed and the abort
+    /// is a redelivery artifact - the typed
+    /// `TransactError::DuplicateIntent` when the uniqueness index
+    /// fired, a conflict when the original commit moved a command
+    /// arm's stream past the arm's own expectation - and the entry
+    /// acks as a no-op. Key absent means a real command-arm failure,
+    /// surfaced. Lock timeouts and indeterminate backend failures are
+    /// retried under the runner's policy, then propagated, never
+    /// classified.
     pub async fn step(
         &self,
         limit: PollLimit,
@@ -421,13 +414,9 @@ where
             let mut delays = self.retry.delays();
             let mut attempts_left = self.retry.attempts();
             loop {
-                // Mint one key per reaction, in reaction order, and
-                // group as we go: commands per target stream in
-                // first-seen order, effects onto the saga's outbox
-                // stream. A second command for an already-grouped
-                // stream must agree on the expectation, or the group
-                // is rejected here - before any fold call, before any
-                // write.
+                // A second command for an already-grouped stream must
+                // agree on the expectation, or the group is rejected
+                // here - before any fold call, before any write.
                 let mut command_groups: Vec<CommandGroup<'_, S::Command>> = Vec::new();
                 let mut intents = Vec::new();
                 let mut minted_keys: Vec<RenderedIntentKey> = Vec::new();
@@ -485,8 +474,7 @@ where
                 let batch = builder.build().expect(
                     "the reaction set is nonempty, so the fold was handed at least \
                      one group; a writeless batch means the fold accepted a group \
-                     and pushed no write - the fold-contract violation whose \
-                     wording gate A owns and whose variant the error surface lacks",
+                     and pushed no write - a fold-contract violation",
                 );
 
                 match self.handle.transact(batch).await {

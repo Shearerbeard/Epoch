@@ -1,9 +1,9 @@
-//! The outbox executor (E20; ADR 0010's outbox-saga section, landing
-//! as that record's gate-A revision): a generic epoch runtime that
-//! consumes a saga's outbox stream through the event feed, performs
-//! effect intents through a caller-supplied port, and appends the
-//! outcome events. Ordered at-least-once is the documented delivery
-//! contract; idempotency is the consumer's documented obligation.
+//! The outbox executor (ADR 0010's outbox-saga section): a generic
+//! epoch runtime that consumes a saga's outbox stream through the
+//! event feed, performs effect intents through a caller-supplied
+//! port, and appends the outcome events. Ordered at-least-once is the
+//! documented delivery contract; idempotency is the consumer's
+//! documented obligation.
 //!
 //! Poison-intent policy: each intent gets a per-intent retry budget
 //! (default 5, exponential backoff), derived durably from the
@@ -188,8 +188,7 @@ impl<F> ParkedNotice<F> {
 /// intent parks TERMINAL-FAILED. Fires at park time, in the executor
 /// process; a crash between the park append and the hook re-fires it
 /// on replay, so the hook carries the same idempotency obligation
-/// effects carry. Parking records are audit facts, never a second
-/// trigger.
+/// effects carry.
 #[trait_variant::make(Send)]
 pub trait CompensationHook<F> {
     /// Hook failure type; surfaces as [`ExecutorError::Hook`].
@@ -202,10 +201,7 @@ pub trait CompensationHook<F> {
 /// The executor: polls the outbox category as the saga's executor
 /// group, performs each of the saga's intents through the port, and
 /// appends the outcome. Entries from other sagas' streams in the
-/// category, and outcome records, are skipped and acked past. During
-/// an intent's retry window the group cursor HOLDS at the failing
-/// intent; on exhaustion the intent parks and the group advances past
-/// it permanently.
+/// category, and outcome records, are skipped and acked past.
 ///
 /// Type parameters: `Fe` the outbox feed, `St` the outbox stream's
 /// store view (outcome appends and the failure count), `P` the port,
@@ -276,12 +272,10 @@ where
     /// entries. For one of this saga's intents - the key read from
     /// the record's payload, never the envelope: perform through the
     /// port; on success append `Done` and ack; on failure append
-    /// `Failed` and, under budget, HOLD the cursor (the next poll
-    /// redelivers the intent after the backoff); at the budget,
-    /// append `Parked`, fire the hook, and ack past the intent
-    /// permanently. A replay that finds the `Parked` record already
-    /// present re-fires the hook (idempotent under replay) and acks:
-    /// the append is the no-op.
+    /// `Failed`; at the budget, append `Parked` and fire the hook. A
+    /// replay that finds the `Parked` record already present re-fires
+    /// the hook (idempotent under replay) and acks: the append is the
+    /// no-op.
     pub async fn step(
         &self,
         limit: PollLimit,
@@ -308,7 +302,6 @@ where
 
             let (event, _) = record.into_parts();
             match event {
-                // Outcome records are audit facts, not triggers.
                 Record::Done { .. } | Record::Failed { .. } | Record::Parked { .. } => {
                     self.feed.ack(&self.group, position).await?;
                     acked_to = Some(position);
@@ -489,9 +482,8 @@ pub enum ExecutorStep {
         /// The position the group's cursor now stands at.
         acked_to: FeedPosition,
     },
-    /// An intent failed inside its retry window: its `Failed` record
-    /// is appended and the cursor HOLDS at the intent until the
-    /// backoff expires.
+    /// An intent failed inside its retry window: the cursor held at
+    /// the failing intent.
     Holding {
         /// The failing intent's rendered key.
         intent: RenderedIntentKey,
