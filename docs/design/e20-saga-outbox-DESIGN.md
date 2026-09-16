@@ -1,11 +1,13 @@
-# E20 saga runner and outbox executor - design record (skeleton)
+# E20 saga runner and outbox executor - design record
 
-Status: WIP, Gate S skeleton, design-panel repairs applied. The type
-surface implements the E20 card's Deliverable - the four-round
-adversarially reviewed spec - behind the in-memory feed. Naming is
-indicative until gate A. ADR 0010's outbox-saga section and ADR 0007's
-discharged-by-trigger mark land at gate A as those records' revisions,
-per the card. The two-seat design panel ran on the skeleton commit;
+Status: shipped, post-gate-A. The runner, the executor, the golden
+suite, and gate M's live-postgres crash table are landed; ADR 0010's
+outbox-saga section stands as that record's gate-A revision and ADR
+0007 is discharged. Naming is settled - the tightening pass
+de-stuttered the public types (`saga::Runner`, `saga::Error`,
+`outbox::Record`, `outbox::Executor`) and split the key and retry
+vocabulary into the private `keys` and `retry` modules behind facade
+re-exports. The two-seat design panel ran on the skeleton commit;
 its findings and dispositions are recorded on the card's review
 ledger, and the repairs are noted in place below.
 
@@ -17,7 +19,7 @@ so the duplicate-intent rejection protocol cannot be proven there; the
 crash-table proofs are gate M's, on live postgres, by the card's own
 design.
 
-## Type-to-business-rule map - saga module
+## Type-to-business-rule map - keys module
 
 | Type | One business rule | Invalid state it forbids |
 | --- | --- | --- |
@@ -25,29 +27,39 @@ design.
 | `ReactionIndex` | Two reactions of one source event are distinguished by their position in the `react` output. | Nothing value-wise; the zero-based rule lives in the runner's mint, not the value. |
 | `IntentKey` | Reaction identity is (saga, source stream, source position, reaction index), deterministic under redelivery. | Two different reactions rendering one key: the escaped canonical rendering is injective, so a duplicate rejection can never be a false positive. |
 | `RenderedIntentKey` | The envelope and payload form of a key is one canonical string, compared bytewise and never parsed. | A key compared in a non-canonical rendering (a false mismatch). |
+
+## Type-to-business-rule map - saga module
+
+| Type | One business rule | Invalid state it forbids |
+| --- | --- | --- |
 | `Reaction` / `Command` / `EffectRequest` | A reaction is exactly a command arm or an effect request; `react` stays pure. | A third arm (an inline effect) is unrepresentable. |
 | `KeyedPayload` | The framework-minted envelope and the rendered intent key travel with the payload to the push. | Nothing structurally; the attach-unchanged rule is the fold's documented obligation. |
 | `CommandGroup` | One stream gets one write per batch (ADR 0006), under the single expectation its commands agreed on. | A mixed-expectation group reaching the fold: the runner rejects it first (`ConflictingExpectations`). |
 | `IntentGroup` | Intents accumulate on the saga's outbox stream; the framework fixes the write's expectation at `Any`. | A consumer-chosen expectation on the outbox write. |
 | `Saga` (trait) | The reaction mapping is pure domain logic: same event, same reactions. | Nothing structurally; purity is the documented rule the runner's redelivery safety rests on. |
 | `ReactionFold` (trait) | Erasure happens at push, under the backend's own bound (ADR 0006's erasure contract). | A backend-neutral erased event type imposed on the E1 surface. |
-| `BackoffSchedule` | A backoff schedule is a base and a cap and nothing else; it carries no attempt count. | A base above its cap (a schedule whose first wait already exceeds its bound), rejected at construction. |
-| `RetryPolicy` | Retryable aborts and indeterminate failures are retried with bounded exponential backoff, then propagated; classification never happens inside the window. | The zero-attempt policy: a policy that never tries is a misconfiguration, rejected at construction. |
-| `SagaRunner` | One source event folds into ONE atomic batch; the ack follows the commit, never precedes it. | An ack-before-append flow is unwritable through `step`. |
+| `Runner` | One source event folds into ONE atomic batch; the ack follows the commit, never precedes it. | An ack-before-append flow is unwritable through `step`. |
 | `RunnerStep` | A step reports the cursor's movement, nothing more. | A "processed but not acked" success state. |
-| `SagaError` | The failure vocabulary: real conflicts surface and retryables stay retryable; an indeterminate failure propagates only after its retry budget. | A redelivery artifact reported as a conflict (the typed `DuplicateIntent` never reaches here). |
+| `Error` | The failure vocabulary: real conflicts surface and retryables stay retryable; an indeterminate failure propagates only after its retry budget. | A redelivery artifact reported as a conflict (the typed `DuplicateIntent` never reaches here). |
+
+## Type-to-business-rule map - retry module
+
+| Type | One business rule | Invalid state it forbids |
+| --- | --- | --- |
+| `BackoffSchedule` | A backoff schedule is a base and a cap and nothing else; it carries no attempt count. | A base above its cap (a schedule whose first wait already exceeds its bound), rejected at construction. |
+| `RetryBudget` | The attempt bound is nonzero, parsed at construction; the executor's per-intent budget is derived durably from the stream's own `Failed` records. | The zero budget. |
+| `RetryPolicy` | Retryable aborts and indeterminate failures are retried with bounded exponential backoff, then propagated; classification never happens inside the window. The policy joins a pre-validated budget to a schedule, so its own construction is infallible. | The zero-attempt policy: unrepresentable, because the zero case fails at `RetryBudget::new`. |
 
 ## Type-to-business-rule map - outbox module
 
 | Type | One business rule | Invalid state it forbids |
 | --- | --- | --- |
 | `OUTBOX_CATEGORY` / `INTENT_METADATA_KEY` | The storage contract's two names are framework-owned: the uniqueness index reads exactly them. | A consumer-configurable key name drifting from the index expression. |
-| `OutboxEvent` | Intents and outcomes share one stream and one feed; every record carries the intent key in its payload, and `Intent` also carries it in the envelope for the uniqueness index. | An outcome record tripping the uniqueness index (it would, if the key rode its envelope); a parked record with zero attempts (`NonZeroU32`). |
-| `RetryBudget` | The per-intent attempt bound is derived durably from the stream's own `Failed` records. | The zero budget. |
+| `Record` | Intents and outcomes share one stream and one feed; every record carries the intent key in its payload, and `Intent` also carries it in the envelope for the uniqueness index. | An outcome record tripping the uniqueness index (it would, if the key rode its envelope); a parked record with zero attempts (`NonZeroU32`). |
 | `EffectPort` (trait) | Effects are performed outside the framework, under at-least-once delivery; the port dedupes by the intent key it is handed, never by payload. | A port asked to dedupe without the key: two distinct reactions may carry identical payloads. |
 | `ParkedNotice` | The hook learns the parked intent with its durable attempt count and last failure. | A hook fired without the intent's identity; a zero attempt count (`NonZeroU32`). |
 | `CompensationHook` (trait) | The hook fires at park time, in the executor process, idempotent under replay. | Nothing structurally; the once-per-park rule lives in the executor's flow. |
-| `OutboxExecutor` | The cursor HOLDS inside a retry window; on exhaustion the intent parks and the group advances permanently. | A "skip and continue" state inside the retry window. |
+| `Executor` | The cursor HOLDS inside a retry window; on exhaustion the intent parks and the group advances permanently. | A "skip and continue" state inside the retry window. |
 | `ExecutorStep` | A step reports advance, idle, or a held cursor. | A held cursor reported as progress. |
 | `ExecutorError` | Port failures are stream facts (`Failed` records), never executor errors; reads and appends fail differently, and the append error's own variants survive (`Append(AppendError<_>)`, so a lock timeout stays retryable). | A port error surfaced as infrastructure failure; an append failure flattened into a read error. |
 
@@ -101,25 +113,33 @@ crate is pre-1.0 under ADR 0001's breaking-change budget.
 
 | Item | Visibility | Reaches into |
 | --- | --- | --- |
-| `streams::saga` | public module | `streams::batch` (`BatchBuilder`, `StreamRef`, the conflict payloads), `streams::feed` (`EventFeed`, `ConsumerGroup`, `FeedPosition`, `PollLimit`, `AckError`), `streams` root (`BatchSource`, `EventMetadata`, `EventStreams`, `ExpectedVersion`), `streams::outbox` (`OutboxEvent`, `OUTBOX_CATEGORY`) |
-| `streams::outbox` | public module | `streams::feed`, `streams::saga` (`BackoffSchedule`, `RenderedIntentKey`, `SagaId`), `streams` root (`AppendError`, `EventStreams`), `decider::Event` |
+| `streams::keys` | private module, items re-exported flat at the streams root | `streams::batch` (`StreamRef`), `streams::feed` (`FeedPosition`) |
+| `streams::retry` | private module, items re-exported flat at the streams root | nothing in-crate (`std` only) |
+| `streams::saga` | public module; facade re-exports keep the pre-split `streams::saga::{SagaId, IntentKey, ReactionIndex, RenderedIntentKey, RetryPolicy, BackoffSchedule, BaseExceedsCap}` paths resolving | `streams::batch` (`BatchBuilder`, `StreamRef`, the conflict payloads), `streams::feed` (`EventFeed`, `ConsumerGroup`, `FeedPosition`, `PollLimit`, `AckError`), `streams` root (`BatchSource`, `EventMetadata`, `EventStreams`, `ExpectedVersion`), `streams::outbox` (`Record`, `OUTBOX_CATEGORY`), `streams::keys`, `streams::retry` |
+| `streams::outbox` | public module; facade re-export keeps the `streams::outbox::{RetryBudget, ZeroBudget}` paths resolving | `streams::feed`, `streams::keys` (`RenderedIntentKey`, `SagaId`), `streams::retry` (`RetryPolicy`, `BackoffSchedule`), `streams` root (`AppendError`, `EventStreams`), `decider::Event` |
 | `batch::DuplicateIntent`, `batch::BatchSource` | public, re-exported at the streams root | `StreamRef`, `AtomicStreams`, `BatchBuilder` |
 | `BatchSource` impls | `in_memory::batch`, `postgres::batch` | the handles' existing `batch()` constructors |
 
-Neither module reaches into a backend's private parts; both backends
+The module graph is acyclic: `saga` reaches into `keys`, `retry`, and
+`outbox`; `outbox` reaches into `keys` and `retry`; `keys` and
+`retry` reach into neither. Neither module reaches into a backend's
+private parts; both backends
 are wired through the public handle traits only.
 
-## Inherited deferrals (gate A owns)
+## Inherited deferrals (resolved at gate A)
 
-1. In-memory intent-key parity: the in-memory backend accepts
-   duplicate intents (E19's documented divergence, pinned by a test);
-   whether the backends must reach parity is a gate-A decision.
-2. Final outbox category naming: migration 0004's `saga-outbox` is
-   indicative by its own comment; a rename is its own migration step.
-3. The `load_category` envelope-gap watch item: this design's key
-   consumption is feed-only plus `load_stream` (both
-   envelope-preserving); `load_category` is never used. Gate A
-   confirms rather than discovers.
+1. In-memory intent-key parity: resolved - the divergence stands as
+   documented v1 scope. The in-memory backend accepts duplicate
+   intents, pinned by its own test (ADR 0010's outbox-saga section,
+   backend scope).
+2. Final outbox category naming: resolved - `saga-outbox` and
+   `intent` are pinned framework-owned by ADR 0010's gate-A revision;
+   a rename lands as its own migration step.
+3. The `load_category` envelope-gap watch item: resolved - the
+   classification consumes keys through the feed and `load_stream`
+   alone, both envelope-preserving, and never through
+   `load_category`, so the category read's envelope gap is outside
+   the protocol (ADR 0010, same section).
 
 ## Residual risks (named)
 
@@ -146,7 +166,7 @@ are wired through the public handle traits only.
 - **One shared outbox category means one shared effect payload type.**
   A category holds one event type, so every saga on the `saga-outbox`
   category shares `F`: a deployment with several sagas defines one
-  consumer-wide effect enum. Documented on `OutboxEvent`; a
+  consumer-wide effect enum. Documented on `Record`; a
   routing/decoding seam is later work if a consumer needs per-saga
   payload types.
 - **The intent key exists twice on intent records**: the payload copy
@@ -167,6 +187,11 @@ are wired through the public handle traits only.
   finding 6).
 
 ## Hole inventory
+
+Dated skeleton history, kept as the record of the typed-holes
+landing: the hole names below predate the tightening renames
+(`SagaRunner` is now `Runner`, `OutboxExecutor` now `Executor`), and
+all four holes are filled.
 
 Baseline at the skeleton commit:
 
@@ -193,7 +218,7 @@ accounting for its inventory lines.
 
 The golden suite is `src/streams/saga_outbox_golden.rs`
 (`cargo test --lib saga_outbox_golden`), in-crate so it can reach
-`ReactionIndex::new` and `RenderedIntentKey::from_rendered`, behind
+`RenderedIntentKey::from_rendered`, behind
 the in-memory feed. Every fixture is whole-frame: a full stream's
 records, payloads and envelopes together, compared against an expected
 `RecordedEvent` list built from the spec. Eighteen fixtures cross a
@@ -229,7 +254,7 @@ and step outcomes unchanged, not behavior downstream of the streams.
 Exclusion rows, each naming why the suite leaves the surface to
 another owner:
 
-- The typed `DuplicateIntent` arm and `SagaError::IntentMissing`: the
+- The typed `DuplicateIntent` arm and `Error::IntentMissing`: the
   in-memory backend never constructs the outcome (documented v1
   divergence), so these arms are unreachable here. Gate M owns them on
   live postgres, where the uniqueness index fires.

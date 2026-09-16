@@ -431,9 +431,11 @@ impl Rig {
             port,
             hook,
             SagaId::new(saga).expect("a test saga id is nonempty"),
-            RetryBudget::new(budget).expect("a test budget is nonzero"),
-            BackoffSchedule::new(Duration::from_millis(1), Duration::from_millis(2))
-                .expect("the test base does not exceed its cap"),
+            RetryPolicy::new(
+                RetryBudget::new(budget).expect("a test budget is nonzero"),
+                BackoffSchedule::new(Duration::from_millis(1), Duration::from_millis(2))
+                    .expect("the test base does not exceed its cap"),
+            ),
         )
     }
 
@@ -1683,7 +1685,6 @@ fn retry_and_budget_constructors_pin_the_spec() {
         BackoffSchedule::new(cap, base).is_err(),
         "a base above its cap is not a schedule"
     );
-    assert!(RetryPolicy::new(0, BackoffSchedule::default()).is_err());
     assert!(RetryBudget::new(0).is_err());
     assert_eq!(RetryBudget::default().get(), 5);
 

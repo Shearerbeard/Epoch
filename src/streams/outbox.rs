@@ -28,8 +28,14 @@ use thiserror::Error;
 use crate::decider::Event;
 
 use super::feed::{AckError, ConsumerGroup, EventFeed, FeedPosition, PollLimit};
-use super::saga::{BackoffSchedule, RenderedIntentKey, SagaId};
+use super::keys::{RenderedIntentKey, SagaId};
+use super::retry::{BackoffSchedule, RetryPolicy};
 use super::{AppendError, EventBatch, EventStreams, ExpectedVersion, StreamState};
+
+// The retry vocabulary lives in the private `retry` module; this
+// re-export keeps the paths this module published before the split
+// resolving.
+pub use super::retry::{RetryBudget, ZeroBudget};
 
 /// The outbox stream category, pinned framework-owned by ADR 0010's
 /// outbox-saga section: the storage-level uniqueness index
@@ -113,37 +119,6 @@ impl<F> Event for Record<F> {
 
     fn get_id(&self) -> Self::EntityId {}
 }
-
-/// The per-intent retry budget: how many perform attempts an intent
-/// gets before it parks TERMINAL-FAILED. Derived durably from the
-/// stream's own `Failed` records for the intent key, so it survives
-/// executor crashes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetryBudget(NonZeroU32);
-
-impl RetryBudget {
-    /// Parse a budget; zero is not a budget.
-    pub fn new(raw: u32) -> Result<Self, ZeroBudget> {
-        NonZeroU32::new(raw).map(Self).ok_or(ZeroBudget)
-    }
-
-    /// The attempt count.
-    pub fn get(self) -> u32 {
-        self.0.get()
-    }
-}
-
-impl Default for RetryBudget {
-    /// The card's pinned default: 5 attempts.
-    fn default() -> Self {
-        Self(NonZeroU32::new(5).expect("5 is nonzero"))
-    }
-}
-
-/// A retry budget of zero was requested.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("a retry budget must allow at least one attempt")]
-pub struct ZeroBudget;
 
 /// The consumer's effect port: performs one effect request. Called
 /// under at-least-once delivery - a crash between the external call
@@ -242,8 +217,7 @@ pub struct Executor<Fe, St, P, K, F> {
     hook: K,
     saga: SagaId,
     group: ConsumerGroup,
-    budget: RetryBudget,
-    backoff: BackoffSchedule,
+    policy: RetryPolicy,
     _marker: PhantomData<fn() -> F>,
 }
 
@@ -252,15 +226,7 @@ impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F> {
     /// derives from the saga id: one executor group per saga, its
     /// cursor independent of the runner's (group progress is scoped
     /// per category).
-    pub fn new(
-        feed: Fe,
-        store: St,
-        port: P,
-        hook: K,
-        saga: SagaId,
-        budget: RetryBudget,
-        backoff: BackoffSchedule,
-    ) -> Self {
+    pub fn new(feed: Fe, store: St, port: P, hook: K, saga: SagaId, policy: RetryPolicy) -> Self {
         let group = ConsumerGroup::new(saga.as_str()).expect("a saga id is a non-empty group name");
         Self {
             feed,
@@ -269,8 +235,7 @@ impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F> {
             hook,
             saga,
             group,
-            budget,
-            backoff,
+            policy,
             _marker: PhantomData,
         }
     }
@@ -287,12 +252,12 @@ impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F> {
 
     /// The per-intent retry budget.
     pub fn budget(&self) -> RetryBudget {
-        self.budget
+        self.policy.budget()
     }
 
     /// The backoff schedule inside a retry window.
     pub fn backoff(&self) -> BackoffSchedule {
-        self.backoff
+        self.policy.schedule()
     }
 }
 
@@ -396,7 +361,7 @@ where
                     // The crash between the last Failed and the Parked
                     // append, replayed: the budget is spent durably, so
                     // park now - the port is never asked past it.
-                    if failed_count >= self.budget.get() {
+                    if failed_count >= self.policy.budget().get() {
                         let attempts = NonZeroU32::new(failed_count)
                             .expect("the budget is nonzero and the count reached it");
                         let error = last_failed_error.unwrap_or_default();
@@ -450,12 +415,13 @@ where
                                     &batch,
                                 )
                                 .await?;
-                            if attempts < self.budget.get() {
+                            if attempts < self.policy.budget().get() {
                                 // The retry window holds: the failing
                                 // entry stays unacked and redelivers
                                 // after the backoff, order preserved.
                                 let delay = self
-                                    .backoff
+                                    .policy
+                                    .schedule()
                                     .delays()
                                     .nth(failed_count as usize)
                                     .expect("the delay stream is unbounded");

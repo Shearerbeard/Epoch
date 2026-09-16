@@ -16,9 +16,11 @@ mod batch;
 pub mod feed;
 #[cfg(feature = "in_memory")]
 pub mod in_memory;
+mod keys;
 pub mod outbox;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+mod retry;
 pub mod saga;
 pub mod spec;
 
@@ -30,6 +32,8 @@ pub use batch::{
     ConstraintViolation, DuplicateIntent, DuplicateWrite, StreamConstraint, StreamRef,
     TransactError, WritelessBatch,
 };
+pub use keys::{EmptySagaId, IntentKey, ReactionIndex, RenderedIntentKey, SagaId};
+pub use retry::{BackoffSchedule, BaseExceedsCap, RetryBudget, RetryPolicy, ZeroBudget};
 
 /// Two-way typed contract between a consumer's stream id types and the
 /// stored stream key (ADR 0004). The repository owns namespacing; an id
