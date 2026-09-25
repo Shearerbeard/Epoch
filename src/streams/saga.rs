@@ -27,13 +27,12 @@ use super::outbox::{Record, INTENT_METADATA_KEY, OUTBOX_CATEGORY};
 use super::{BatchSource, EventMetadata, EventStreams, ExpectedVersion, StreamState};
 
 // The identity and retry vocabulary lives in the private `keys` and
-// `retry` modules; these re-exports keep the paths this module
-// published before the split resolving. `IntentKey` and
+// `retry` modules behind the flat root re-exports; `IntentKey` and
 // `ReactionIndex` are crate-internal: they appear in no public
 // signature, only the runner mints.
-pub use super::keys::{EmptySagaId, RenderedIntentKey, SagaId};
 pub(crate) use super::keys::{IntentKey, ReactionIndex};
-pub use super::retry::{BackoffSchedule, BaseExceedsCap, RetryPolicy};
+use super::keys::{RenderedIntentKey, SagaId};
+use super::retry::RetryPolicy;
 
 /// What one source event produces: commands to append to target
 /// streams, and effect requests to record as intents on the saga's

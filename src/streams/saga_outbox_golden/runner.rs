@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use crate::streams::batch::{AtomicStreams, StreamRef};
 use crate::streams::outbox::{Record, INTENT_METADATA_KEY, OUTBOX_CATEGORY};
-use crate::streams::saga::{
-    Command, EffectRequest, Error, Reaction, RenderedIntentKey, RunnerStep,
+use crate::streams::saga::{Command, EffectRequest, Error, Reaction, RunnerStep};
+use crate::streams::{
+    EventBatch, EventMetadata, ExpectedVersion, RecordedEvent, RenderedIntentKey,
 };
-use crate::streams::{EventBatch, EventMetadata, ExpectedVersion, RecordedEvent};
 
 use super::support::{
     intent_envelope, limit, rendered, stream_len, wait_until, Cmd, Fx, MemFold, Rig, Scripted, Src,

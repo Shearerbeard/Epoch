@@ -25,13 +25,8 @@ use crate::decider::Event;
 
 use super::feed::{AckError, ConsumerGroup, EventFeed, FeedPosition, PollLimit};
 use super::keys::{RenderedIntentKey, SagaId};
-use super::retry::{BackoffSchedule, RetryPolicy};
+use super::retry::{BackoffSchedule, RetryBudget, RetryPolicy};
 use super::{AppendError, EventBatch, EventStreams, ExpectedVersion, StreamState};
-
-// The retry vocabulary lives in the private `retry` module; this
-// re-export keeps the paths this module published before the split
-// resolving.
-pub use super::retry::{RetryBudget, ZeroBudget};
 
 /// The outbox stream category, pinned framework-owned by ADR 0010's
 /// outbox-saga section: the storage-level uniqueness index

@@ -6,8 +6,9 @@ outbox-saga section stands as that record's gate-A revision and ADR
 0007 is discharged. Naming is settled - the tightening pass
 de-stuttered the public types (`saga::Runner`, `saga::Error`,
 `outbox::Record`, `outbox::Executor`) and split the key and retry
-vocabulary into the private `keys` and `retry` modules behind facade
-re-exports. The two-seat design panel ran on the skeleton commit;
+vocabulary into the private `keys` and `retry` modules, re-exported
+flat at the streams root. The two-seat design panel ran on the
+skeleton commit;
 its findings and dispositions are recorded on the card's review
 ledger, and the repairs are noted in place below.
 
@@ -115,8 +116,8 @@ crate is pre-1.0 under ADR 0001's breaking-change budget.
 | --- | --- | --- |
 | `streams::keys` | private module; `SagaId`, `EmptySagaId`, `RenderedIntentKey` re-exported flat at the streams root; `IntentKey` and `ReactionIndex` crate-internal (no public signature; only the runner mints) | `streams::batch` (`StreamRef`), `streams::feed` (`FeedPosition`) |
 | `streams::retry` | private module, items re-exported flat at the streams root | nothing in-crate (`std` only) |
-| `streams::saga` | public module; facade re-exports keep the pre-split `streams::saga::{SagaId, RenderedIntentKey, RetryPolicy, BackoffSchedule, BaseExceedsCap}` paths resolving | `streams::batch` (`BatchBuilder`, `StreamRef`, the conflict payloads), `streams::feed` (`EventFeed`, `ConsumerGroup`, `FeedPosition`, `PollLimit`, `AckError`), `streams` root (`BatchSource`, `EventMetadata`, `EventStreams`, `ExpectedVersion`), `streams::outbox` (`Record`, `OUTBOX_CATEGORY`), `streams::keys`, `streams::retry` |
-| `streams::outbox` | public module; facade re-export keeps the `streams::outbox::{RetryBudget, ZeroBudget}` paths resolving | `streams::feed`, `streams::keys` (`RenderedIntentKey`, `SagaId`), `streams::retry` (`RetryPolicy`, `BackoffSchedule`), `streams` root (`AppendError`, `EventStreams`), `decider::Event` |
+| `streams::saga` | public module; the shared identity and retry vocabulary crosses no boundary here - the `streams` root re-exports it (`streams::{SagaId, RenderedIntentKey, RetryPolicy, BackoffSchedule, ...}`), so `saga::` names only the reaction vocabulary and the runner | `streams::batch` (`BatchBuilder`, `StreamRef`, the conflict payloads), `streams::feed` (`EventFeed`, `ConsumerGroup`, `FeedPosition`, `PollLimit`, `AckError`), `streams` root (`BatchSource`, `EventMetadata`, `EventStreams`, `ExpectedVersion`), `streams::outbox` (`Record`, `OUTBOX_CATEGORY`), `streams::keys`, `streams::retry` |
+| `streams::outbox` | public module; `RetryBudget` and `ZeroBudget` live at the `streams` root, not here | `streams::feed`, `streams::keys` (`RenderedIntentKey`, `SagaId`), `streams::retry` (`RetryPolicy`, `BackoffSchedule`), `streams` root (`AppendError`, `EventStreams`), `decider::Event` |
 | `batch::DuplicateIntent`, `batch::BatchSource` | public, re-exported at the streams root | `StreamRef`, `AtomicStreams`, `BatchBuilder` |
 | `BatchSource` impls | `in_memory::batch`, `postgres::batch` | the handles' existing `batch()` constructors |
 
