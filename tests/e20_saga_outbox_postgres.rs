@@ -2,7 +2,7 @@
 //! runner and the outbox executor, proven against the live compose
 //! postgres - the store whose intent-key uniqueness index and global
 //! feed positions the in-memory golden harness
-//! (`src/streams/saga_outbox_golden.rs`) cannot exhibit. The consumer
+//! (`src/streams/saga_outbox_golden/`) cannot exhibit. The consumer
 //! harness here mirrors the golden's shapes - `Src`/`Cmd`/`Fx`, a
 //! scripted saga, a `ReactionFold`, an `EffectPort`, a
 //! `CompensationHook` - but self-contained and postgres-shaped, with

@@ -216,7 +216,7 @@ accounting for its inventory lines.
 
 ## Layer-2 coverage manifest
 
-The golden suite is `src/streams/saga_outbox_golden.rs`
+The golden suite is `src/streams/saga_outbox_golden/` (support, runner, and executor submodules)
 (`cargo test --lib saga_outbox_golden`), in-crate so it can reach
 `RenderedIntentKey::from_rendered`, behind
 the in-memory feed. Every fixture is whole-frame: a full stream's
