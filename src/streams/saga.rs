@@ -1,38 +1,28 @@
 //! The saga runner (ADR 0010's outbox-saga section): a consumer's
-//! pure reaction folded into ONE atomic batch append, with the
-//! feed-cursor ack as a separate, explicit step after the append
-//! succeeds.
+//! pure [`Saga::react`] folded into one atomic batch per source event,
+//! with the feed-cursor ack as a separate, explicit step after the
+//! append commits.
 //!
-//! A [`Saga`] maps one delivered source event to reactions:
-//! [`Reaction::Command`] arms append events to their target streams,
-//! [`Reaction::EffectRequest`] arms record effect intents on the
-//! saga's outbox stream (the outbox school: effects as facts, never
-//! performed inline). The runner folds every reaction of one source
-//! event into a single `AtomicStreams::transact` - commands merged to
-//! one write per stream, intents merged to one write on the outbox
-//! stream, as ADR 0006 requires of a batch.
-//!
-//! The append is crash-atomic, but the window between it and the ack
-//! is real: a crash there redelivers the source event, and the
-//! re-run's reactions re-append. Reaction identity closes the window:
-//! the runner mints a deterministic `IntentKey` per reaction -
-//! (saga id, source stream, source position, reaction index) - and a
-//! redelivery is recognized by those keys. How an abort classifies
-//! against them - redelivery artifact, real conflict, the typed
-//! [`DuplicateIntent`](crate::streams::DuplicateIntent) - is the rule
-//! [`Runner::step`] owns.
-//!
-//! Every write the runner makes goes through the atomic batch, so the
-//! single-writer funnel's operating assumptions (ADR 0010, and the
-//! postgres module doc) bind deployments unchanged.
+//! [`Reaction::Command`] arms append events to their target streams;
+//! [`Reaction::EffectRequest`] arms record intents on the saga's
+//! outbox stream, where the [`crate::streams::outbox`] executor picks
+//! them up - effects are facts, never performed inside the reaction.
+//! The window between the append and the ack is real; reaction
+//! identity closes it. The runner mints a deterministic intent key
+//! per reaction, and the abort classifier in [`Runner::step`] decides
+//! each batch abort against those keys. Every write goes through the
+//! atomic batch, so the single-writer funnel's assumptions (ADR 0010)
+//! bind deployments unchanged.
 
 use std::fmt;
 use std::time::Duration;
 
 use thiserror::Error;
 
-use super::batch::{BatchBuilder, BatchConflict, ConstraintViolation, StreamRef, TransactError};
-use super::feed::{AckError, ConsumerGroup, EventFeed, FeedPosition, PollLimit};
+use super::batch::{
+    Batch, BatchBuilder, BatchConflict, ConstraintViolation, StreamRef, TransactError,
+};
+use super::feed::{AckError, ConsumerGroup, EventFeed, FeedEntry, FeedPosition, PollLimit};
 use super::outbox::{Record, INTENT_METADATA_KEY, OUTBOX_CATEGORY};
 use super::{BatchSource, EventMetadata, EventStreams, ExpectedVersion, StreamState};
 
@@ -47,13 +37,10 @@ pub use super::retry::{BackoffSchedule, BaseExceedsCap, RetryPolicy};
 
 /// What one source event produces: commands to append to target
 /// streams, and effect requests to record as intents on the saga's
-/// outbox stream (the outbox school - effects as facts, never
-/// performed inside the reaction).
+/// outbox stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reaction<C, F> {
-    /// Append events to a target stream.
     Command(Command<C>),
-    /// Record an effect intent for the outbox executor.
     EffectRequest(EffectRequest<F>),
 }
 
@@ -69,7 +56,7 @@ pub struct Command<C> {
 }
 
 impl<C> Command<C> {
-    /// Address a command at a stream with an expectation.
+    /// Address a stream with an expectation.
     pub fn new(stream: StreamRef, expected: ExpectedVersion, payload: C) -> Self {
         Self {
             stream,
@@ -78,17 +65,14 @@ impl<C> Command<C> {
         }
     }
 
-    /// The target stream.
     pub fn stream(&self) -> &StreamRef {
         &self.stream
     }
 
-    /// The expectation against the stream's pre-batch head.
     pub fn expected(&self) -> ExpectedVersion {
         self.expected
     }
 
-    /// The consumer's command payload.
     pub fn payload(&self) -> &C {
         &self.payload
     }
@@ -103,12 +87,10 @@ pub struct EffectRequest<F> {
 }
 
 impl<F> EffectRequest<F> {
-    /// Wrap an effect payload.
     pub fn new(payload: F) -> Self {
         Self { payload }
     }
 
-    /// The effect payload.
     pub fn payload(&self) -> &F {
         &self.payload
     }
@@ -131,11 +113,8 @@ impl<C, F> From<EffectRequest<F>> for Reaction<C, F> {
 /// around it: polling, key minting, the atomic fold, classification,
 /// and the ack.
 pub trait Saga {
-    /// The source event type the saga reacts to.
     type Event;
-    /// The consumer's command payload type.
     type Command;
-    /// The consumer's effect payload type.
     type Effect;
 
     /// The saga's identity: runner group, outbox stream key, and the
@@ -170,19 +149,17 @@ impl<'a, P> KeyedPayload<'a, P> {
         }
     }
 
-    /// The reaction's rendered intent key. Intent folds copy it into
-    /// the record payload (`Record::Intent`); command folds
-    /// leave it in the envelope alone.
+    /// Intent folds copy the key into the record payload; command
+    /// folds leave it in the envelope alone.
     pub fn key(&self) -> &RenderedIntentKey {
         &self.key
     }
 
-    /// The runner-minted envelope: attach unchanged, one per record.
+    /// Attach unchanged, one per record.
     pub fn metadata(&self) -> &EventMetadata {
         &self.metadata
     }
 
-    /// The reaction payload.
     pub fn payload(&self) -> &'a P {
         self.payload
     }
@@ -191,8 +168,9 @@ impl<'a, P> KeyedPayload<'a, P> {
 /// One stream's merged command group: every command one source
 /// event's reactions addressed at this stream, concatenated in
 /// reaction order, under the single expectation they all agreed on.
-/// The fold pushes the group as ONE write - ADR 0006 admits at most
-/// one write per stream per batch.
+/// Commands that disagree on the expectation are rejected before the
+/// fold runs. The fold pushes the group as ONE write - ADR 0006
+/// admits at most one write per stream per batch.
 #[derive(Debug)]
 pub struct CommandGroup<'a, C> {
     stream: StreamRef,
@@ -213,18 +191,14 @@ impl<'a, C> CommandGroup<'a, C> {
         }
     }
 
-    /// The stream the whole group writes.
     pub fn stream(&self) -> &StreamRef {
         &self.stream
     }
 
-    /// The expectation every command in the group carried. The runner
-    /// rejects a group whose commands disagree before the fold runs.
     pub fn expected(&self) -> ExpectedVersion {
         self.expected
     }
 
-    /// The merged payloads with their envelopes, in reaction order.
     pub fn records(&self) -> &[KeyedPayload<'a, C>] {
         &self.records
     }
@@ -245,13 +219,10 @@ impl<'a, F> IntentGroup<'a, F> {
         Self { stream, records }
     }
 
-    /// The saga's outbox stream.
     pub fn stream(&self) -> &StreamRef {
         &self.stream
     }
 
-    /// The merged effect payloads with their envelopes, in reaction
-    /// order.
     pub fn records(&self) -> &[KeyedPayload<'a, F>] {
         &self.records
     }
@@ -264,9 +235,7 @@ impl<'a, F> IntentGroup<'a, F> {
 /// agreement, key minting, and the envelopes; the fold owns only the
 /// per-backend `write` call.
 pub trait ReactionFold<B> {
-    /// The consumer's command payload type.
     type Command;
-    /// The consumer's effect payload type.
     type Effect;
     /// Fold failure type; surfaces as [`Error::Fold`].
     type Error: std::error::Error + Send + Sync;
@@ -319,7 +288,7 @@ where
     /// one runner per saga, and the group's cursor is the saga's own.
     pub fn new(saga: S, handle: H, feed: Fe, outbox: Ob, fold: Fld, retry: RetryPolicy) -> Self {
         let group =
-            ConsumerGroup::new(saga.id().as_str()).expect("a saga id is a non-empty group name");
+            ConsumerGroup::new(saga.id().as_str()).expect("a saga id is a nonempty group name");
         let saga_key = saga.id().as_str().to_owned();
         Self {
             saga,
@@ -333,26 +302,30 @@ where
         }
     }
 
-    /// The saga this runner runs.
     pub fn saga(&self) -> &S {
         &self.saga
     }
 
-    /// The runner's consumer group.
     pub fn group(&self) -> &ConsumerGroup {
         &self.group
     }
 
-    /// The retry policy.
     pub fn retry(&self) -> RetryPolicy {
         self.retry
     }
 
-    /// The saga's outbox stream: the outbox category, keyed by saga
-    /// id.
+    /// The saga's outbox stream: the outbox category, keyed by saga id.
     pub fn outbox_stream(&self) -> StreamRef {
         StreamRef::new(OUTBOX_CATEGORY, &self.saga_key)
     }
+}
+
+/// One attempt's grouping of an entry's reactions: what the fold
+/// consumes and the keys the abort classifier re-reads.
+struct GroupedReactions<'a, C, F> {
+    commands: Vec<CommandGroup<'a, C>>,
+    intents: Vec<KeyedPayload<'a, F>>,
+    effect_keys: Vec<RenderedIntentKey>,
 }
 
 impl<H, Fe, Ob, S, Fld> Runner<H, Fe, Ob, S, Fld>
@@ -366,24 +339,16 @@ where
     Fld: ReactionFold<BatchBuilder<H::Wire>, Command = S::Command, Effect = S::Effect>,
 {
     /// One poll-react-transact-ack cycle over up to `limit` delivered
-    /// entries. Each entry's reactions fold into ONE batch: commands
-    /// merged to one write per stream, intents merged to one write on
-    /// the saga's outbox stream; the entry's position is acked only
-    /// after its batch commits. An empty reaction set acks without a
-    /// batch.
+    /// entries. Each entry's reactions fold into ONE batch - commands
+    /// merged to one write per stream, intents to one write on the
+    /// saga's outbox stream - and the entry acks only after its batch
+    /// commits. An empty reaction set acks without a batch.
     ///
-    /// Redelivery classification, per ADR 0010's outbox-saga section:
-    /// after the retry window, every batch abort sends the runner back
-    /// to the outbox stream for the minted keys. Key present means
-    /// this source event's reactions already committed and the abort
-    /// is a redelivery artifact - the typed
-    /// `TransactError::DuplicateIntent` when the uniqueness index
-    /// fired, a conflict when the original commit moved a command
-    /// arm's stream past the arm's own expectation - and the entry
-    /// acks as a no-op. Key absent means a real command-arm failure,
-    /// surfaced. Lock timeouts and indeterminate backend failures are
-    /// retried under the runner's policy, then propagated, never
-    /// classified.
+    /// A non-retryable abort classifies per ADR 0010: the runner
+    /// re-reads the outbox stream for the minted effect keys. A
+    /// standing key acks the redelivery as a no-op; no key surfaces
+    /// the real conflict. Lock timeouts and backend failures retry
+    /// under the policy, then propagate - never classify.
     pub async fn step(
         &self,
         limit: PollLimit,
@@ -403,154 +368,190 @@ where
             let reactions = self.saga.react(entry.record().event());
             if reactions.is_empty() {
                 self.feed.ack(&self.group, position).await?;
-                acked_to = Some(position);
-                continue;
+            } else {
+                self.commit_entry(entry, &reactions).await?;
             }
-
-            // The retry window. The fold consumes the groups by value
-            // and the batch type is not Clone across the generic, so
-            // every attempt regroups the same reactions: react is
-            // pure, so every attempt rebuilds an identical batch.
-            let mut delays = self.retry.delays();
-            let mut attempts_left = self.retry.attempts();
-            loop {
-                // A second command for an already-grouped stream must
-                // agree on the expectation, or the group is rejected
-                // here - before any fold call, before any write.
-                let mut command_groups: Vec<CommandGroup<'_, S::Command>> = Vec::new();
-                let mut intents = Vec::new();
-                let mut minted_keys: Vec<RenderedIntentKey> = Vec::new();
-                for (index, reaction) in reactions.iter().enumerate() {
-                    let key = IntentKey::mint(
-                        self.saga.id(),
-                        entry.stream().clone(),
-                        position,
-                        ReactionIndex::new(index as u64),
-                    )
-                    .render();
-                    let mut envelope = EventMetadata::new();
-                    envelope.insert(INTENT_METADATA_KEY, key.as_str());
-                    match reaction {
-                        Reaction::Command(command) => {
-                            let record = KeyedPayload::new(key, envelope, command.payload());
-                            match command_groups
-                                .iter_mut()
-                                .find(|group| group.stream() == command.stream())
-                            {
-                                Some(group) => {
-                                    if group.expected() != command.expected() {
-                                        return Err(Error::ConflictingExpectations(
-                                            command.stream().clone(),
-                                        ));
-                                    }
-                                    group.records.push(record);
-                                }
-                                None => command_groups.push(CommandGroup::new(
-                                    command.stream().clone(),
-                                    command.expected(),
-                                    vec![record],
-                                )),
-                            }
-                        }
-                        Reaction::EffectRequest(request) => {
-                            minted_keys.push(key.clone());
-                            intents.push(KeyedPayload::new(key, envelope, request.payload()));
-                        }
-                    }
-                }
-
-                let mut builder = self.handle.builder();
-                for group in command_groups {
-                    self.fold
-                        .push_command_group(&mut builder, group)
-                        .map_err(Error::Fold)?;
-                }
-                if !intents.is_empty() {
-                    let group = IntentGroup::new(self.outbox_stream(), intents);
-                    self.fold
-                        .push_intent_group(&mut builder, group)
-                        .map_err(Error::Fold)?;
-                }
-                let batch = builder.build().expect(
-                    "the reaction set is nonempty, so the fold was handed at least \
-                     one group; a writeless batch means the fold accepted a group \
-                     and pushed no write - a fold-contract violation",
-                );
-
-                match self.handle.transact(batch).await {
-                    Ok(()) => {
-                        self.feed.ack(&self.group, position).await?;
-                        acked_to = Some(position);
-                        break;
-                    }
-                    Err(TransactError::LockTimeout(bound)) => {
-                        attempts_left -= 1;
-                        if attempts_left == 0 {
-                            return Err(Error::LockTimeout(bound));
-                        }
-                        tokio::time::sleep(delays.next().expect("a wait per retry")).await;
-                    }
-                    Err(TransactError::Backend(error)) => {
-                        attempts_left -= 1;
-                        if attempts_left == 0 {
-                            return Err(Error::Backend(error));
-                        }
-                        tokio::time::sleep(delays.next().expect("a wait per retry")).await;
-                    }
-                    Err(
-                        abort @ (TransactError::Conflict(_)
-                        | TransactError::ConstraintViolated(_)
-                        | TransactError::DuplicateIntent(_)),
-                    ) => {
-                        // Classification runs only here, after the retry
-                        // window, on the last attempt's abort: the re-read
-                        // asks whether any of THIS entry's minted effect
-                        // keys stands on the outbox stream.
-                        let key_present = match self.outbox.load_stream(&self.saga_key).await {
-                            Ok(StreamState::Present(batch)) => {
-                                batch.records().iter().any(|record| {
-                                    matches!(
-                                        record.event(),
-                                        Record::Intent { intent, .. }
-                                            if minted_keys.contains(intent)
-                                    )
-                                })
-                            }
-                            Ok(StreamState::Missing) => false,
-                            Err(error) => return Err(Error::OutboxRead(error)),
-                        };
-                        if key_present {
-                            // The reactions already committed in an earlier
-                            // attempt or lifetime: the abort is a redelivery
-                            // artifact, and the entry acks as a no-op.
-                            self.feed.ack(&self.group, position).await?;
-                            acked_to = Some(position);
-                            break;
-                        }
-                        return Err(match abort {
-                            TransactError::Conflict(conflict) => Error::Conflict(conflict),
-                            TransactError::ConstraintViolated(violation) => {
-                                Error::ConstraintViolated(violation)
-                            }
-                            TransactError::DuplicateIntent(_) => {
-                                Error::IntentMissing(minted_keys.first().cloned().expect(
-                                    "the duplicate-intent outcome fires only when an \
-                                     intent write carried a key the store already \
-                                     holds, and intent writes carry exactly this \
-                                     entry's minted effect keys",
-                                ))
-                            }
-                            TransactError::LockTimeout(_) | TransactError::Backend(_) => {
-                                unreachable!("retryable aborts retry above and never classify")
-                            }
-                        });
-                    }
-                }
-            }
+            acked_to = Some(position);
         }
 
         Ok(RunnerStep::Advanced {
             acked_to: acked_to.expect("entries were nonempty and every entry acked"),
+        })
+    }
+
+    /// One entry's commit cycle. The folded reactions transact under
+    /// the retry policy; the ack follows the commit - directly, or as
+    /// the classified no-op a redelivery resolves to. The fold
+    /// consumes groups by value, so every attempt regroups the same
+    /// reactions; `react` is pure, so every attempt builds an
+    /// identical batch.
+    async fn commit_entry(
+        &self,
+        entry: &FeedEntry<S::Event>,
+        reactions: &[Reaction<S::Command, S::Effect>],
+    ) -> Result<(), Error<Fld::Error, Fe::Error, Ob::Error, H::Error>> {
+        let position = entry.position();
+        let mut delays = self.retry.delays();
+        let mut attempts_left = self.retry.attempts();
+        loop {
+            let grouped = self
+                .group_reactions(entry, position, reactions)
+                .map_err(Error::ConflictingExpectations)?;
+            let GroupedReactions {
+                commands,
+                intents,
+                effect_keys,
+            } = grouped;
+            let batch = self.build_batch(commands, intents).map_err(Error::Fold)?;
+            match self.handle.transact(batch).await {
+                Ok(()) => {
+                    self.feed.ack(&self.group, position).await?;
+                    return Ok(());
+                }
+                Err(TransactError::LockTimeout(bound)) => {
+                    attempts_left -= 1;
+                    if attempts_left == 0 {
+                        return Err(Error::LockTimeout(bound));
+                    }
+                    tokio::time::sleep(delays.next().expect("a wait per retry")).await;
+                }
+                Err(TransactError::Backend(error)) => {
+                    attempts_left -= 1;
+                    if attempts_left == 0 {
+                        return Err(Error::Backend(error));
+                    }
+                    tokio::time::sleep(delays.next().expect("a wait per retry")).await;
+                }
+                Err(
+                    abort @ (TransactError::Conflict(_)
+                    | TransactError::ConstraintViolated(_)
+                    | TransactError::DuplicateIntent(_)),
+                ) => {
+                    return self.classify_abort(abort, position, &effect_keys).await;
+                }
+            }
+        }
+    }
+
+    /// Group one entry's reactions for the fold. Commands merge per
+    /// stream in first-seen order; a second command for an already
+    /// grouped stream carries the same expectation, or the whole
+    /// group is rejected here - before any fold call or write.
+    /// Effects collect for the outbox write, and the minted effect
+    /// keys are what the abort classifier later re-reads. The
+    /// conflicting stream names the rejection.
+    fn group_reactions<'a>(
+        &self,
+        entry: &'a FeedEntry<S::Event>,
+        position: FeedPosition,
+        reactions: &'a [Reaction<S::Command, S::Effect>],
+    ) -> Result<GroupedReactions<'a, S::Command, S::Effect>, StreamRef> {
+        let mut command_groups: Vec<CommandGroup<'_, S::Command>> = Vec::new();
+        let mut intents = Vec::new();
+        let mut effect_keys = Vec::new();
+        for (index, reaction) in reactions.iter().enumerate() {
+            let key = IntentKey::mint(
+                self.saga.id(),
+                entry.stream().clone(),
+                position,
+                ReactionIndex::new(index as u64),
+            )
+            .render();
+            let mut envelope = EventMetadata::new();
+            envelope.insert(INTENT_METADATA_KEY, key.as_str());
+            match reaction {
+                Reaction::Command(command) => {
+                    let record = KeyedPayload::new(key, envelope, command.payload());
+                    match command_groups
+                        .iter_mut()
+                        .find(|group| group.stream() == command.stream())
+                    {
+                        Some(group) => {
+                            if group.expected() != command.expected() {
+                                return Err(command.stream().clone());
+                            }
+                            group.records.push(record);
+                        }
+                        None => command_groups.push(CommandGroup::new(
+                            command.stream().clone(),
+                            command.expected(),
+                            vec![record],
+                        )),
+                    }
+                }
+                Reaction::EffectRequest(request) => {
+                    effect_keys.push(key.clone());
+                    intents.push(KeyedPayload::new(key, envelope, request.payload()));
+                }
+            }
+        }
+        Ok(GroupedReactions {
+            commands: command_groups,
+            intents,
+            effect_keys,
+        })
+    }
+
+    /// Fold the grouped reactions into one batch: one write per
+    /// command stream plus the merged intent write. A writeless
+    /// result is a fold-contract violation - a nonempty reaction set
+    /// handed the fold at least one group.
+    fn build_batch(
+        &self,
+        commands: Vec<CommandGroup<'_, S::Command>>,
+        intents: Vec<KeyedPayload<'_, S::Effect>>,
+    ) -> Result<Batch<H::Wire>, Fld::Error> {
+        let mut builder = self.handle.builder();
+        for group in commands {
+            self.fold.push_command_group(&mut builder, group)?;
+        }
+        if !intents.is_empty() {
+            let group = IntentGroup::new(self.outbox_stream(), intents);
+            self.fold.push_intent_group(&mut builder, group)?;
+        }
+        Ok(builder
+            .build()
+            .expect("a nonempty reaction set gives the fold at least one group"))
+    }
+
+    /// Classify a non-retryable abort (ADR 0010): re-read the outbox
+    /// stream for this entry's minted effect keys. A key standing
+    /// means the reactions already committed in an earlier attempt or
+    /// lifetime - the abort is a redelivery artifact, and the entry
+    /// acks as a no-op. No key means a real command-arm failure,
+    /// surfaced.
+    async fn classify_abort(
+        &self,
+        abort: TransactError<H::Error>,
+        position: FeedPosition,
+        effect_keys: &[RenderedIntentKey],
+    ) -> Result<(), Error<Fld::Error, Fe::Error, Ob::Error, H::Error>> {
+        let key_present = match self.outbox.load_stream(&self.saga_key).await {
+            Ok(StreamState::Present(batch)) => batch.records().iter().any(|record| {
+                matches!(
+                    record.event(),
+                    Record::Intent { intent, .. } if effect_keys.contains(intent)
+                )
+            }),
+            Ok(StreamState::Missing) => false,
+            Err(error) => return Err(Error::OutboxRead(error)),
+        };
+        if key_present {
+            self.feed.ack(&self.group, position).await?;
+            return Ok(());
+        }
+        Err(match abort {
+            TransactError::Conflict(conflict) => Error::Conflict(conflict),
+            TransactError::ConstraintViolated(violation) => Error::ConstraintViolated(violation),
+            TransactError::DuplicateIntent(_) => Error::IntentMissing(
+                effect_keys
+                    .first()
+                    .cloned()
+                    .expect("a duplicate-intent abort implies this entry minted effect keys"),
+            ),
+            TransactError::LockTimeout(_) | TransactError::Backend(_) => {
+                unreachable!("retryable aborts retry inside the window and never classify")
+            }
         })
     }
 

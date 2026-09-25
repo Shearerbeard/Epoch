@@ -30,7 +30,6 @@ impl SagaId {
         }
     }
 
-    /// The id as text.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -64,7 +63,6 @@ impl ReactionIndex {
         Self(raw)
     }
 
-    /// The zero-based position.
     pub fn get(self) -> u64 {
         self.0
     }
@@ -124,7 +122,6 @@ impl IntentKey {
     }
 }
 
-/// Escape one intent-key component under the documented rule.
 fn escape_key_component(component: &str) -> String {
     component.replace('\\', "\\\\").replace('/', "\\/")
 }
@@ -137,7 +134,6 @@ fn escape_key_component(component: &str) -> String {
 pub struct RenderedIntentKey(String);
 
 impl RenderedIntentKey {
-    /// The rendered text.
     pub fn as_str(&self) -> &str {
         &self.0
     }

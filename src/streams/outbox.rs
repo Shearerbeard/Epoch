@@ -1,22 +1,18 @@
 //! The outbox executor (ADR 0010's outbox-saga section): a generic
-//! epoch runtime that consumes a saga's outbox stream through the
-//! event feed, performs effect intents through a caller-supplied
-//! port, and appends the outcome events. Ordered at-least-once is the
-//! documented delivery contract; idempotency is the consumer's
-//! documented obligation.
+//! runtime driving the outbox loop - poll the event feed, perform
+//! each intent through the caller-supplied port, append the outcome
+//! record. Delivery is ordered at-least-once; idempotency is the
+//! consumer's documented obligation.
 //!
-//! Poison-intent policy: each intent gets a per-intent retry budget
-//! (default 5, exponential backoff), derived durably from the
-//! stream's own `Failed` records for the intent key, so it survives
-//! executor crashes. During the retry window the group cursor HOLDS
-//! at the failing intent - bounded, backoff-bounded blocking with
-//! order preserved. On exhaustion the intent is parked
-//! TERMINAL-FAILED on the outbox stream and the group advances past
-//! it permanently; the compensation hook fires at park time.
-//!
-//! Every write the executor makes goes through the store's append
-//! path, so the single-writer funnel's operating assumptions (ADR
-//! 0010, and the postgres module doc) bind deployments unchanged.
+//! Each intent carries a per-intent retry budget (default 5,
+//! exponential backoff) derived durably from the stream's own
+//! `Failed` records for the intent key, so it survives executor
+//! crashes. Inside the window the group cursor HOLDS at the failing
+//! intent - backoff-bounded blocking with order preserved; on
+//! exhaustion the intent parks TERMINAL-FAILED, the compensation hook
+//! fires once at park time, and the group advances past permanently.
+//! Every write goes through the store's append path, so the
+//! single-writer funnel's assumptions bind deployments unchanged.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -50,15 +46,11 @@ pub const OUTBOX_CATEGORY: &str = "saga-outbox";
 pub const INTENT_METADATA_KEY: &str = "intent";
 
 /// One record on a saga's outbox stream: an effect intent, or the
-/// outcome of the executor's work on one. The category's event type
-/// is this enum, so intents and outcomes share one stream and one
-/// feed. Every record carries the intent key in its PAYLOAD - the
-/// executor never reads envelopes - and `Intent` records additionally
-/// carry the key in the ENVELOPE, because the storage-level
-/// uniqueness index reads `event_metadata->>'intent'`. An outcome
-/// carrying the key in its envelope would trip the same index that
-/// rejects duplicate intents, so the envelope copy exists on intents
-/// alone.
+/// executor's outcome for one. Every record carries the intent key in
+/// its PAYLOAD - the executor never reads envelopes - while `Intent`
+/// records carry it in the ENVELOPE too, because the uniqueness index
+/// reads `event_metadata->>'intent'`; an outcome envelope key would
+/// trip that same index.
 ///
 /// One category holds one event type, so every saga sharing this
 /// category shares the effect payload type `F`: a deployment with
@@ -68,25 +60,18 @@ pub enum Record<F> {
     /// An effect intent, appended by the saga runner inside the
     /// reaction's atomic batch.
     Intent {
-        /// The intent's rendered key; the runner also copies it into
-        /// the envelope for the uniqueness index.
         intent: RenderedIntentKey,
-        /// The effect payload the executor performs.
         request: F,
     },
-    /// The effect succeeded.
     Done {
-        /// The intent's rendered key.
         intent: RenderedIntentKey,
     },
     /// One perform attempt failed. The count of `Failed` records for
     /// a key IS the retry budget's durable state: it survives
     /// executor crashes because it is the stream itself.
     Failed {
-        /// The intent's rendered key.
         intent: RenderedIntentKey,
-        /// The port's error, rendered. Diagnostic-only: no domain
-        /// logic branches on it.
+        /// The port's error, rendered; diagnostic only.
         error: String,
     },
     /// TERMINAL-FAILED: the retry budget is exhausted and the group
@@ -94,12 +79,10 @@ pub enum Record<F> {
     /// crash between parking and ack replays as a no-op append. An
     /// audit fact, not a second trigger.
     Parked {
-        /// The intent's rendered key.
         intent: RenderedIntentKey,
-        /// The durable failed-attempt count at park time; a parked
-        /// intent failed at least once.
+        /// The durable failed-attempt count at park time.
         attempts: NonZeroU32,
-        /// The last failure, rendered. Diagnostic-only.
+        /// The last failure, rendered; diagnostic only.
         error: String,
     },
 }
@@ -120,21 +103,18 @@ impl<F> Event for Record<F> {
     fn get_id(&self) -> Self::EntityId {}
 }
 
-/// The consumer's effect port: performs one effect request. Called
-/// under at-least-once delivery - a crash between the external call
-/// and the outcome append replays the intent, and the port's
-/// idempotency absorbs the duplicate. That obligation is the
-/// consumer's, documented here, and the port dedupes BY THE KEY: two
-/// distinct reactions may carry identical payloads, so the intent key
-/// is the only replay-safe identity.
+/// The consumer's effect port under at-least-once delivery: a crash
+/// between the external call and the outcome append replays the
+/// intent, and the port's idempotency absorbs the duplicate. Dedupe
+/// by the intent key - two distinct reactions may carry identical
+/// payloads, so the key is the only replay-safe identity.
 #[trait_variant::make(Send)]
 pub trait EffectPort<F> {
     /// Port failure type; rendered onto the `Failed` record as
     /// diagnostic text.
     type Error: std::error::Error + Send + Sync;
 
-    /// Perform the effect. `intent` is the intent's rendered key -
-    /// the port's idempotency identity.
+    /// `intent` is the port's idempotency identity.
     async fn perform(&self, intent: &RenderedIntentKey, request: &F) -> Result<(), Self::Error>;
 }
 
@@ -163,7 +143,6 @@ impl<F> ParkedNotice<F> {
         }
     }
 
-    /// The parked intent's rendered key.
     pub fn key(&self) -> &RenderedIntentKey {
         &self.key
     }
@@ -173,12 +152,10 @@ impl<F> ParkedNotice<F> {
         &self.request
     }
 
-    /// The durable failed-attempt count at park time.
     pub fn attempts(&self) -> NonZeroU32 {
         self.attempts
     }
 
-    /// The last failure, rendered. Diagnostic-only.
     pub fn error(&self) -> &str {
         &self.error
     }
@@ -194,7 +171,6 @@ pub trait CompensationHook<F> {
     /// Hook failure type; surfaces as [`ExecutorError::Hook`].
     type Error: std::error::Error + Send + Sync;
 
-    /// Fire the compensation for one parked intent.
     async fn on_parked(&self, notice: &ParkedNotice<F>) -> Result<(), Self::Error>;
 }
 
@@ -224,7 +200,7 @@ impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F> {
     /// cursor independent of the runner's (group progress is scoped
     /// per category).
     pub fn new(feed: Fe, store: St, port: P, hook: K, saga: SagaId, policy: RetryPolicy) -> Self {
-        let group = ConsumerGroup::new(saga.as_str()).expect("a saga id is a non-empty group name");
+        let group = ConsumerGroup::new(saga.as_str()).expect("a saga id is nonempty group name");
         let saga_key = saga.as_str().to_owned();
         Self {
             feed,
@@ -239,25 +215,30 @@ impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F> {
         }
     }
 
-    /// The saga whose outbox stream this executor works.
     pub fn saga(&self) -> &SagaId {
         &self.saga
     }
 
-    /// The executor's consumer group.
     pub fn group(&self) -> &ConsumerGroup {
         &self.group
     }
 
-    /// The per-intent retry budget.
     pub fn budget(&self) -> RetryBudget {
         self.policy.budget()
     }
 
-    /// The backoff schedule inside a retry window.
     pub fn backoff(&self) -> BackoffSchedule {
         self.policy.schedule()
     }
+}
+
+/// One intent's durable retry state on the outbox stream: what the
+/// executor's decisions derive from, surviving its crashes.
+#[derive(Default)]
+struct DurableState {
+    failed: u32,
+    last_error: Option<String>,
+    parked: Option<(NonZeroU32, String)>,
 }
 
 impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F>
@@ -269,13 +250,11 @@ where
     F: Send + Sync + fmt::Debug,
 {
     /// One poll-perform-record cycle over up to `limit` delivered
-    /// entries. For one of this saga's intents - the key read from
-    /// the record's payload, never the envelope: perform through the
-    /// port; on success append `Done` and ack; on failure append
-    /// `Failed`; at the budget, append `Parked` and fire the hook. A
-    /// replay that finds the `Parked` record already present re-fires
-    /// the hook (idempotent under replay) and acks: the append is the
-    /// no-op.
+    /// entries. This saga's intents perform through the port - the key
+    /// read from the record's payload, never the envelope - with
+    /// `Done`/`Failed`/`Parked` recording the outcome; other sagas'
+    /// streams in the shared category and outcome records are skipped
+    /// and acked past.
     pub async fn step(
         &self,
         limit: PollLimit,
@@ -304,156 +283,182 @@ where
             match event {
                 Record::Done { .. } | Record::Failed { .. } | Record::Parked { .. } => {
                     self.feed.ack(&self.group, position).await?;
-                    acked_to = Some(position);
                 }
                 Record::Intent { intent, request } => {
-                    // The budget's durable state is the saga's own
-                    // stream: its `Failed` records for this intent key.
-                    let stored = match self.store.load_stream(&self.saga_key).await {
-                        Ok(StreamState::Present(batch)) => batch.into_records(),
-                        Ok(StreamState::Missing) => Vec::new(),
-                        Err(error) => return Err(ExecutorError::Read(error)),
-                    };
-                    let mut failed_count = 0u32;
-                    let mut last_failed_error: Option<String> = None;
-                    let mut parked: Option<(NonZeroU32, String)> = None;
-                    for record in stored {
-                        let (event, _) = record.into_parts();
-                        match event {
-                            Record::Failed {
-                                intent: failed,
-                                error,
-                            } if failed == intent => {
-                                failed_count += 1;
-                                last_failed_error = Some(error);
-                            }
-                            Record::Parked {
-                                intent: parked_key,
-                                attempts,
-                                error,
-                            } if parked_key == intent => {
-                                parked = Some((attempts, error));
-                            }
-                            // Failed and Parked records for other
-                            // intent keys do not count toward this
-                            // intent's budget.
-                            Record::Failed { .. } | Record::Parked { .. } => {}
-                            Record::Intent { .. } | Record::Done { .. } => {}
-                        }
-                    }
-
-                    // The crash between park and ack, replayed: the
-                    // park stands, the append is the no-op, and the
-                    // hook - the park's idempotent side effect -
-                    // re-fires before the entry acks.
-                    if let Some((attempts, error)) = parked {
-                        let notice = ParkedNotice::new(intent, request, attempts, error);
-                        self.hook
-                            .on_parked(&notice)
-                            .await
-                            .map_err(ExecutorError::Hook)?;
-                        self.feed.ack(&self.group, position).await?;
-                        acked_to = Some(position);
-                        continue;
-                    }
-
-                    // The crash between the last Failed and the Parked
-                    // append, replayed: the budget is spent durably, so
-                    // park now - the port is never asked past it.
-                    if failed_count >= self.policy.budget().get() {
-                        let attempts = NonZeroU32::new(failed_count)
-                            .expect("the budget is nonzero and the count reached it");
-                        let error = last_failed_error.expect(
-                            "the count reached the nonzero budget only by counting \
-                             this key's Failed records, each of which set the last \
-                             failure",
-                        );
-                        let park = Record::Parked {
-                            intent: intent.clone(),
-                            attempts,
-                            error: error.clone(),
-                        };
-                        let batch = EventBatch::new(vec![park]).expect("one event is nonempty");
-                        self.store
-                            .append(ExpectedVersion::Any, &self.saga_key, &batch)
-                            .await?;
-                        let notice = ParkedNotice::new(intent, request, attempts, error);
-                        self.hook
-                            .on_parked(&notice)
-                            .await
-                            .map_err(ExecutorError::Hook)?;
-                        self.feed.ack(&self.group, position).await?;
-                        acked_to = Some(position);
-                        continue;
-                    }
-
-                    match self.port.perform(&intent, &request).await {
-                        Ok(()) => {
-                            let done = Record::Done {
-                                intent: intent.clone(),
-                            };
-                            let batch = EventBatch::new(vec![done]).expect("one event is nonempty");
-                            self.store
-                                .append(ExpectedVersion::Any, &self.saga_key, &batch)
-                                .await?;
-                            self.feed.ack(&self.group, position).await?;
-                            acked_to = Some(position);
-                        }
-                        Err(port_err) => {
-                            let attempts = failed_count + 1;
-                            let failure = Record::Failed {
-                                intent: intent.clone(),
-                                error: port_err.to_string(),
-                            };
-                            let batch =
-                                EventBatch::new(vec![failure]).expect("one event is nonempty");
-                            self.store
-                                .append(ExpectedVersion::Any, &self.saga_key, &batch)
-                                .await?;
-                            if attempts < self.policy.budget().get() {
-                                // The retry window holds: the failing
-                                // entry stays unacked and redelivers
-                                // after the backoff, order preserved.
-                                let delay = self
-                                    .policy
-                                    .schedule()
-                                    .delays()
-                                    .nth(failed_count as usize)
-                                    .expect("the delay stream is unbounded");
-                                tokio::time::sleep(delay).await;
-                                return Ok(ExecutorStep::Holding { intent });
-                            }
-
-                            // The budget is spent on this fresh
-                            // failure: park and fire the hook.
-                            let attempts = NonZeroU32::new(attempts)
-                                .expect("the budget is nonzero and the count reached it");
-                            let error = port_err.to_string();
-                            let park = Record::Parked {
-                                intent: intent.clone(),
-                                attempts,
-                                error: error.clone(),
-                            };
-                            let batch = EventBatch::new(vec![park]).expect("one event is nonempty");
-                            self.store
-                                .append(ExpectedVersion::Any, &self.saga_key, &batch)
-                                .await?;
-                            let notice = ParkedNotice::new(intent, request, attempts, error);
-                            self.hook
-                                .on_parked(&notice)
-                                .await
-                                .map_err(ExecutorError::Hook)?;
-                            self.feed.ack(&self.group, position).await?;
-                            acked_to = Some(position);
-                        }
+                    if let Some(held) = self.work_intent(position, intent, request).await? {
+                        return Ok(ExecutorStep::Holding { intent: held });
                     }
                 }
             }
+            acked_to = Some(position);
         }
 
         Ok(ExecutorStep::Advanced {
             acked_to: acked_to.expect("entries were nonempty and every entry acked or returned"),
         })
+    }
+
+    /// Work one of this saga's intents: settle from the stream's
+    /// durable state when the budget is already spent - a standing
+    /// park re-fires the idempotent hook and acks; a spent count with
+    /// no park parks now, the port never asked past the budget.
+    /// Otherwise perform through the port and record the outcome.
+    /// Returns the held key when the failure stays inside the retry
+    /// window.
+    async fn work_intent(
+        &self,
+        position: FeedPosition,
+        intent: RenderedIntentKey,
+        request: F,
+    ) -> Result<Option<RenderedIntentKey>, ExecutorError<K::Error, Fe::Error, St::Error>> {
+        let state = self.durable_state(&intent).await?;
+        if let Some((attempts, error)) = state.parked {
+            self.settle_park(position, &intent, request, attempts, error)
+                .await?;
+            return Ok(None);
+        }
+        if state.failed >= self.policy.budget().get() {
+            let attempts = NonZeroU32::new(state.failed)
+                .expect("the budget is nonzero and the count reached it");
+            let error = state.last_error.expect(
+                "the count reached the budget by counting this key's Failed records, \
+                 each of which set the last failure",
+            );
+            self.park(position, &intent, request, attempts, error)
+                .await?;
+            return Ok(None);
+        }
+
+        match self.port.perform(&intent, &request).await {
+            Ok(()) => {
+                self.append_outcome(Record::Done {
+                    intent: intent.clone(),
+                })
+                .await?;
+                self.feed.ack(&self.group, position).await?;
+                Ok(None)
+            }
+            Err(port_err) => {
+                self.append_outcome(Record::Failed {
+                    intent: intent.clone(),
+                    error: port_err.to_string(),
+                })
+                .await?;
+                let attempts = state.failed + 1;
+                if attempts < self.policy.budget().get() {
+                    // The window holds: the failing entry stays
+                    // unacked and redelivers after the backoff, order
+                    // preserved.
+                    let delay = self
+                        .policy
+                        .schedule()
+                        .delays()
+                        .nth(state.failed as usize)
+                        .expect("the delay stream is unbounded");
+                    tokio::time::sleep(delay).await;
+                    return Ok(Some(intent));
+                }
+
+                let attempts = NonZeroU32::new(attempts)
+                    .expect("the budget is nonzero and the count reached it");
+                let error = port_err.to_string();
+                self.park(position, &intent, request, attempts, error)
+                    .await?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// The intent's durable retry state, read from the saga's own
+    /// stream: its `Failed` count for the key, the last failure, and
+    /// a standing `Parked` record if the park already landed.
+    async fn durable_state(
+        &self,
+        intent: &RenderedIntentKey,
+    ) -> Result<DurableState, ExecutorError<K::Error, Fe::Error, St::Error>> {
+        let stored = match self.store.load_stream(&self.saga_key).await {
+            Ok(StreamState::Present(batch)) => batch.into_records(),
+            Ok(StreamState::Missing) => Vec::new(),
+            Err(error) => return Err(ExecutorError::Read(error)),
+        };
+        let mut state = DurableState::default();
+        for record in stored {
+            match record.into_parts().0 {
+                Record::Failed {
+                    intent: failed,
+                    error,
+                } if &failed == intent => {
+                    state.failed += 1;
+                    state.last_error = Some(error);
+                }
+                Record::Parked {
+                    intent: parked,
+                    attempts,
+                    error,
+                } if &parked == intent => {
+                    state.parked = Some((attempts, error));
+                }
+                // Other keys' outcomes never count toward this
+                // intent's budget.
+                Record::Failed { .. } | Record::Parked { .. } => {}
+                Record::Intent { .. } | Record::Done { .. } => {}
+            }
+        }
+        Ok(state)
+    }
+
+    /// Append the `Parked` record, then settle the park.
+    async fn park(
+        &self,
+        position: FeedPosition,
+        intent: &RenderedIntentKey,
+        request: F,
+        attempts: NonZeroU32,
+        error: String,
+    ) -> Result<(), ExecutorError<K::Error, Fe::Error, St::Error>> {
+        self.append_outcome(Record::Parked {
+            intent: intent.clone(),
+            attempts,
+            error: error.clone(),
+        })
+        .await?;
+        self.settle_park(position, intent, request, attempts, error)
+            .await
+    }
+
+    /// Fire the compensation hook and ack past the intent. A crash
+    /// between the park append and the hook re-fires it here on
+    /// replay - the hook carries the same idempotency obligation the
+    /// port does.
+    async fn settle_park(
+        &self,
+        position: FeedPosition,
+        intent: &RenderedIntentKey,
+        request: F,
+        attempts: NonZeroU32,
+        error: String,
+    ) -> Result<(), ExecutorError<K::Error, Fe::Error, St::Error>> {
+        let notice = ParkedNotice::new(intent.clone(), request, attempts, error);
+        self.hook
+            .on_parked(&notice)
+            .await
+            .map_err(ExecutorError::Hook)?;
+        self.feed.ack(&self.group, position).await?;
+        Ok(())
+    }
+
+    /// Append one outcome record to the saga's outbox stream. The
+    /// append error stays whole: a lock timeout remains retryable, a
+    /// conflict does not.
+    async fn append_outcome(
+        &self,
+        record: Record<F>,
+    ) -> Result<(), ExecutorError<K::Error, Fe::Error, St::Error>> {
+        let batch = EventBatch::new(vec![record]).expect("one event is nonempty");
+        self.store
+            .append(ExpectedVersion::Any, &self.saga_key, &batch)
+            .await?;
+        Ok(())
     }
 
     /// The poll loop: `step` forever, sleeping `interval` between

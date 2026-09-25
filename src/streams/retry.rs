@@ -29,12 +29,10 @@ impl BackoffSchedule {
         }
     }
 
-    /// The first wait.
     pub fn base(&self) -> Duration {
         self.base
     }
 
-    /// No wait exceeds this.
     pub fn cap(&self) -> Duration {
         self.cap
     }
@@ -67,10 +65,8 @@ impl Default for BackoffSchedule {
 pub struct BaseExceedsCap;
 
 /// The nonzero attempt bound the policy is built on: the runner's
-/// total tries for retryable aborts, and the executor's perform
-/// attempts per intent before it parks TERMINAL-FAILED (derived
-/// durably from the stream's own `Failed` records for the intent key,
-/// so it survives executor crashes).
+/// total tries for retryable aborts, and the executor's performs per
+/// intent before it parks TERMINAL-FAILED.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryBudget(NonZeroU32);
 
@@ -80,7 +76,6 @@ impl RetryBudget {
         NonZeroU32::new(raw).map(Self).ok_or(ZeroBudget)
     }
 
-    /// The attempt count.
     pub fn get(self) -> u32 {
         self.0.get()
     }
@@ -98,15 +93,12 @@ impl Default for RetryBudget {
 #[error("a retry budget must allow at least one attempt")]
 pub struct ZeroBudget;
 
-/// The in-memory retry policy the runner and the executor share: a
+/// The retry policy the runner and the executor share: a
 /// pre-validated budget of tries under a backoff schedule. The runner
-/// applies it to retryable aborts (`TransactError::LockTimeout`) and
-/// indeterminate failures (connection loss, deadlock), then
-/// propagates; classification never happens inside the retry window,
-/// the redelivery rule applies only after retryable aborts are
-/// retried. The executor applies it per intent: under budget the
-/// failing intent's `Failed` record lands and the cursor holds for
-/// the backoff; at the budget the intent parks.
+/// retries retryable batch aborts under it, then propagates -
+/// classification never happens inside the retry window. The executor
+/// applies it per intent, the budget derived from the stream's
+/// durable `Failed` count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     budget: RetryBudget,
@@ -121,7 +113,6 @@ impl RetryPolicy {
         Self { budget, schedule }
     }
 
-    /// The attempt budget.
     pub fn budget(&self) -> RetryBudget {
         self.budget
     }
@@ -131,7 +122,6 @@ impl RetryPolicy {
         self.budget.get()
     }
 
-    /// The backoff schedule between tries.
     pub fn schedule(&self) -> BackoffSchedule {
         self.schedule
     }

@@ -335,12 +335,9 @@ impl BatchConflict {
 
 /// A write carried an intent key the store already holds: the
 /// saga-outbox uniqueness index rejected the duplicate. This is the
-/// framework's redelivery signal, never a version conflict: a
-/// redelivered source event re-appends its reactions, and storage
-/// rejects the second append of an intent key. Only a confirmed
-/// storage-level rejection is this outcome; the saga runner confirms
-/// the minted keys are present on the outbox stream before acking the
-/// no-op.
+/// framework's redelivery signal, never a version conflict - the
+/// saga runner confirms the minted keys stand on the outbox stream
+/// before acking the no-op.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("duplicate intent rejected on {stream}")]
 pub struct DuplicateIntent {
@@ -422,18 +419,14 @@ pub trait AtomicStreams {
     async fn transact(&self, batch: Self::Batch) -> Result<(), TransactError<Self::Error>>;
 }
 
-/// A handle that hands out its own batch builder: ADR 0006's
-/// ownership seam extended to generic consumers such as the saga
-/// runner, which assembles a batch without naming the backend's wire
-/// form. The supertrait binding makes the builder's wire form and the
-/// committed [`Batch`] the same `W`, so builder and `transact` always
-/// agree on the wire form. What the type does NOT pin is handle
-/// identity: two handles of one backend share a wire form, so which
-/// database a batch commits against stays the caller's discipline,
-/// exactly as on ADR 0006's concrete path.
+/// A handle bound to its own batch builder, the seam a generic
+/// consumer such as the saga runner assembles batches through -
+/// never naming the backend's wire form. The supertrait binding
+/// makes the builder's wire form and the committed [`Batch`] the
+/// same `W`. Handle identity is NOT pinned: which database a batch
+/// commits against stays the caller's discipline, as on ADR 0006's
+/// concrete path.
 pub trait BatchSource: AtomicStreams<Batch = Batch<Self::Wire>> {
-    /// The backend's wire form, fixed by the builder this handle hands
-    /// out.
     type Wire: Send;
 
     /// A fresh builder bound to this handle's wire form.
