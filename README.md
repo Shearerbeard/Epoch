@@ -1,163 +1,143 @@
 # Epoch
-Event Sourcing + CQRS Framework
 
-### Inspiration
-This project is a collection of event sourcing and cqrs types to support some small personal projects heavily inluenced by [Thalo](https://github.com/thalo-rs/thalo) but borrowing (or will be borrowing in the future) ideas from Haskell [Eventful](https://github.com/jdreaver/eventful), F# [Equinox](https://github.com/jet/equinox), and Kotlin [f(model)](https://github.com/fraktalio/fmodel).
+Epoch is a Rust event-sourcing library built around deciders and event
+repositories. It separates the decision to emit events from the work of
+storing them. `epoch-journal` is the package name on crates.io; the Rust
+import remains `epoch`.
 
+The library grew out of small personal projects, heavily influenced by
+[Thalo](https://github.com/thalo-rs/thalo). Ideas from Haskell
+[Eventful](https://github.com/jdreaver/eventful), F#
+[Equinox](https://github.com/jet/equinox), and Kotlin
+[f(model)](https://github.com/fraktalio/fmodel) have also informed its
+direction. The API is still changing before 1.0.
 
-### Running the tests
+## Start here
 
-The in-memory backend needs nothing. Every other backend talks to a real
-service, so bring the services up and give the suite their connection
-strings:
+Add the package under its Rust import name:
+
+```toml
+[dependencies]
+epoch = { package = "epoch-journal", version = "0.1.0", default-features = false }
+```
+
+The example below uses the pure `Decider` and `Evolver` traits. It needs
+no database, runtime, or feature flag. Put it in `src/main.rs` and run
+`cargo run`; it prints `1`. The same program lives in
+[`examples/counter.rs`](examples/counter.rs), where the repository
+build checks it as an example target.
+
+```rust
+use epoch::decider::{Decider, Event, Evolver};
+
+#[derive(Debug)]
+enum CounterEvent {
+    Incremented,
+}
+
+impl Event for CounterEvent {
+    type EntityId = ();
+
+    fn event_type(&self) -> String {
+        "Incremented".to_owned()
+    }
+
+    fn get_id(&self) -> Self::EntityId {}
+}
+
+struct Counter;
+
+impl Evolver for Counter {
+    type State = u64;
+    type Evt = CounterEvent;
+
+    fn evolve(state: u64, event: &CounterEvent) -> u64 {
+        match event {
+            CounterEvent::Incremented => state + 1,
+        }
+    }
+}
+
+impl Decider for Counter {
+    type Cmd = ();
+    type Err = std::convert::Infallible;
+
+    fn decide(_state: &u64, _cmd: &()) -> Result<Vec<CounterEvent>, Self::Err> {
+        Ok(vec![CounterEvent::Incremented])
+    }
+}
+
+fn main() {
+    let state = 0;
+    let events = Counter::decide(&state, &()).unwrap();
+    let next = events.iter().fold(state, Counter::evolve);
+    assert_eq!(next, 1);
+    println!("{next}");
+}
+```
+
+`decide` produces events from a command and current state; `evolve`
+folds those events into a new state. A repository stores the resulting
+events. The example stops at the domain boundary so it can run without
+choosing a backend.
+
+## Repositories and features
+
+`src/decider.rs` defines the domain traits. `src/repository/` holds
+repository interfaces and backend implementations; `src/strategies/`
+composes repository operations with deciders. The `in_memory` feature
+needs no service. The default feature set enables `in_memory`, `esdb`
+(EventStoreDB), and `redis` (RedisJSON). `postgres` is opt-in and
+provides a PostgreSQL repository. Enable only the backend you use, for
+example:
+
+```toml
+[dependencies]
+epoch = { package = "epoch-journal", version = "0.1.0", default-features = false, features = ["postgres"] }
+```
+
+This release has no `streams`, atomic-batch, feed, saga, or outbox API.
+Backend version semantics differ; consult the repository trait and
+backend implementation when moving stored events between backends.
+The PostgreSQL repository applies its schema with
+`PgEventRepository::migrate` before use. Deciders do not persist
+anything on their own.
+
+## Build and test
+
+Rust 1.88 or later is required. For the example and the pure domain
+surface, `cargo test --no-default-features` needs no external services.
+The default suite exercises EventStoreDB and Redis; the PostgreSQL
+tests run only with its feature enabled. From a clone of the repository:
 
 ```sh
 cp .env.example .env
 docker compose up -d
 cargo test
-```
-
-`cargo test` covers the default features (in-memory, EventStoreDB,
-Redis). The postgres backend is behind a non-default feature and
-migrates its own schema on first use:
-
-```sh
 cargo test --features postgres
+cargo test --doc
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Without a `.env` the service-backed tests panic with `File .env or Env
-Vars not found`; `.env.example` documents every variable they read.
+Docker Compose supplies EventStoreDB, RedisJSON, and PostgreSQL.
+`.env.example` names every connection string used by the integration
+tests. These services and credentials are local test fixtures; use your
+own connection settings in an application. The PostgreSQL tests call
+`migrate` and require `EPOCH_PG_TEST_URL` rather than choosing a
+database implicitly. Run `docker compose down` when finished.
 
-### Example
-```rust
-use epoch::{event_store::ESDBEventStore, EventEnvelope, EventStore, EventContext};
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use async_trait::async_trait;
+## Versions and contributions
 
-use example::domain::user::{UserId, User, UserName},
+`0.1.0` is the first crates.io release of `epoch-journal`. Earlier
+`1.0.0-alpha.*` versions were repository versions, not publications
+under this package name. Existing git consumers that declare
+`epoch = { git = "https://github.com/Shearerbeard/Epoch" }` must update
+their Cargo manifest to use the package declaration above; keeping
+the dependency key `epoch` keeps source imports the same.
 
-#[derive(Debug)]
-pub struct Users {}
-
-/// IMPL EventContext to definte relationships between Event, Cmd, CmdErr, and some sort of reified State (This will be reverbed to a Decider pattern with fn decide() and fn evolve())
-#[async_trait]
-impl EventContext for Users {
-    type Id = String;
-    type Command = UserCommand;
-    type Event = UserEvent;
-    type Err = UserError;
-    type Services = ();
-    type State = UserState;
-
-// Event Context requires we implement string names for each context - this is used at the event persistance layer
-    fn event_context() -> String {
-        "Users".to_string()
-    }
-
-    async fn handle(
-        state: Self::State,
-        cmd: Self::Command,
-        _services: Self::Services,
-    ) -> Result<PreparedEvent<Self>, Self::Err> {
-        match cmd {
-            UserCommand::AddUser(AddUserCommand { name }) => {
-                todo!()
-            }
-            UserCommand::UpdateUser(UpdateUserCommand { user_id, name }) => {
-                todo!()
-            }
-        }
-    }
-
-    fn apply(mut state: UserState, event: &EventEnvelope<Self>) -> UserState {
-        match event.data.clone() {
-            UserEvent::UserAdded { user_id, name } => {
-                todo!()
-            }
-            UserEvent::UserUpdated { user_id, name } => {
-                todo!()
-            }
-        };
-        state
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct UserState {
-    users: HashMap<String, User>,
-}
-
-#[derive(Error, Debug, PartialEq, Eq, Clone)]
-pub enum UserError {
-    // Error ADT
-}
-
-// Arbitrary service calling EventContext::execute()
-pub struct UserService {
-    event_store: ESDBEventStore
-}
-
-impl UserService {
-    pub async fn cmd_add_user(
-        &self,
-        cmd: AddUserCommand,
-    ) -> Result<
-        (
-            EventEnvelope<Users>,
-            <ESDBEventStore as EventStore>::Position,
-        ),
-        UserServiceError,
-    > {
-        // Execute knows how to handle a command and apply state automatically in the context of an event store (soon to be re-verbed for a decider pattern - execute knows how to decide and evolve state)
-        self.event_store
-            .execute::<Users>(UserCommand::AddUser(cmd), (), None)
-            .await
-            .map_err(UserServiceError::EventStoreError)
-    }
-}
-
-#[derive(Error, Debug)]
-pub enum UserServiceError {
-    // Error ADT
-}
-
-// EventSourcing types and primatives can be whatever you want - usually Event and Cmd are parameteratized enums as ADT
-pub enum UserCommand {
-    AddUser(AddUserCommand),
-    UpdateUser(UpdateUserCommand),
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AddUserCommand {
-    pub name: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct UpdateUserCommand {
-    pub user_id: String,
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UserEvent {
-    UserAdded {
-        user_id: UserId,
-        name: UserName,
-    },
-    UserUpdated {
-        user_id: UserId,
-        name: Option<UserName>,
-    },
-}
-
-// Event Context requires we implement string names for event types - this are used at the event persistance layer
-impl Event for UserEvent {
-    fn event_type(&self) -> String {
-        match self {
-            UserEvent::UserAdded { .. } => "UserAdded".to_string(),
-            UserEvent::UserUpdated { .. } => "UserUpdated".to_string(),
-        }
-    }
-}
-```
+See [CHANGELOG.md](CHANGELOG.md) for changes and earlier repository
+history. [LICENSE](LICENSE) contains the Apache-2.0 terms. To contribute,
+open a pull request with the relevant `cargo test` feature set,
+`cargo fmt --check`, and `cargo clippy --all-targets --all-features --
+-D warnings` results. CI runs the build checks on pull requests.

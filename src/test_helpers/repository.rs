@@ -1,8 +1,7 @@
-use core::time;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
-    thread,
+    time::{Duration, Instant},
 };
 
 use assert_matches::assert_matches;
@@ -81,18 +80,24 @@ pub(crate) async fn versioned_event_repository_with_streams_spec<
         .await
         .expect("Successful append");
 
-    // Crude but we need to wait for ESDB to catch up its "Categories" auto projection
-    thread::sleep(time::Duration::from_secs(1));
-
     let res = event_repository.load(Some(&id_1)).await;
     assert_matches!(res, Ok((v, RepositoryVersion::Exact(_))) if v == events1);
 
     let res = event_repository.load(Some(&id_2)).await;
     assert_matches!(res, Ok((v, RepositoryVersion::Exact(_))) if v == events2);
 
-    let res = event_repository.load(None).await;
-
-    let events_combined: Vec<UserEvent> = events1.into_iter().chain(events2.into_iter()).collect();
+    let events_combined: Vec<UserEvent> = events1.into_iter().chain(events2).collect();
+    // EventStoreDB's category projection trails the stream writes.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let res = loop {
+        let res = event_repository.load(None).await;
+        if matches!(&res, Ok((events, _)) if *events == events_combined)
+            || Instant::now() >= deadline
+        {
+            break res;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
     assert_matches!(res, Ok((v, RepositoryVersion::Exact(_))) if v == events_combined);
 
     let res = event_repository.load(Some(&id_1)).await;
@@ -127,7 +132,7 @@ pub(crate) async fn vesioned_state_repository_spec<'a, Err: Debug + Send + Sync>
     )]));
 
     let version = RepositoryVersion::Exact(0);
-    println!("Saving: state={:?}, version={:?}", &new_state, &version);
+    println!("Saving: state={new_state:?}, version={version:?}");
     let _ = state_repository
         .save(&version, &new_state)
         .await
@@ -172,7 +177,7 @@ pub(crate) async fn versioned_event_repository_with_streams_occ_spec<
 
     assert_matches!(
         evts.first().expect("one event"),
-        UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike".to_string())
+        UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike")
     );
 
     let state = UserDeciderState::load_by_id(
@@ -185,7 +190,7 @@ pub(crate) async fn versioned_event_repository_with_streams_occ_spec<
 
     assert_matches!(
         state,
-        UserDeciderState { users } if users == HashMap::from([(first_id.clone(), User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
+        UserDeciderState { users } if users == HashMap::from([(first_id, User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
     );
 
     let guitars = vec![
@@ -221,12 +226,10 @@ pub(crate) async fn versioned_event_repository_with_streams_occ_spec<
     let futures = guitars
         .iter()
         .cloned()
-        .map(|g| add_guitar(event_repository.clone(), first_id.clone(), g).boxed())
+        .map(|g| add_guitar(event_repository.clone(), first_id, g).boxed())
         .collect::<Vec<BoxFuture<()>>>();
 
     future::join_all(futures).await;
-
-    thread::sleep(time::Duration::from_secs(1));
 
     let state = UserDeciderState::load_by_id(
         UserDeciderState::default(),
@@ -255,7 +258,7 @@ async fn add_guitar<
 ) {
     let ctx = UserDeciderCtx::new();
 
-    println!("Adding Guitar {:?} for user {}", &guitar.brand, &user_id);
+    println!("Adding Guitar {:?} for user {}", guitar.brand, user_id);
 
     let cmd = UserCommand::AddGuitar(user_id, guitar.to_owned());
 
@@ -271,6 +274,6 @@ async fn add_guitar<
 
     println!(
         "Result for Guitar {:?} for user {}: {:?}",
-        &guitar.brand, &user_id, res
+        guitar.brand, user_id, res
     );
 }

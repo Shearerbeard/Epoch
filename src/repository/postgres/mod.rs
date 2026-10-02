@@ -183,7 +183,7 @@ where
         &mut self,
         version: &RepositoryVersion<PgVersion>,
         stream: &Self::StreamId,
-        events: &Vec<E>,
+        events: &[E],
     ) -> RepoResult<(Vec<E>, RepositoryVersion<PgVersion>)>
     where
         'a: 'async_trait,
@@ -285,7 +285,7 @@ where
             .map_err(VersionedRepositoryError::RepoErr)?;
 
         Ok((
-            events.to_owned(),
+            events.to_vec(),
             RepositoryVersion::Exact(PgVersion::from(next_sequence)),
         ))
     }
@@ -313,7 +313,7 @@ mod tests {
         // whatever database they are pointed at, so there is no safe
         // default to fall back on: an unset or misspelled variable must
         // stop the run rather than silently pick a database.
-        let _ = dotenv::dotenv();
+        let _ = dotenvy::dotenv();
         let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect(
             "EPOCH_PG_TEST_URL must be set (see .env.example; \
              `cp .env.example .env && docker compose up -d`)",
@@ -337,21 +337,21 @@ mod tests {
 
     #[actix_rt::test]
     async fn versioned_event_repository_with_streams_spec_postgres() {
-        let stream_type = format!("spec-{}", BASE_STREAM);
+        let stream_type = format!("spec-{BASE_STREAM}");
         let repo = repo_from_environment(&stream_type).await;
         versioned_event_repository_with_streams_spec(repo).await;
     }
 
     #[actix_rt::test]
     async fn versioned_event_repository_with_streams_occ_spec_postgres() {
-        let stream_type = format!("occ-spec-{}", BASE_STREAM);
+        let stream_type = format!("occ-spec-{BASE_STREAM}");
         let repo = repo_from_environment(&stream_type).await;
         versioned_event_repository_with_streams_occ_spec(repo).await;
     }
 
     #[actix_rt::test]
     async fn load_missing_stream_reports_no_stream() {
-        let stream_type = format!("missing-{}", BASE_STREAM);
+        let stream_type = format!("missing-{BASE_STREAM}");
         let repo = repo_from_environment(&stream_type).await;
         let res = repo.load(Some(&"never-written".to_string())).await;
         assert!(matches!(res, Ok((v, RepositoryVersion::NoStream)) if v.is_empty()));
@@ -361,7 +361,7 @@ mod tests {
     async fn concurrent_appends_conflict_deterministically() {
         use crate::test_helpers::deciders::user::{User, UserName};
 
-        let stream_type = format!("race-{}", BASE_STREAM);
+        let stream_type = format!("race-{BASE_STREAM}");
         let repo_a = repo_from_environment(&stream_type).await;
         let repo_b = repo_a.clone();
         let stream_id = "shared".to_string();

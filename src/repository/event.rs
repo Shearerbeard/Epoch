@@ -11,7 +11,7 @@ where
     E: Event + Sync + Send,
 {
     async fn load(&self) -> Result<Vec<E>, Err>;
-    async fn append(&mut self, events: &Vec<E>) -> Result<Vec<E>, Err>;
+    async fn append(&mut self, events: &[E]) -> Result<Vec<E>, Err>;
 }
 
 #[async_trait]
@@ -26,7 +26,7 @@ where
     async fn append(
         &mut self,
         version: &Self::Version,
-        events: &Vec<E>,
+        events: &[E],
     ) -> Result<(Vec<E>, Self::Version), Err>;
 }
 
@@ -65,7 +65,7 @@ where
         &mut self,
         version: &RepositoryVersion<Self::Version>,
         stream: &Self::StreamId,
-        events: &Vec<E>,
+        events: &[E],
     ) -> Result<
         (Vec<E>, RepositoryVersion<Self::Version>),
         VersionedRepositoryError<Err, Self::Version>,
