@@ -339,7 +339,7 @@ mod tests {
     async fn versioned_event_repository_with_streams_spec_postgres() {
         let stream_type = format!("spec-{BASE_STREAM}");
         let repo = repo_from_environment(&stream_type).await;
-        versioned_event_repository_with_streams_spec(repo).await;
+        versioned_event_repository_with_streams_spec(repo, None).await;
     }
 
     #[actix_rt::test]

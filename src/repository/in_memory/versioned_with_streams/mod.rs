@@ -170,6 +170,6 @@ mod tests {
     #[actix_rt::test]
     async fn repository_spec_test() {
         let event_repository = InMemoryEventRepository::<UserEvent>::new(BASE_STREAM);
-        let _ = versioned_event_repository_with_streams_spec(event_repository).await;
+        let _ = versioned_event_repository_with_streams_spec(event_repository, None).await;
     }
 }

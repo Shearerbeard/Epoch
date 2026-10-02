@@ -299,7 +299,7 @@ mod tests {
             RedisStreamsEventRepository::<TestUserEventDTOManager, TestUserEventDTO>::new(&client);
 
         // Run both tests in sequence because we cannot specify a stream identifier per test in redis
-        let _ = versioned_event_repository_with_streams_spec(event_repository.clone()).await;
+        let _ = versioned_event_repository_with_streams_spec(event_repository.clone(), None).await;
         let _ = versioned_event_repository_with_streams_occ_spec(event_repository).await;
     }
 }

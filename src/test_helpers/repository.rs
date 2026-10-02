@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use assert_matches::assert_matches;
@@ -39,6 +39,7 @@ pub(crate) async fn versioned_event_repository_with_streams_spec<
         Version = V,
         StreamId = String,
     >,
+    category_projection_timeout: Option<Duration>,
 ) {
     println!("RUNNING UNIVERSAL SPEC TEST FOR VersionedEventRepositoryWithStreams");
     let id_1 = "1".to_string();
@@ -87,16 +88,23 @@ pub(crate) async fn versioned_event_repository_with_streams_spec<
     assert_matches!(res, Ok((v, RepositoryVersion::Exact(_))) if v == events2);
 
     let events_combined: Vec<UserEvent> = events1.into_iter().chain(events2).collect();
-    // EventStoreDB's category projection trails the stream writes.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let res = loop {
-        let res = event_repository.load(None).await;
-        if matches!(&res, Ok((events, _)) if *events == events_combined)
-            || Instant::now() >= deadline
-        {
-            break res;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    let res = if let Some(timeout) = category_projection_timeout {
+        // EventStoreDB's category projection trails the stream writes.
+        tokio::time::timeout(timeout, async {
+            loop {
+                let res = event_repository.load(None).await;
+                match &res {
+                    Ok((events, _)) if events != &events_combined => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    _ => break res,
+                }
+            }
+        })
+        .await
+        .expect("category projection caught up before the deadline")
+    } else {
+        event_repository.load(None).await
     };
     assert_matches!(res, Ok((v, RepositoryVersion::Exact(_))) if v == events_combined);
 

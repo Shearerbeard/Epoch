@@ -221,7 +221,11 @@ mod tests {
         let client = store_from_environment(&base_stream, vec![1, 2]).await;
         let event_repository = ESDBEventRepository::<UserEvent>::new(&client, &base_stream);
 
-        let _ = versioned_event_repository_with_streams_spec(event_repository).await;
+        let _ = versioned_event_repository_with_streams_spec(
+            event_repository,
+            Some(std::time::Duration::from_secs(10)),
+        )
+        .await;
     }
 
     #[actix_rt::test]
