@@ -33,7 +33,7 @@ impl<E> ESDBEventRepository<E> {
         Self {
             client: client.to_owned(),
             stream_name: stream_name.to_owned(),
-            _hidden: PhantomData::default(),
+            _hidden: PhantomData,
         }
     }
 
@@ -136,7 +136,7 @@ where
         &mut self,
         version: &RepositoryVersion<usize>,
         stream: &Self::StreamId,
-        events: &Vec<E>,
+        events: &[E],
     ) -> Result<(Vec<E>, RepositoryVersion<usize>), VersionedRepositoryError<Error, usize>>
     where
         'a: 'async_trait,
@@ -174,7 +174,7 @@ where
             })?;
 
         Ok((
-            events.to_owned(),
+            events.to_vec(),
             RepositoryVersion::Exact(res.next_expected_version.try_into().unwrap()),
         ))
     }
@@ -182,8 +182,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use const_random::const_random;
-
     use eventstore::DeleteStreamOptions;
 
     use super::*;
@@ -196,11 +194,9 @@ mod tests {
         },
     };
 
-    const BASE_STREAM: u32 = const_random!(u32);
-
     async fn store_from_environment(base_stream: &str, ids: Vec<usize>) -> eventstore::Client {
-        let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
-        let settings = dotenv::var("ESDB_CONNECTION_STRING")
+        let _ = dotenvy::dotenv().expect("File .env or Env Vars not found");
+        let settings = dotenvy::var("ESDB_CONNECTION_STRING")
             .expect("ESDB to be set in env")
             .parse()
             .expect("ESDB connection string to parse");
@@ -210,7 +206,7 @@ mod tests {
         for id in ids {
             let _ = client
                 .delete_stream(
-                    format!("{}-{}", base_stream, id),
+                    format!("{base_stream}-{id}"),
                     &DeleteStreamOptions::default(),
                 )
                 .await;
@@ -221,20 +217,22 @@ mod tests {
 
     #[actix_rt::test]
     async fn repository_spec_tests() {
-        let base_stream = BASE_STREAM;
-        let client = store_from_environment(&base_stream.to_string(), vec![1, 2]).await;
-        let event_repository =
-            ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
+        let base_stream = uuid::Uuid::new_v4().simple().to_string();
+        let client = store_from_environment(&base_stream, vec![1, 2]).await;
+        let event_repository = ESDBEventRepository::<UserEvent>::new(&client, &base_stream);
 
-        let _ = versioned_event_repository_with_streams_spec(event_repository).await;
+        let _ = versioned_event_repository_with_streams_spec(
+            event_repository,
+            Some(std::time::Duration::from_secs(10)),
+        )
+        .await;
     }
 
     #[actix_rt::test]
     async fn repository_with_occ_spec_test() {
-        let base_stream = format!("{}_with_occ", BASE_STREAM);
-        let client = store_from_environment(&base_stream.to_string(), vec![1]).await;
-        let event_repository =
-            ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());
+        let base_stream = format!("{}_with_occ", uuid::Uuid::new_v4().simple());
+        let client = store_from_environment(&base_stream, vec![1]).await;
+        let event_repository = ESDBEventRepository::<UserEvent>::new(&client, &base_stream);
 
         let _ = versioned_event_repository_with_streams_occ_spec(event_repository).await;
     }

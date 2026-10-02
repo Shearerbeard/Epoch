@@ -1,7 +1,8 @@
 # Epoch TODO
 
-> **Project Work Items and Planning**
-> This file tracks current work items, planned features, and known issues for the Epoch project.
+> **Archived planning snapshot from 2025-11-21.** The work items and
+> statuses below describe that session, not the current release. For
+> the shipped API and version, start with README.md and CHANGELOG.md.
 
 **Last Updated**: 2025-11-21
 
@@ -42,7 +43,7 @@
 2. [ ] Create examples directory with compilable examples
    - Location: Create examples/ directory
    - Reason: Helps users understand patterns in practice
-   - Contents: User domain, Truck domain, Expense domain examples
+   - Contents: User and Truck examples, with an Expense example later
    - Effort: ~3 hours
 
 3. [ ] Replace thread::sleep with tokio::sleep in retry logic
@@ -85,7 +86,7 @@
   - Reason: Provide relational database option for event sourcing
   - Dependencies: tokio-postgres, bb8, bb8-postgres
   - Effort: ~8-12 hours (4 phases)
-  - Includes: Connection pooling, optimistic concurrency, generic spec tests
+  - Includes: A connection pool and version checks, covered by the repository spec suite
 - [ ] Implement LoadDecideAppendWithSnapshot strategy
 - [ ] Add projection pattern for read models
 - [ ] Add event upcasting support for schema evolution
@@ -179,7 +180,7 @@
 ## Completed
 
 ### Recently Completed (2025-11-21 Session)
-- [x] Create comprehensive internal documentation structure
+- [x] Create internal documentation structure
   - Added docs/internal/planning/ directory
   - Created epoch-architecture-philosophy.md
   - Created coding-style-guide.md
@@ -207,7 +208,7 @@
   - Integration with git workflow
 
 - [x] Plan PostgreSQL repository implementation
-  - Created comprehensive planning document
+  - Created PostgreSQL planning document
   - Researched ESDB and Redis patterns
   - Reviewed Thalo PostgreSQL implementation
   - Defined schema, trait implementation, testing strategy
@@ -229,7 +230,7 @@
    - **Ideas / Research**: Needs investigation
    - **Backlog**: Deferred for later
 
-2. **Use clear, actionable descriptions**:
+2. **Describe the work plainly**:
    ```markdown
    - [ ] Add validation helpers for Railway-Oriented Programming
    ```
@@ -276,7 +277,7 @@ When completing TODO items:
 
 ## Priority Definitions
 
-- **High**: Blocks other work, affects users, or critical for next release
+- **High**: Blocks the next release or an existing user
 - **Medium**: Important features or improvements, but not blocking
 - **Low**: Nice to have, quality of life improvements
 - **Backlog**: Future ideas, not currently planned

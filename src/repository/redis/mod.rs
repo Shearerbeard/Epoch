@@ -1,4 +1,7 @@
-use std::{error::Error, fmt::Debug};
+use std::{
+    error::Error,
+    fmt::{self, Debug},
+};
 
 use redis_om::RedisError;
 
@@ -30,32 +33,10 @@ pub enum RedisVersionError {
     ParseVersion(String),
 }
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Serialize, Deserialize)]
 pub struct RedisVersion {
     timestamp: usize,
     version: usize,
-}
-
-impl Ord for RedisVersion {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if self > other {
-            std::cmp::Ordering::Greater
-        } else if self < other {
-            std::cmp::Ordering::Less
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    }
-}
-
-impl PartialOrd for RedisVersion {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match self.timestamp.partial_cmp(&other.timestamp) {
-            Some(core::cmp::Ordering::Equal) => {}
-            ord => return ord,
-        }
-        self.version.partial_cmp(&other.version)
-    }
 }
 
 impl TryFrom<&str> for RedisVersion {
@@ -79,9 +60,9 @@ impl TryFrom<&str> for RedisVersion {
     }
 }
 
-impl ToString for RedisVersion {
-    fn to_string(&self) -> String {
-        format!("{}-{}", self.timestamp, self.version)
+impl fmt::Display for RedisVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.timestamp, self.version)
     }
 }
 

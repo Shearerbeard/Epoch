@@ -1,7 +1,7 @@
 # Session Start Checklist
 
-> **Automatic Reference for Claude Code Sessions**
-> This file provides a quick checklist and context for starting new development sessions.
+> Archived 2025 checklist. Use the root README for current setup,
+> feature, and test commands. `TODO.md` is also a historical snapshot.
 
 **Date**: {SESSION_DATE}
 
@@ -99,7 +99,7 @@ cargo fmt --check
 ### Success Criteria
 
 By end of session:
-- [ ] All tests passing
+- [ ] Run the feature-specific suite documented in the README
 - [ ] Code formatted and linted
 - [ ] TODO.md updated
 - [ ] CHANGELOG.md updated (if applicable)

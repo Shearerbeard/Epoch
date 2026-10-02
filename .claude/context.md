@@ -1,37 +1,34 @@
 # Epoch Development Context
 
 > **Automatically loaded in Claude Code sessions**
-> This file provides essential context about the Epoch repository for LLM-assisted development.
+> Start here for Epoch's development conventions and source map.
 
 ## Quick Reference
 
 - **Repository**: Event Sourcing + CQRS Framework (Rust)
-- **Version**: 1.0.0-alpha.18
+- **Release candidate**: 0.1.0 (`epoch-journal` package, `epoch` library)
 - **Core Pattern**: Decider Pattern (pure functional event sourcing)
 - **Rust Edition**: 2021
+- **Minimum Rust version**: 1.88
 
 ## Session Start Protocol
 
 **At the start of each session, review**:
 
-1. **[TODO.md](../TODO.md)** - Current work items and priorities
-   - Check "Current Sprint" section for active work
-   - Review "High Priority" for next tasks
-   - Note any blockers in "Known Issues"
+1. **[TODO.md](../TODO.md)** - Archived 2025 planning notes, not the
+   current release backlog. Use the README and changelog for the
+   shipped API and version.
 
 2. **[CHANGELOG.md](../CHANGELOG.md)** - Recent changes
    - Review "Unreleased" section for latest updates
    - Understand what changed since last session
 
-3. **[Session Start Checklist](.claude/session-start.md)** - Detailed session setup
+3. **[Session Start Checklist](session-start.md)** - Detailed session setup
    - Verify development environment
    - Review core principles
    - Set session goals
 
-**Throughout the session**:
-- Update TODO.md when starting/completing work
-- Add to CHANGELOG.md for user-facing changes
-- Keep both files synchronized with work progress
+**Throughout the session**: Update CHANGELOG.md for user-facing changes.
 
 ## Essential Reading
 
@@ -220,9 +217,8 @@ pub enum RepositoryVersion<V> {
 
 ## Known Issues & TODOs
 
-1. **README Outdated**: References old `EventContext` API instead of Decider pattern
-2. **Retry Logic**: Uses `thread::sleep` instead of `tokio::sleep` (alpha pragmatism)
-3. **Missing Feature**: `LoadDecideAppendWithSnapshot` not yet implemented
+1. **Retry Logic**: Uses `thread::sleep` instead of `tokio::sleep`
+2. **Missing Feature**: `LoadDecideAppendWithSnapshot` not yet implemented
 
 ## File Locations
 
@@ -238,7 +234,8 @@ pub enum RepositoryVersion<V> {
 │   │   ├── state.rs                # State repository traits
 │   │   ├── in_memory/              # In-memory backend
 │   │   ├── esdb/                   # EventStoreDB backend
-│   │   └── redis/                  # Redis backend
+│   │   ├── redis/                  # Redis backend
+│   │   └── postgres/               # PostgreSQL backend
 │   └── test_helpers/
 │       ├── deciders.rs             # Example UserDecider
 │       └── repository.rs           # Generic spec tests
@@ -259,10 +256,10 @@ Following guidelines from [claude-skills](https://github.com/Shearerbeard/claude
 
 ### Internal vs. External Documentation
 
-- **Internal** (`docs/internal/`): Architecture decisions, coding patterns, LLM context
+- **Internal** (`docs/internal/`): Design decisions and coding conventions for maintainers
   - Target audience: Developers and LLM assistants
   - Focus: WHY decisions were made, HOW patterns work
-  - Examples: Architecture docs, style guides, planning documents
+  - Examples: Architecture and style guides, plus implementation plans
 
 - **External** (README, doc comments): User-facing API documentation
   - Target audience: Library users
@@ -277,7 +274,7 @@ Files in `.claude/` and `docs/internal/` are designed to provide LLM assistants 
 - Common tasks and their implementations
 - Known issues and limitations
 
-This allows for consistent, context-aware assistance across sessions.
+The source tree and README remain authoritative when these notes fall behind.
 
 ## Quick Start Commands
 

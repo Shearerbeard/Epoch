@@ -1,6 +1,9 @@
 # Changelog
 
+<!-- vale ai-tells.OverusedVocabulary = NO -->
+<!-- vale-reason: Keep a Changelog's standard wording, not generated prose. -->
 All notable changes to this project will be documented in this file.
+<!-- vale ai-tells.OverusedVocabulary = YES -->
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -8,7 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Comprehensive internal documentation structure
+- A compiled counter example that exercises the current Decider and
+  Evolver traits without a backend.
+- An accessor for the events in `CommandResponse`.
+- Pull-request checks for the supported Rust floor and service-backed
+  repository tests.
+- PostgreSQL repository backend behind the opt-in `postgres` feature.
+- Internal documentation structure
   - Architecture and philosophy documentation (docs/internal/planning/epoch-architecture-philosophy.md)
   - Coding style guide with Railway-Oriented Programming patterns (docs/internal/planning/coding-style-guide.md)
   - Documentation guidelines for internal vs external docs (docs/internal/documentation-guidelines.md)
@@ -30,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - LLM-assisted development patterns
   - Templates for TODO items and CHANGELOG entries
 - PostgreSQL repository implementation planning document (docs/internal/planning/postgres-repository-implementation.md)
-  - Comprehensive 4-phase implementation plan (8-12 hours total)
+  - 4-phase implementation plan (8-12 hours total)
   - Database schema design with JSONB event storage
   - Trait implementation patterns following ESDB and Redis
   - Connection pooling strategy with bb8
@@ -41,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Performance considerations and indexing strategy
 
 ### Changed
+- Declare Rust 1.88 as the minimum supported version after checking
+  an unlocked dependency resolution with every feature enabled.
+- Prepare the first public package as `epoch-journal` while retaining
+  `epoch` as the library import. Git consumers must update their
+  dependency declaration to name the new package.
+- Update the EventStoreDB client to 4.0 and replace the test-only
+  `dotenv` dependency with `dotenvy`.
+- Take event slices in repository append methods instead of requiring
+  `Vec` references.
 - Enhanced coding style guide with trucker_buddy_rs patterns
   - Added Railway-Oriented Programming section with visual diagrams
   - Added "Making Illegal States Unrepresentable" principle
@@ -64,12 +82,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - None
 
 ### Fixed
-- None
+- Replace the removed EventContext README example with a runnable
+  Decider example.
+- Use one consistent ordering implementation for Redis stream versions.
 
 ### Security
 - None
 
-## [1.0.0-alpha.18] - Prior to Documentation
+## Repository history (unpublished)
+
+The old `1.0.0-alpha.18` version was used in the repository, not
+published to crates.io. The notes below describe that code line.
 
 ### Added
 - Decider pattern traits (Evolver, Decider, DeciderWithContext)
@@ -101,9 +124,9 @@ This project uses [Semantic Versioning](https://semver.org/):
 - **MAJOR** version: Incompatible API changes
 - **MINOR** version: Add functionality in a backwards compatible manner
 - **PATCH** version: Backwards compatible bug fixes
-- **Alpha/Beta** suffix: Pre-release versions (current: alpha)
+- **Alpha/Beta** suffix: Pre-release versions
 
-### Alpha Status (1.0.0-alpha.x)
+### Earlier alpha status (1.0.0-alpha.x)
 
 During alpha:
 - API may change without notice
@@ -116,8 +139,8 @@ During alpha:
 To move from alpha to 1.0.0 stable:
 - [ ] API is stable and documented
 - [ ] README examples use current Decider pattern
-- [ ] All three backends (in-memory, ESDB, Redis) fully tested
-- [ ] Comprehensive documentation complete
+- [ ] All four backends (in-memory, ESDB, Redis, PostgreSQL) fully tested
+- [ ] Public traits and backend limits documented
 - [ ] LoadDecideAppendWithSnapshot implemented
 - [ ] Migration guide from alpha to 1.0
 - [ ] Performance benchmarks established
@@ -193,6 +216,3 @@ To move from alpha to 1.0.0 stable:
 - [Conventional Commits](https://www.conventionalcommits.org/)
 
 ---
-
-[Unreleased]: https://github.com/Shearerbeard/Epoch/compare/v1.0.0-alpha.18...HEAD
-[1.0.0-alpha.18]: https://github.com/Shearerbeard/Epoch/releases/tag/v1.0.0-alpha.18

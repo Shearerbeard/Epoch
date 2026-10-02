@@ -1,0 +1,20 @@
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2025-0134", reason = "User-approved for 0.1.0: EventStoreDB 4.0 pulls tonic 0.12.3, which still depends on unmaintained rustls-pemfile 2.2.0; no vulnerability was reported in the release audit" },
+]
+unused-ignored-advisory = "deny"
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -3,10 +3,7 @@ use std::collections::HashSet;
 use redis_om::{redis, RedisTransportValue, StreamModel};
 use thiserror::Error;
 
-use crate::repository::{
-    redis::{versioned_event::StreamModelDTO, RedisRepositoryError},
-    WithFineGrainedStreamId,
-};
+use crate::repository::{redis::versioned_event::StreamModelDTO, WithFineGrainedStreamId};
 
 use super::{
     deciders::user::{Guitar, User, UserEvent, UserId, UserName},
@@ -22,6 +19,8 @@ pub struct TestUserEventDTO {
     guitar: Option<GuitarDTO>,
 }
 
+// These names are part of the stored Redis fixture format.
+#[allow(clippy::enum_variant_names)]
 #[derive(RedisTransportValue, Debug, Clone, Copy)]
 pub(crate) enum UserEventTypeDTO {
     UserAdded,
@@ -93,21 +92,21 @@ impl StreamModelDTO<TestUserEventDTOManager, TestUserDTOErr> for UserEvent {
     fn into_dto(self) -> <TestUserEventDTOManager as StreamModel>::Data {
         match self {
             UserEvent::UserAdded(user) => TestUserEventDTO {
-                user_id: user.id.into(),
+                user_id: user.id,
                 event_type: UserEventTypeDTO::UserAdded,
                 user: Some(user.into()),
                 guitar: None,
                 user_name: None,
             },
             UserEvent::UserNameUpdated(user_id, user_name) => TestUserEventDTO {
-                user_id: user_id.into(),
+                user_id,
                 event_type: UserEventTypeDTO::UserNameUpdated,
                 user: None,
                 user_name: Some(user_name.value()),
                 guitar: None,
             },
             UserEvent::UserGuitarAdded(user_id, guitar) => TestUserEventDTO {
-                user_id: user_id.into(),
+                user_id,
                 event_type: UserEventTypeDTO::UserGuitarAdded,
                 user: None,
                 user_name: None,
@@ -125,34 +124,26 @@ impl StreamModelDTO<TestUserEventDTOManager, TestUserDTOErr> for UserEvent {
         match model.event_type {
             UserEventTypeDTO::UserAdded => match model.user {
                 Some(user) => Ok(UserEvent::UserAdded(user.into())),
-                None => Err(TestUserDTOErr(
-                    format!(
-                        "Redis UserEventDTO invalid: missing Some(User), {:?}",
-                        model
-                    )
-                    .into(),
-                )),
+                None => Err(TestUserDTOErr(format!(
+                    "Redis UserEventDTO invalid: missing Some(User), {model:?}"
+                ))),
             },
             UserEventTypeDTO::UserNameUpdated => match model.user_name {
                 Some(user_name) => Ok(UserEvent::UserNameUpdated(
                     model.user_id,
                     UserName::try_from(user_name).map_err(|e| {
-                        TestUserDTOErr(format!("Redis UserEventDTO invalid: {:?}", e).into())
+                        TestUserDTOErr(format!("Redis UserEventDTO invalid: {e:?}"))
                     })?,
                 )),
                 None => Err(TestUserDTOErr(format!(
-                    "Redis UserEventDTO invalid: missing Some(UserName), {:?}",
-                    model
-                ))
-                .into()),
+                    "Redis UserEventDTO invalid: missing Some(UserName), {model:?}"
+                ))),
             },
             UserEventTypeDTO::UserGuitarAdded => match model.guitar {
                 Some(guitar) => Ok(UserEvent::UserGuitarAdded(model.user_id, guitar.into())),
                 None => Err(TestUserDTOErr(format!(
-                    "Redis UserEventDTO invalid: missing Some(Guitar), {:?}",
-                    model
-                ))
-                .into()),
+                    "Redis UserEventDTO invalid: missing Some(Guitar), {model:?}"
+                ))),
             },
         }
     }
