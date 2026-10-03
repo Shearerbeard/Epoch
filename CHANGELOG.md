@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape the write path stores
 
 ### Changed
+- Prepare the redesign as `epoch-journal` 0.2.0-alpha.1 while
+  retaining `epoch` as the Rust library name.
 - Clarify the saga and outbox API documentation and rename the live
   PostgreSQL replay test target to `saga_outbox_postgres`.
 - Single-writer funnel: every event transaction (single append and atomic

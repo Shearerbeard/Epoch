@@ -1,9 +1,12 @@
 [package]
-name = "epoch"
-version = "1.0.0-alpha.18"
+name = "epoch-journal"
+version = "0.2.0-alpha.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "epoch"
 
 [features]
 default = ["in_memory", "esdb", "redis"]
