@@ -1,5 +1,6 @@
 //! Core stream surface: versioned event streams (ADRs 0001-0005), the
-//! atomic batch (ADR 0006), and the event feed (ADR 0010).
+//! atomic batch (ADR 0006), the event feed (ADR 0010), and the saga
+//! runner with its outbox executor (ADR 0010's outbox-saga section).
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -14,15 +15,24 @@ mod batch;
 pub mod feed;
 #[cfg(feature = "in_memory")]
 pub mod in_memory;
+mod keys;
+pub mod outbox;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+mod retry;
+pub mod saga;
 pub mod spec;
 
+#[cfg(all(test, feature = "in_memory"))]
+mod saga_outbox_golden;
+
 pub use batch::{
-    AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchConstraint, BatchWrite,
-    ConstraintViolation, DuplicateWrite, StreamConstraint, StreamRef, TransactError,
-    WritelessBatch,
+    AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchConstraint, BatchSource, BatchWrite,
+    ConstraintViolation, DuplicateIntent, DuplicateWrite, StreamConstraint, StreamRef,
+    TransactError, WritelessBatch,
 };
+pub use keys::{EmptySagaId, RenderedIntentKey, SagaId};
+pub use retry::{BackoffSchedule, BaseExceedsCap, RetryBudget, RetryPolicy, ZeroBudget};
 
 /// Two-way typed contract between a consumer's stream id types and the
 /// stored stream key (ADR 0004). The repository owns namespacing; an id

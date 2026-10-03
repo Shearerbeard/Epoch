@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use crate::decider::Event;
 use crate::streams::batch::{
-    expectation_satisfied, AtomicStreams, Batch, BatchBuilder, BatchConflict, ConstraintViolation,
-    DuplicateWrite, StreamRef, TransactError,
+    expectation_satisfied, AtomicStreams, Batch, BatchBuilder, BatchConflict, BatchSource,
+    ConstraintViolation, DuplicateWrite, StreamRef, TransactError,
 };
 use crate::streams::{EventBatch, EventMetadata, ExpectedVersion, StreamId};
 
@@ -60,6 +60,14 @@ impl InMemoryBatchBuilder {
             })
             .collect();
         self.push(StreamRef::new(category, id), expected, erased)
+    }
+}
+
+impl BatchSource for InMemoryDatabase {
+    type Wire = MemoryEvent;
+
+    fn builder(&self) -> InMemoryBatchBuilder {
+        self.batch()
     }
 }
 

@@ -1,6 +1,9 @@
 # The saga and event feed ship when a consumer pulls them, not with the foundation
 
-- Status: proposed
+- Status: accepted (the deferral is discharged by its own trigger:
+  the pull happened, and the feed and the saga runtime shipped as
+  ADR 0010 and its outbox-saga section; marked at the runner card's
+  gate A, 2026-09)
 - Date: 2026-08
 - Deciders: Mike Shearer
 
@@ -51,6 +54,17 @@ poll/ack/offset loop is exactly the kind of subtle, repeated
 infrastructure a library should own once, and both reference designs
 treat it as platform.
 
+Discharge note (2026-09, the runner card's gate A): the trigger this
+record waits on - a real consumer pulling the machinery - fired in
+two steps. chore-lottery's vikunja-sync integration shipped and
+logged the demand signal (the pull ADR 0010 opens with), and the
+event feed landed as ADR 0010's single-writer funnel with the saga
+runner and outbox executor completing its outbox-saga section. The
+deferral is discharged by its own terms; the maintenance-tracking
+note below is historical. The wave plan that sequenced the work
+lives on the maintainer's private board (ADR 0009's seam); this
+public record links only to ADR 0010.
+
 The postgres schema already satisfies the forward-compatibility
 driver: `global_sequence` is commit-ordered and is the feed cursor
 unchanged. Erratum (2026-08-07, from ADR 0006's adversarial review):
@@ -77,6 +91,8 @@ redesign board with a do-not-pull-until-needed note.
 
 ## Links
 
+- [ADR 0010 - the discharge: the feed's cursor semantics and the outbox-saga section](0010-allocation-ledger-honest-cursor.md)
 - Split decided in ADR 0006; design annexes carry the sketched types
-- Expected first consumer: an integration exporting state to an
-  external task tracker (chore-lottery is the likely first)
+- First consumer in fact: chore-lottery's vikunja-sync integration
+  (its migration onto the shipped runtime is tracked on the
+  consuming repo's own board, per ADR 0009's seam)
