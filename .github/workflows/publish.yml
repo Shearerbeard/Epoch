@@ -1,0 +1,93 @@
+name: publish
+
+# Tag-driven publish, same process as jev-driver: the tag names a
+# version that already exists in the tree. Bump the version in
+# Cargo.toml and cut a dated CHANGELOG entry in a commit, then tag
+# vX.Y.Z; this workflow verifies the three agree, runs the gates
+# (including the backend tests), and uploads.
+#
+# Pre-1.0 convention: breaking API changes bump the minor
+# (0.1 -> 0.2); everything else bumps the patch (0.1.0 -> 0.1.1).
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  verify:
+    name: tag / manifest / changelog agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install supported Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Verify
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(cargo +1.88.0 metadata --no-deps --format-version 1 \
+            | jq -r '.packages[0].version')
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v$TAG does not match Cargo.toml version $VERSION"
+            exit 1
+          fi
+          if ! grep -q "^## \[$TAG\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$TAG]' entry"
+            exit 1
+          fi
+
+  gates:
+    name: fmt + clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install supported Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+      - name: Format
+        run: cargo +1.88.0 fmt --check
+      - name: Lint all targets and features
+        run: cargo +1.88.0 clippy --all-targets --all-features -- -D warnings
+      - name: Test without backends
+        run: cargo +1.88.0 test --no-default-features
+      - name: Check README doctest and example
+        run: cargo +1.88.0 test --doc && cargo +1.88.0 run --no-default-features --example counter
+
+  backends:
+    name: backend integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install supported Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Start test services
+        run: |
+          cp .env.example .env
+          docker compose up -d
+          for attempt in $(seq 1 60); do
+            if ( </dev/tcp/127.0.0.1/2113 ) 2>/dev/null &&
+               ( </dev/tcp/127.0.0.1/6379 ) 2>/dev/null &&
+               ( </dev/tcp/127.0.0.1/54321 ) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          exit 1
+      - name: Test default backends
+        run: cargo +1.88.0 test
+      - name: Test every backend
+        run: cargo +1.88.0 test --all-features
+      - name: Stop test services
+        if: always()
+        run: docker compose down
+
+  publish:
+    name: publish to crates.io
+    needs: [verify, gates, backends]
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install supported Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Publish epoch-journal
+        run: cargo +1.88.0 publish

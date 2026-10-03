@@ -127,6 +127,27 @@ own connection settings in an application. The PostgreSQL tests call
 `migrate` and require `EPOCH_PG_TEST_URL` rather than choosing a
 database implicitly. Run `docker compose down` when finished.
 
+## Publishing (maintainers)
+
+Publishing is tag-driven: the tag names a version that already exists
+in the tree, and CI does the upload (`.github/workflows/publish.yml`).
+Pre-1.0 convention: breaking API changes bump the minor (`0.1` ->
+`0.2`); everything else bumps the patch (`0.1.0` -> `0.1.1`).
+
+1. Bump `version` in `Cargo.toml`.
+2. Move the `[Unreleased]` entries into a dated `## [X.Y.Z]` section
+   in `CHANGELOG.md`.
+3. Run the checks from "Build and test", commit, then:
+
+```sh
+git tag v0.2.0 && git push origin main v0.2.0
+```
+
+CI verifies the tag, manifest, and changelog agree, runs the gates
+(including the backend tests), and publishes. It needs the
+`CARGO_REGISTRY_TOKEN` repo secret (a crates.io token with
+publish-update scope). To publish by hand instead: `cargo publish`.
+
 ## Versions and contributions
 
 `0.1.0` is the first crates.io release of `epoch-journal`. Earlier

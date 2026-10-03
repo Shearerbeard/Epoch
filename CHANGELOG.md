@@ -11,6 +11,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- None
+
+### Changed
+- None
+
+### Deprecated
+- None
+
+### Removed
+- None
+
+### Fixed
+- None
+
+### Security
+- None
+
+## [0.1.0] - 2026-10-02
+
+First crates.io release of `epoch-journal` (the Rust import stays
+`epoch`).
+
+### Added
 - A compiled counter example that exercises the current Decider and
   Evolver traits without a backend.
 - An accessor for the events in `CommandResponse`.
