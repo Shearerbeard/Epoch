@@ -136,7 +136,7 @@ mod tests {
     /// no safe default database to fall back on, so an unset variable
     /// must stop the run rather than silently pick one.
     fn server_config() -> tokio_postgres::Config {
-        let _ = dotenv::dotenv();
+        let _ = dotenvy::dotenv();
         std::env::var("EPOCH_PG_TEST_URL")
             .expect("EPOCH_PG_TEST_URL must be set (see .env.example)")
             .parse()

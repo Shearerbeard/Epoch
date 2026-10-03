@@ -374,7 +374,7 @@ mod postgres_tests {
         // database they are pointed at, so there is no safe default to
         // fall back on: an unset variable must stop the run rather than
         // silently pick a database.
-        let _ = dotenv::dotenv();
+        let _ = dotenvy::dotenv();
         let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect(
             "EPOCH_PG_TEST_URL must be set (see .env.example; \
              `cp .env.example .env && docker compose up -d`)",

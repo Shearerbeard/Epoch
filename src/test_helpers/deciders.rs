@@ -120,8 +120,8 @@ pub(crate) mod user {
         ) -> Result<Vec<UserEvent>, UserDeciderError> {
             match cmd {
                 UserCommand::AddUser(user_name) => {
-                    let name = UserName::try_from(user_name)
-                        .map_err(|e| UserDeciderError::UserField(e))?;
+                    let name =
+                        UserName::try_from(user_name).map_err(UserDeciderError::UserField)?;
 
                     Ok(vec![UserEvent::UserAdded(User {
                         id: 1,
@@ -130,8 +130,8 @@ pub(crate) mod user {
                     })])
                 }
                 UserCommand::UpdateUserName(user_id, user_name) => {
-                    let name = UserName::try_from(user_name)
-                        .map_err(|e| UserDeciderError::UserField(e))?;
+                    let name =
+                        UserName::try_from(user_name).map_err(UserDeciderError::UserField)?;
 
                     Ok(vec![UserEvent::UserNameUpdated(user_id.to_owned(), name)])
                 }
@@ -139,9 +139,9 @@ pub(crate) mod user {
                     println!("ADD GUITAR STATE: {:?}", &state);
                     let user = state
                         .users
-                        .get(&user_id)
+                        .get(user_id)
                         .ok_or(UserDeciderError::NotFound(*user_id))?;
-                    if user.guitars.contains(&guitar) {
+                    if user.guitars.contains(guitar) {
                         Err(UserDeciderError::AlreadyHasGuitar(guitar.to_owned()))
                     } else {
                         Ok(vec![UserEvent::UserGuitarAdded(
@@ -166,13 +166,13 @@ pub(crate) mod user {
                     state
                 }
                 UserEvent::UserNameUpdated(user_id, user_name) => {
-                    state.users.get_mut(&user_id).unwrap().name = user_name.to_owned();
+                    state.users.get_mut(user_id).unwrap().name = user_name.to_owned();
                     state
                 }
                 UserEvent::UserGuitarAdded(user_id, guitar) => {
                     state
                         .users
-                        .get_mut(&user_id)
+                        .get_mut(user_id)
                         .unwrap()
                         .guitars
                         .insert(guitar.to_owned());
@@ -199,8 +199,8 @@ pub(crate) mod user {
                     let seq = ctx.id_sequence.lock().unwrap();
                     let IdGen(id) = seq.pull();
 
-                    let name = UserName::try_from(user_name)
-                        .map_err(|e| UserDeciderError::UserField(e))?;
+                    let name =
+                        UserName::try_from(user_name).map_err(UserDeciderError::UserField)?;
 
                     Ok(vec![UserEvent::UserAdded(User {
                         id,
@@ -209,17 +209,17 @@ pub(crate) mod user {
                     })])
                 }
                 UserCommand::UpdateUserName(user_id, user_name) => {
-                    let name = UserName::try_from(user_name)
-                        .map_err(|e| UserDeciderError::UserField(e))?;
+                    let name =
+                        UserName::try_from(user_name).map_err(UserDeciderError::UserField)?;
 
                     Ok(vec![UserEvent::UserNameUpdated(user_id.to_owned(), name)])
                 }
                 UserCommand::AddGuitar(user_id, guitar) => {
                     let user = state
                         .users
-                        .get(&user_id)
+                        .get(user_id)
                         .ok_or(UserDeciderError::NotFound(*user_id))?;
-                    if user.guitars.contains(&guitar) {
+                    if user.guitars.contains(guitar) {
                         Err(UserDeciderError::AlreadyHasGuitar(guitar.to_owned()))
                     } else {
                         Ok(vec![UserEvent::UserGuitarAdded(
@@ -251,11 +251,7 @@ pub(crate) mod user {
 
     impl UserDeciderState {
         pub fn new(users: HashMap<UserId, User>) -> Self {
-            Self::default().set_users(users)
-        }
-
-        pub fn set_users(&self, users: HashMap<UserId, User>) -> Self {
-            Self { users, ..*self }
+            Self { users }
         }
     }
 
@@ -278,11 +274,6 @@ pub(crate) mod user {
                 id_sequence: Arc::new(Mutex::new(IdGen::init())),
             }
         }
-
-        pub fn current(&self) -> usize {
-            let IdGen(id) = self.id_sequence.lock().unwrap().current();
-            id
-        }
     }
 
     impl StateFromEventRepository for UserDeciderState {
@@ -296,6 +287,10 @@ pub(crate) mod user {
         AddGuitar(UserId, Guitar),
     }
 
+    #[expect(
+        clippy::enum_variant_names,
+        reason = "fixture variants are stored as event types"
+    )]
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub(crate) enum UserEvent {
         UserAdded(User),

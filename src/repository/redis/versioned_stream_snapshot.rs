@@ -186,7 +186,7 @@ mod tests {
         }
 
         fn version(&self) -> RedisVersion {
-            self.version.clone()
+            self.version
         }
 
         fn data(&self) -> TestModel {
@@ -199,9 +199,9 @@ mod tests {
     }
 
     async fn client_from_environment() -> Client {
-        let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
+        let _ = dotenvy::dotenv().expect("File .env or Env Vars not found");
 
-        let settings: String = dotenv::var("REDIS_CONNECTION_STRING")
+        let settings: String = dotenvy::var("REDIS_CONNECTION_STRING")
             .expect("Redis to be set in env")
             .parse()
             .expect("Redis connection string to parse");

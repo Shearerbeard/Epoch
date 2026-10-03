@@ -477,7 +477,7 @@ mod tests {
         // database they are pointed at, so there is no safe default to
         // fall back on: an unset variable must stop the run rather than
         // silently pick a database.
-        let _ = dotenv::dotenv();
+        let _ = dotenvy::dotenv();
         let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect(
             "EPOCH_PG_TEST_URL must be set (see .env.example; \
              `cp .env.example .env && docker compose up -d`)",
@@ -498,7 +498,7 @@ mod tests {
         PgEventFeed<SomethingHappened>,
     ) {
         let category = format!("feed-spec-{}", rusty_ulid::generate_ulid_string());
-        let _ = dotenv::dotenv();
+        let _ = dotenvy::dotenv();
         let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
         let pool = pool_from_conn_str(&conn_str)
             .await
@@ -604,7 +604,7 @@ mod tests {
     where
         F: std::future::Future<Output = O>,
     {
-        let _ = dotenv::dotenv();
+        let _ = dotenvy::dotenv();
         let conn_str = std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
         let pool = pool_from_conn_str(&conn_str)
             .await
@@ -701,7 +701,7 @@ mod tests {
         use crate::streams::feed::{ConsumerGroup, EventFeed, PollLimit};
 
         under_deadline(async {
-            let _ = dotenv::dotenv();
+            let _ = dotenvy::dotenv();
             let conn_str =
                 std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set");
             let pool = pool_from_conn_str(&conn_str)

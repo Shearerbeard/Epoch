@@ -199,8 +199,8 @@ mod tests {
     const BASE_STREAM: u32 = const_random!(u32);
 
     async fn store_from_environment(base_stream: &str, ids: Vec<usize>) -> eventstore::Client {
-        let _ = dotenv::dotenv().expect("File .env or Env Vars not found");
-        let settings = dotenv::var("ESDB_CONNECTION_STRING")
+        let _ = dotenvy::dotenv().expect("File .env or Env Vars not found");
+        let settings = dotenvy::var("ESDB_CONNECTION_STRING")
             .expect("ESDB to be set in env")
             .parse()
             .expect("ESDB connection string to parse");
@@ -210,7 +210,7 @@ mod tests {
         for id in ids {
             let _ = client
                 .delete_stream(
-                    format!("{}-{}", base_stream, id),
+                    format!("{base_stream}-{id}"),
                     &DeleteStreamOptions::default(),
                 )
                 .await;
@@ -231,7 +231,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn repository_with_occ_spec_test() {
-        let base_stream = format!("{}_with_occ", BASE_STREAM);
+        let base_stream = format!("{BASE_STREAM}_with_occ");
         let client = store_from_environment(&base_stream.to_string(), vec![1]).await;
         let event_repository =
             ESDBEventRepository::<UserEvent>::new(&client, &base_stream.to_string());

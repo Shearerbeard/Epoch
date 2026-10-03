@@ -89,7 +89,7 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(10);
 /// it: an unset `EPOCH_PG_TEST_URL` stops the run rather than picking
 /// a database.
 fn conn_str() -> String {
-    let _ = dotenv::dotenv();
+    let _ = dotenvy::dotenv();
     std::env::var("EPOCH_PG_TEST_URL").expect(
         "EPOCH_PG_TEST_URL must be set (see .env.example; \
          `cp .env.example .env && docker compose up -d`)",

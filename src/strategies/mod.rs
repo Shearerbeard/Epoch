@@ -136,11 +136,11 @@ where
             match event_repository.append(&version, &stream, &new_evts).await {
                 Ok((appended_evts, _)) => return Ok(appended_evts),
                 Err(VersionedRepositoryError::RepoErr(e)) => {
-                    println!("Max Retries for {:?}!!", cmd);
+                    println!("Max Retries for {cmd:?}!!");
                     return Err(LoadDecideAppendError::RepositoryErr(e));
                 }
                 Err(VersionedRepositoryError::VersionConflict(_)) => {
-                    println!("RETRY #{} for {:?}!!", r, cmd);
+                    println!("RETRY #{r} for {cmd:?}!!");
                     thread::sleep(time::Duration::new(0, 100000000 * r));
                     let (mut catchup_evts, new_version) = event_repository
                         .load_from_version(&version, Some(&stream))
@@ -214,7 +214,7 @@ where
                     return Err(ReifyDecideSaveError::RepositoryErr(e))
                 }
                 Err(VersionedRepositoryError::VersionConflict(_)) => {
-                    println!("Retry #{} for {:?} - Reload State", r, cmd);
+                    println!("Retry #{r} for {cmd:?} - Reload State");
                     (state, version) = state_repository
                         .reify()
                         .await
@@ -289,7 +289,7 @@ pub enum ReifyDecideSaveError<DecideErr: Send + Sync, RepoErr> {
     RepositoryErr(RepoErr),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "in_memory"))]
 mod tests {
     use std::collections::HashMap;
 
@@ -335,7 +335,7 @@ mod tests {
 
         assert_matches!(
             evts.first().expect("one event"),
-            UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike".to_string())
+            UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike")
         );
 
         let state = UserDeciderState::load_by_id(
@@ -348,7 +348,7 @@ mod tests {
 
         assert_matches!(
             state,
-            UserDeciderState { users } if users == HashMap::from([(first_id.clone(),  User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
+            UserDeciderState { users } if users == HashMap::from([(first_id,  User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
         );
 
         let cmd2 = UserCommand::AddUser("Dmitiry".to_string());
@@ -367,7 +367,7 @@ mod tests {
 
         assert_matches!(
             evts.first().expect("one event"),
-            UserEvent::UserAdded(User { id, name, .. }) if (&second_id == id) && (name.value() == "Dmitiry".to_string())
+            UserEvent::UserAdded(User { id, name, .. }) if (&second_id == id) && (name.value() == "Dmitiry")
         );
 
         let state = UserDeciderState::load_by_id(
@@ -380,10 +380,10 @@ mod tests {
 
         assert_matches!(
             state,
-            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry".to_string()).unwrap()))])
+            UserDeciderState { users } if users == HashMap::from([(second_id,  User::new(second_id, UserName::try_from("Dmitiry".to_string()).unwrap()))])
         );
 
-        let cmd3 = UserCommand::UpdateUserName(second_id.clone(), "Dmitiry2".to_string());
+        let cmd3 = UserCommand::UpdateUserName(second_id, "Dmitiry2".to_string());
         let evts = UserDecider::execute(
             UserDeciderState::default(),
             &mut event_repository,
@@ -410,11 +410,10 @@ mod tests {
 
         assert_matches!(
             state,
-            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))])
+            UserDeciderState { users } if users == HashMap::from([(second_id,  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))])
         );
 
-        let cmd4 =
-            UserCommand::UpdateUserName(second_id.clone(), "DmitiryWayToLongToSucceed".to_string());
+        let cmd4 = UserCommand::UpdateUserName(second_id, "DmitiryWayToLongToSucceed".to_string());
 
         let res = UserDecider::execute(
             UserDeciderState::default(),
@@ -428,7 +427,7 @@ mod tests {
 
         assert_matches!(
             res,
-            Err(LoadDecideAppendError::DecideErr(UserDeciderError::UserField(UserFieldError::NameToLong(n)))) if n == "DmitiryWayToLongToSucceed".to_string()
+            Err(LoadDecideAppendError::DecideErr(UserDeciderError::UserField(UserFieldError::NameToLong(n)))) if n == "DmitiryWayToLongToSucceed"
         );
 
         let state = UserDeciderState::load_by_id(
@@ -441,7 +440,7 @@ mod tests {
 
         assert_matches!(
             state,
-            UserDeciderState { users } if users == HashMap::from([(second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))])
+            UserDeciderState { users } if users == HashMap::from([(second_id,  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))])
         );
 
         let state = UserDeciderState::load(UserDeciderState::default(), &event_repository)
@@ -451,8 +450,8 @@ mod tests {
         assert_matches!(
             state,
             UserDeciderState { users } if users == HashMap::from([
-                (first_id.clone(), User::new(first_id, UserName::try_from("Mike".to_string()).unwrap())),
-                (second_id.clone(),  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))
+                (first_id, User::new(first_id, UserName::try_from("Mike".to_string()).unwrap())),
+                (second_id,  User::new(second_id, UserName::try_from("Dmitiry2".to_string()).unwrap()))
                 ])
         );
     }

@@ -752,7 +752,7 @@ async fn run_case(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "bench harness: owner-only against an epoch_e19_bench_* database"]
 async fn funnel_bench() {
-    let _ = dotenv::dotenv();
+    let _ = dotenvy::dotenv();
     let config = Config::from_env().unwrap_or_else(|error| panic!("bench config refused: {error}"));
     println!(
         "funnel_bench: mode={:?} profile={:?} ops={} rounds={} budget={:?}",

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install supported Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+      - name: Format
+        run: cargo +1.88.0 fmt --check
+      - name: Lint all targets and features
+        run: cargo +1.88.0 clippy --locked --all-targets --all-features -- -D warnings
+      - name: Test without backends
+        run: cargo +1.88.0 test --locked --no-default-features
+      - name: Check README doctest and example
+        run: cargo +1.88.0 test --locked --doc && cargo +1.88.0 run --locked --no-default-features --example counter
+      - name: Check publishable archive
+        run: cargo +1.88.0 publish --dry-run --locked
+
+  backends:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install supported Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Start test services
+        run: |
+          cp .env.example .env
+          docker compose up -d
+          for attempt in $(seq 1 60); do
+            if ( </dev/tcp/127.0.0.1/2113 ) 2>/dev/null &&
+               ( </dev/tcp/127.0.0.1/6379 ) 2>/dev/null &&
+               ( </dev/tcp/127.0.0.1/54321 ) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          exit 1
+      - name: Test default backends
+        run: cargo +1.88.0 test --locked
+      - name: Test every backend
+        run: cargo +1.88.0 test --locked --all-features
+      - name: Stop test services
+        if: always()
+        run: docker compose down

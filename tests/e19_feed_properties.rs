@@ -168,7 +168,7 @@ mod postgres_properties {
     use super::Noted;
 
     fn conn_str() -> String {
-        let _ = dotenv::dotenv();
+        let _ = dotenvy::dotenv();
         std::env::var("EPOCH_PG_TEST_URL")
             .expect("EPOCH_PG_TEST_URL must be set (see .env.example)")
     }

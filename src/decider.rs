@@ -30,7 +30,7 @@ pub trait Evolver {
     fn evolve(state: Self::State, event: &Self::Evt) -> Self::State;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "in_memory"))]
 mod tests {
 
     use assert_matches::assert_matches;

@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 pub mod decider;
 pub mod repository;
 pub mod strategies;

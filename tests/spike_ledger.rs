@@ -55,7 +55,7 @@ const BATCH_EVENTS_PER_STREAM: usize = 2;
 /// A parsed connection string; there is no safe default database, so
 /// an unset variable must stop the run rather than pick one.
 fn conn_str() -> String {
-    let _ = dotenv::dotenv();
+    let _ = dotenvy::dotenv();
     std::env::var("EPOCH_PG_TEST_URL").expect("EPOCH_PG_TEST_URL must be set (see .env.example)")
 }
 

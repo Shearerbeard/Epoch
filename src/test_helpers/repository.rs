@@ -172,7 +172,7 @@ pub(crate) async fn versioned_event_repository_with_streams_occ_spec<
 
     assert_matches!(
         evts.first().expect("one event"),
-        UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike".to_string())
+        UserEvent::UserAdded(User { id, name, .. }) if (&first_id == id) && (name.value() == "Mike")
     );
 
     let state = UserDeciderState::load_by_id(
@@ -185,7 +185,7 @@ pub(crate) async fn versioned_event_repository_with_streams_occ_spec<
 
     assert_matches!(
         state,
-        UserDeciderState { users } if users == HashMap::from([(first_id.clone(), User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
+        UserDeciderState { users } if users == HashMap::from([(first_id, User::new(first_id, UserName::try_from("Mike".to_string()).unwrap()))])
     );
 
     let guitars = vec![
@@ -221,7 +221,7 @@ pub(crate) async fn versioned_event_repository_with_streams_occ_spec<
     let futures = guitars
         .iter()
         .cloned()
-        .map(|g| add_guitar(event_repository.clone(), first_id.clone(), g).boxed())
+        .map(|g| add_guitar(event_repository.clone(), first_id, g).boxed())
         .collect::<Vec<BoxFuture<()>>>();
 
     future::join_all(futures).await;

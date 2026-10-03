@@ -1,9 +1,9 @@
-//! The event feed (ADR 0010, post-pivot shape): consumer groups with
-//! durable cursors over the committed log, at-least-once delivery,
-//! and monotonic acknowledgement.
+//! Event feeds deliver at least once and track acknowledgements per
+//! consumer group. PostgreSQL persists its cursor; the in-memory
+//! cursor lives only as long as its database root.
 //!
-//! Every event transaction funnels through one serialized writer, so
-//! insert order is commit order by construction and the cursor is a
+//! PostgreSQL funnels event transactions through one serialized writer,
+//! so insert order is commit order and the cursor is a
 //! plain maximum over `global_sequence`. A committed event below the
 //! log's maximum is always visible (nothing may be in flight below a
 //! committed value under one writer), so a cursor that reads
@@ -46,7 +46,7 @@ impl FeedPosition {
 #[error("zero is not a 1-based feed position")]
 pub struct ZeroPosition;
 
-/// A consumer group's durable watermark: the highest position the
+/// A consumer group's watermark: the highest position the
 /// group has acknowledged. `START` (zero) is the group's state before
 /// it acknowledges anything. Monotonicity is a store-enforced rule,
 /// not a property of the value: an ack that would move the cursor
