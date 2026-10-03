@@ -1,6 +1,6 @@
 [package]
 name = "epoch-journal"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Event sourcing with deciders and pluggable event repositories"
@@ -29,7 +29,10 @@ rusty_ulid = "2.0.0"
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = { version = "1.0.81", optional = true }
 thiserror = "1.0"
-uuid =  { package = "uuid", version = "1.2.2", features = ["v4", "serde"], optional = true }
+# Capped below 1.27, whose rust-version (1.89) exceeds the declared
+# floor; a fresh default-feature resolution on Rust 1.88 broke when
+# 1.27 published. Lift the cap when the floor rises.
+uuid =  { package = "uuid", version = ">=1.2.2, <1.27", features = ["v4", "serde"], optional = true }
 tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
 bb8 = { version = "0.8", optional = true }
 bb8-postgres = { version = "0.8", optional = true }

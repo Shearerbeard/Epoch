@@ -28,6 +28,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - None
 
+## [0.1.1] - 2026-10-03
+
+Corrective release: keeps the declared Rust 1.88 floor true for
+default-feature consumers.
+
+### Fixed
+- Cap the `uuid` requirement below 1.27, whose rust-version (1.89)
+  exceeded this crate's floor. Before the cap, a fresh resolution of
+  0.1.0 with default features on Rust 1.88 selected uuid 1.27 and
+  failed to build; it now selects 1.26.x and builds.
+
+### Changed
+- Commit Cargo.lock and build CI `--locked`, so a dependency release
+  can no longer change what CI resolves; consumers resolve their own
+  lock and are unaffected.
+- Tag-driven publish workflow with a README "Publishing
+  (maintainers)" runbook; CONTRIBUTING.md added.
+
 ## [0.1.0] - 2026-10-02
 
 First crates.io release of `epoch-journal` (the Rust import stays
