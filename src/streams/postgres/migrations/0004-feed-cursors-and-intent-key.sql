@@ -17,9 +17,10 @@ CREATE TABLE epoch_feed_cursors (
 -- rests on (ADR 0010 keyed envelope seam): within the outbox
 -- category, an intent key may appear on exactly one event, so a
 -- redelivered source event re-appending the same intent is rejected
--- by storage as a duplicate. The category name is indicative until
--- the runner card's gate A pins final naming; a rename lands as its
--- own migration step. Events carrying no intent key are untouched -
+-- by storage as a duplicate. The category and metadata key are
+-- framework-owned; existing duplicate keys in that category fail
+-- index creation rather than being silently accepted. A rename
+-- needs its own migration. Events carrying no intent key are untouched -
 -- unique indexes treat the NULL expression as distinct.
 CREATE UNIQUE INDEX stream_events_outbox_intent
     ON stream_events ((event_metadata->>'intent'))

@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape the write path stores
 
 ### Changed
+- Clarify the saga and outbox API documentation and rename the live
+  PostgreSQL replay test target to `saga_outbox_postgres`.
 - Single-writer funnel: every event transaction (single append and atomic
   batch) now takes one global advisory lock, making insert order commit
   order (ADR 0010 pivot)

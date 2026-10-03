@@ -25,8 +25,8 @@ use super::support::{
 async fn crash_between_append_and_ack_rejects_the_duplicate_intent() {
     under_deadline(async {
         let rig = Rig::new().await;
-        let saga_id = unique("e20-dup-saga");
-        let ledger_stream = unique("e20-ledger");
+        let saga_id = unique("duplicate-intent-saga");
+        let ledger_stream = unique("saga-ledger");
         let position = rig.place_on("o-1", Src::Placed { item: 7 }).await;
 
         // The crashed attempt's minted keys, recomputed by hand from
@@ -131,8 +131,8 @@ async fn crash_between_append_and_ack_rejects_the_duplicate_intent() {
 async fn replayed_no_stream_command_acks_through_the_conflict_path() {
     under_deadline(async {
         let rig = Rig::new().await;
-        let saga_id = unique("e20-nostr-saga");
-        let ledger_stream = unique("e20-ledger");
+        let saga_id = unique("no-stream-saga");
+        let ledger_stream = unique("saga-ledger");
         let position = rig.place_on("o-1", Src::Placed { item: 11 }).await;
 
         let key0 = rendered(&saga_id, &rig.source_category, "o-1", position.get(), 0);
@@ -232,8 +232,8 @@ async fn replayed_no_stream_command_acks_through_the_conflict_path() {
 async fn a_real_conflict_on_postgres_surfaces() {
     under_deadline(async {
         let rig = Rig::new().await;
-        let saga_id = unique("e20-conflict-saga");
-        let ledger_stream = unique("e20-ledger");
+        let saga_id = unique("conflict-saga");
+        let ledger_stream = unique("saga-ledger");
 
         // The ledger stream already moved: the saga's NoStream arm can
         // never land.
@@ -301,7 +301,7 @@ async fn a_real_conflict_on_postgres_surfaces() {
 async fn executor_crash_between_perform_and_done_replays_to_a_dedupe() {
     under_deadline(async {
         let rig = Rig::new().await;
-        let saga_id = unique("e20-exec-saga");
+        let saga_id = unique("executor-saga");
         let position = rig.place_on("o-1", Src::Placed { item: 30 }).await;
 
         // One intent, committed by a real runner step.
@@ -424,7 +424,7 @@ async fn executor_crash_between_perform_and_done_replays_to_a_dedupe() {
 async fn repeated_failure_parks_and_fires_the_hook_on_postgres() {
     under_deadline(async {
         let rig = Rig::new().await;
-        let saga_id = unique("e20-park-saga");
+        let saga_id = unique("park-saga");
         let position = rig.place_on("o-1", Src::Placed { item: 60 }).await;
 
         // One intent, committed by a real runner step.

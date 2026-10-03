@@ -1,18 +1,6 @@
-//! The outbox executor (ADR 0010's outbox-saga section): a generic
-//! runtime driving the outbox loop - poll the event feed, perform
-//! each intent through the caller-supplied port, append the outcome
-//! record. Delivery is ordered at-least-once; idempotency is the
-//! consumer's documented obligation.
-//!
-//! Each intent carries a per-intent retry budget (default 5,
-//! exponential backoff) derived durably from the stream's own
-//! `Failed` records for the intent key, so it survives executor
-//! crashes. Inside the window the group cursor HOLDS at the failing
-//! intent - backoff-bounded blocking with order preserved; on
-//! exhaustion the intent parks TERMINAL-FAILED, the compensation hook
-//! fires once at park time, and the group advances past permanently.
-//! Every write goes through the store's append path, so the
-//! single-writer funnel's assumptions bind deployments unchanged.
+//! Execute effect intents from the saga outbox with ordered,
+//! at-least-once delivery. Ports and compensation hooks must dedupe
+//! by intent key after a crash and replay.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -28,51 +16,35 @@ use super::keys::{RenderedIntentKey, SagaId};
 use super::retry::{BackoffSchedule, RetryBudget, RetryPolicy};
 use super::{AppendError, EventBatch, EventStreams, ExpectedVersion, StreamState};
 
-/// The outbox stream category, pinned framework-owned by ADR 0010's
-/// outbox-saga section: the storage-level uniqueness index
-/// (`0004-feed-cursors-and-intent-key.sql`) reads this name, so a
-/// rename lands as its own migration step.
+/// Reserved outbox category. The PostgreSQL uniqueness index reads this
+/// name; renaming it needs a schema migration.
 pub const OUTBOX_CATEGORY: &str = "saga-outbox";
 
-/// The envelope key an intent's identity rides. The storage-level
-/// uniqueness index reads exactly this expression
-/// (`event_metadata->>'intent'`), so the key name is framework-owned
-/// and never consumer-configurable.
+/// Reserved metadata key read by the PostgreSQL intent-uniqueness index.
 pub const INTENT_METADATA_KEY: &str = "intent";
 
-/// One record on a saga's outbox stream: an effect intent, or the
-/// executor's outcome for one. Every record carries the intent key in
-/// its PAYLOAD - the executor never reads envelopes - while `Intent`
-/// records carry it in the ENVELOPE too, because the uniqueness index
-/// reads `event_metadata->>'intent'`; an outcome envelope key would
-/// trip that same index.
-///
-/// One category holds one event type, so every saga sharing this
-/// category shares the effect payload type `F`: a deployment with
-/// several sagas defines one consumer-wide effect enum.
+/// Outbox intent and outcome records. Only intents carry the key in
+/// their envelope: repeating that metadata on outcomes would trip
+/// the PostgreSQL uniqueness index. All sagas in this category share
+/// one effect payload type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Record<F> {
-    /// An effect intent, appended by the saga runner inside the
-    /// reaction's atomic batch.
+pub enum Record<Effect> {
+    /// An effect request committed with its command reactions.
     Intent {
         intent: RenderedIntentKey,
-        request: F,
+        request: Effect,
     },
     Done {
         intent: RenderedIntentKey,
     },
-    /// One perform attempt failed. The count of `Failed` records for
-    /// a key IS the retry budget's durable state: it survives
-    /// executor crashes because it is the stream itself.
+    /// A failed attempt; its count per key survives executor crashes.
     Failed {
         intent: RenderedIntentKey,
         /// The port's error, rendered; diagnostic only.
         error: String,
     },
-    /// TERMINAL-FAILED: the retry budget is exhausted and the group
-    /// advances past this intent permanently. Carries the key so a
-    /// crash between parking and ack replays as a no-op append. An
-    /// audit fact, not a second trigger.
+    /// Terminal failure after the retry budget is exhausted. The key
+    /// makes a replay after parking recognizable without a second append.
     Parked {
         intent: RenderedIntentKey,
         /// The durable failed-attempt count at park time.
@@ -82,7 +54,7 @@ pub enum Record<F> {
     },
 }
 
-impl<F> Event for Record<F> {
+impl<Effect> Event for Record<Effect> {
     type EntityId = ();
 
     fn event_type(&self) -> String {
@@ -104,29 +76,33 @@ impl<F> Event for Record<F> {
 /// by the intent key - two distinct reactions may carry identical
 /// payloads, so the key is the only replay-safe identity.
 #[trait_variant::make(Send)]
-pub trait EffectPort<F> {
+pub trait EffectPort<Effect> {
     /// Port failure type; rendered onto the `Failed` record as
     /// diagnostic text.
     type Error: std::error::Error + Send + Sync;
 
     /// `intent` is the port's idempotency identity.
-    async fn perform(&self, intent: &RenderedIntentKey, request: &F) -> Result<(), Self::Error>;
+    async fn perform(
+        &self,
+        intent: &RenderedIntentKey,
+        request: &Effect,
+    ) -> Result<(), Self::Error>;
 }
 
 /// What the compensation hook learns at park time: the parked intent,
 /// its durable attempt count, and the last failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParkedNotice<F> {
+pub struct ParkedNotice<Effect> {
     key: RenderedIntentKey,
-    request: F,
+    request: Effect,
     attempts: NonZeroU32,
     error: String,
 }
 
-impl<F> ParkedNotice<F> {
+impl<Effect> ParkedNotice<Effect> {
     pub(crate) fn new(
         key: RenderedIntentKey,
-        request: F,
+        request: Effect,
         attempts: NonZeroU32,
         error: String,
     ) -> Self {
@@ -143,7 +119,7 @@ impl<F> ParkedNotice<F> {
     }
 
     /// The effect payload that never landed.
-    pub fn request(&self) -> &F {
+    pub fn request(&self) -> &Effect {
         &self.request
     }
 
@@ -162,39 +138,41 @@ impl<F> ParkedNotice<F> {
 /// on replay, so the hook carries the same idempotency obligation
 /// effects carry.
 #[trait_variant::make(Send)]
-pub trait CompensationHook<F> {
+pub trait CompensationHook<Effect> {
     /// Hook failure type; surfaces as [`ExecutorError::Hook`].
     type Error: std::error::Error + Send + Sync;
 
-    async fn on_parked(&self, notice: &ParkedNotice<F>) -> Result<(), Self::Error>;
+    async fn on_parked(&self, notice: &ParkedNotice<Effect>) -> Result<(), Self::Error>;
 }
 
-/// The executor: polls the outbox category as the saga's executor
-/// group, performs each of the saga's intents through the port, and
-/// appends the outcome. Entries from other sagas' streams in the
-/// category, and outcome records, are skipped and acked past.
-///
-/// Type parameters: `Fe` the outbox feed, `St` the outbox stream's
-/// store view (outcome appends and the failure count), `P` the port,
-/// `K` the compensation hook, `F` the effect payload.
-pub struct Executor<Fe, St, P, K, F> {
-    feed: Fe,
-    store: St,
-    port: P,
-    hook: K,
+/// Consumes one saga's intents from the shared outbox category. Other
+/// sagas' entries and outcome records advance the cursor without
+/// invoking the port.
+pub struct Executor<Feed, Store, Port, Hook, Effect> {
+    feed: Feed,
+    store: Store,
+    port: Port,
+    hook: Hook,
     saga: SagaId,
     group: ConsumerGroup,
     saga_key: String,
     policy: RetryPolicy,
-    _marker: PhantomData<fn() -> F>,
+    _marker: PhantomData<fn() -> Effect>,
 }
 
-impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F> {
+impl<Feed, Store, Port, Hook, Effect> Executor<Feed, Store, Port, Hook, Effect> {
     /// Assemble an executor for one saga's outbox stream. The group
     /// derives from the saga id: one executor group per saga, its
     /// cursor independent of the runner's (group progress is scoped
     /// per category).
-    pub fn new(feed: Fe, store: St, port: P, hook: K, saga: SagaId, policy: RetryPolicy) -> Self {
+    pub fn new(
+        feed: Feed,
+        store: Store,
+        port: Port,
+        hook: Hook,
+        saga: SagaId,
+        policy: RetryPolicy,
+    ) -> Self {
         let group = ConsumerGroup::new(saga.as_str()).expect("a saga id is nonempty group name");
         let saga_key = saga.as_str().to_owned();
         Self {
@@ -236,24 +214,19 @@ struct DurableState {
     parked: Option<(NonZeroU32, String)>,
 }
 
-impl<Fe, St, P, K, F> Executor<Fe, St, P, K, F>
+impl<Feed, Store, Port, Hook, Effect> Executor<Feed, Store, Port, Hook, Effect>
 where
-    Fe: EventFeed<Record<F>>,
-    St: EventStreams<Record<F>, Id = String>,
-    P: EffectPort<F>,
-    K: CompensationHook<F>,
-    F: Send + Sync + fmt::Debug,
+    Feed: EventFeed<Record<Effect>>,
+    Store: EventStreams<Record<Effect>, Id = String>,
+    Port: EffectPort<Effect>,
+    Hook: CompensationHook<Effect>,
+    Effect: Send + Sync + fmt::Debug,
 {
-    /// One poll-perform-record cycle over up to `limit` delivered
-    /// entries. This saga's intents perform through the port - the key
-    /// read from the record's payload, never the envelope - with
-    /// `Done`/`Failed`/`Parked` recording the outcome; other sagas'
-    /// streams in the shared category and outcome records are skipped
-    /// and acked past.
+    /// Process up to `limit` entries, recording outcomes before acking.
     pub async fn step(
         &self,
         limit: PollLimit,
-    ) -> Result<ExecutorStep, ExecutorError<K::Error, Fe::Error, St::Error>> {
+    ) -> Result<ExecutorStep, ExecutorError<Hook::Error, Feed::Error, Store::Error>> {
         let entries = self
             .feed
             .poll(&self.group, limit)
@@ -293,19 +266,15 @@ where
         })
     }
 
-    /// Work one of this saga's intents: settle from the stream's
-    /// durable state when the budget is already spent - a standing
-    /// park re-fires the idempotent hook and acks; a spent count with
-    /// no park parks now, the port never asked past the budget.
-    /// Otherwise perform through the port and record the outcome.
-    /// Returns the held key when the failure stays inside the retry
-    /// window.
+    /// On replay, settle a standing park before calling the port again.
+    /// A failed attempt within the retry budget holds the cursor.
     async fn work_intent(
         &self,
         position: FeedPosition,
         intent: RenderedIntentKey,
-        request: F,
-    ) -> Result<Option<RenderedIntentKey>, ExecutorError<K::Error, Fe::Error, St::Error>> {
+        request: Effect,
+    ) -> Result<Option<RenderedIntentKey>, ExecutorError<Hook::Error, Feed::Error, Store::Error>>
+    {
         let state = self.durable_state(&intent).await?;
         if let Some((attempts, error)) = state.parked {
             self.settle_park(position, &intent, request, attempts, error)
@@ -364,13 +333,11 @@ where
         }
     }
 
-    /// The intent's durable retry state, read from the saga's own
-    /// stream: its `Failed` count for the key, the last failure, and
-    /// a standing `Parked` record if the park already landed.
+    /// Rebuild one intent's retry state from the stored outcome records.
     async fn durable_state(
         &self,
         intent: &RenderedIntentKey,
-    ) -> Result<DurableState, ExecutorError<K::Error, Fe::Error, St::Error>> {
+    ) -> Result<DurableState, ExecutorError<Hook::Error, Feed::Error, Store::Error>> {
         let stored = match self.store.load_stream(&self.saga_key).await {
             Ok(StreamState::Present(batch)) => batch.into_records(),
             Ok(StreamState::Missing) => Vec::new(),
@@ -402,15 +369,15 @@ where
         Ok(state)
     }
 
-    /// Append the `Parked` record, then settle the park.
+    /// Persist the park before invoking the hook.
     async fn park(
         &self,
         position: FeedPosition,
         intent: &RenderedIntentKey,
-        request: F,
+        request: Effect,
         attempts: NonZeroU32,
         error: String,
-    ) -> Result<(), ExecutorError<K::Error, Fe::Error, St::Error>> {
+    ) -> Result<(), ExecutorError<Hook::Error, Feed::Error, Store::Error>> {
         self.append_outcome(Record::Parked {
             intent: intent.clone(),
             attempts,
@@ -421,18 +388,15 @@ where
             .await
     }
 
-    /// Fire the compensation hook and ack past the intent. A crash
-    /// between the park append and the hook re-fires it here on
-    /// replay - the hook carries the same idempotency obligation the
-    /// port does.
+    /// Replays can invoke the hook again after a persisted park.
     async fn settle_park(
         &self,
         position: FeedPosition,
         intent: &RenderedIntentKey,
-        request: F,
+        request: Effect,
         attempts: NonZeroU32,
         error: String,
-    ) -> Result<(), ExecutorError<K::Error, Fe::Error, St::Error>> {
+    ) -> Result<(), ExecutorError<Hook::Error, Feed::Error, Store::Error>> {
         let notice = ParkedNotice::new(intent.clone(), request, attempts, error);
         self.hook
             .on_parked(&notice)
@@ -442,13 +406,12 @@ where
         Ok(())
     }
 
-    /// Append one outcome record to the saga's outbox stream. The
-    /// append error stays whole: a lock timeout remains retryable, a
-    /// conflict does not.
+    /// Preserve the append error so callers can distinguish retryable
+    /// lock timeouts from conflicts.
     async fn append_outcome(
         &self,
-        record: Record<F>,
-    ) -> Result<(), ExecutorError<K::Error, Fe::Error, St::Error>> {
+        record: Record<Effect>,
+    ) -> Result<(), ExecutorError<Hook::Error, Feed::Error, Store::Error>> {
         let batch = EventBatch::new(vec![record]).expect("one event is nonempty");
         self.store
             .append(ExpectedVersion::Any, &self.saga_key, &batch)
@@ -456,14 +419,12 @@ where
         Ok(())
     }
 
-    /// The poll loop: `step` forever, sleeping `interval` between
-    /// polls. Errors propagate; restarting the loop is the operator's
-    /// call.
+    /// Poll until an error; callers decide whether to restart.
     pub async fn run(
         &self,
         limit: PollLimit,
         interval: std::time::Duration,
-    ) -> Result<(), ExecutorError<K::Error, Fe::Error, St::Error>> {
+    ) -> Result<(), ExecutorError<Hook::Error, Feed::Error, Store::Error>> {
         loop {
             self.step(limit).await?;
             tokio::time::sleep(interval).await;
@@ -471,7 +432,7 @@ where
     }
 }
 
-/// What one [`Executor::step`] did.
+/// Result of one executor poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutorStep {
     /// The poll delivered nothing; the cursor did not move.

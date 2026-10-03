@@ -1,8 +1,4 @@
-//! The saga identity family (ADR 0010's outbox-saga section): the
-//! saga id, the deterministic intent key minted per reaction, and the
-//! key's canonical rendered form. Rendering is injective by the
-//! documented escaping rule, so a storage-level duplicate rejection
-//! can never be a false positive.
+//! Saga identity and the canonical key minted for each reaction.
 
 use std::fmt;
 
@@ -12,15 +8,12 @@ use thiserror::Error;
 use super::batch::StreamRef;
 use super::feed::FeedPosition;
 
-/// A saga's identity: the runner's consumer-group name, the saga's
-/// outbox stream key, and the first component of every intent key the
-/// runner mints for it. Non-empty, because an anonymous saga cannot be
-/// told apart from a forgotten argument.
+/// Non-empty saga identity, shared by the runner's group and outbox stream.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SagaId(String);
 
 impl SagaId {
-    /// Parse a saga id; the empty string is not one.
+    /// Reject an empty saga id at construction.
     pub fn new(id: impl Into<String>) -> Result<Self, EmptySagaId> {
         let id = id.into();
         if id.is_empty() {
@@ -52,9 +45,7 @@ impl AsRef<str> for SagaId {
 #[error("a saga id must not be empty")]
 pub struct EmptySagaId;
 
-/// A reaction's position within one `react` output: the index that
-/// distinguishes two reactions of the same source event from each
-/// other. Zero-based, matching the vector the saga returned.
+/// A zero-based index into one `react` output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ReactionIndex(u64);
 
@@ -68,17 +59,8 @@ impl ReactionIndex {
     }
 }
 
-/// The deterministic identity of one reaction append (ADR 0010's
-/// reaction-identity rule): the saga, the source event's stream, the
-/// source event's committed position, and the reaction's index in that
-/// event's `react` output. A redelivered source event re-mints exactly
-/// the same keys, which is what makes storage's duplicate rejection a
-/// no-op signal rather than a failure.
-///
-/// ADR 0010's "source sequence" is realized as the source entry's
-/// committed-log position: the feed delivers positions, not per-stream
-/// sequences, and the position is unique per source event and stable
-/// under redelivery.
+/// Identifies one reaction by saga, source stream, committed feed
+/// position, and reaction index. Feed positions are stable on replay.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct IntentKey {
     saga: SagaId,
@@ -104,12 +86,8 @@ impl IntentKey {
         }
     }
 
-    /// Render the key to its canonical envelope form. The rule: inside
-    /// every component `\` renders as `\\` and `/` as `\/`, then the
-    /// components join with `/` as `saga/category/key/position/index`.
-    /// Escaping makes the rendering injective: two distinct keys never
-    /// render equal, so a duplicate rejection can never be a false
-    /// positive.
+    /// Escape `\` and `/` within components, then join them with `/`.
+    /// Distinct structured keys cannot render to the same string.
     pub fn render(&self) -> RenderedIntentKey {
         RenderedIntentKey::from_rendered(format!(
             "{}/{}/{}/{}/{}",
@@ -126,9 +104,9 @@ fn escape_key_component(component: &str) -> String {
     component.replace('\\', "\\\\").replace('/', "\\/")
 }
 
-/// An intent key in its canonical rendered form: the string that rides
-/// the `intent` envelope key and the outbox outcome payloads. Compared
-/// bytewise, never parsed - the structured form is `IntentKey`.
+/// Owned, serialized identity carried across event storage and the
+/// effect port. The runner mints canonical keys; stored records
+/// deserialize them without parsing or validating their components.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RenderedIntentKey(String);
@@ -138,9 +116,8 @@ impl RenderedIntentKey {
         &self.0
     }
 
-    /// Wrap an already-rendered key. `IntentKey::render` is the only
-    /// production source; stored facts are trusted at the read
-    /// boundary, as any stored payload is.
+    /// Wrap a canonical key minted by the runner. Stored keys are
+    /// deserialized through the same transparent representation.
     pub(crate) fn from_rendered(rendered: String) -> Self {
         Self(rendered)
     }

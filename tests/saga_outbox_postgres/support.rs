@@ -1,5 +1,4 @@
-//! The shared postgres harness: the consumer's types, the scripted
-//! saga, the fold, the port, the hook, the rig, and the matchers.
+//! Consumer types and fixtures shared by the PostgreSQL replay tests.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -51,7 +50,7 @@ pub(super) enum Src {
     Placed {
         item: u32,
     },
-    #[allow(dead_code)] // the golden harness's shape, kept whole
+    #[allow(dead_code)] // also exercises the variant's wire shape
     Cancelled {
         item: u32,
     },
@@ -90,7 +89,7 @@ pub(super) enum Fx {
     Export {
         item: u32,
     },
-    #[allow(dead_code)] // the golden harness's shape, kept whole
+    #[allow(dead_code)] // wire-format parity covers this variant
     Notify {
         item: u32,
     },
@@ -110,8 +109,7 @@ impl Event for Fx {
 // The consumer's saga, fold, port, and hook
 // ---------------------------------------------------------------------------
 
-/// A saga whose `react` is a scripted table: pure by construction,
-/// the same event always yields the same reactions.
+/// Replays the same reactions for the same source event.
 pub(super) struct Scripted {
     id: SagaId,
     script: HashMap<Src, Vec<Reaction<Cmd, Fx>>>,
@@ -153,11 +151,8 @@ impl fmt::Display for FoldErr {
 
 impl std::error::Error for FoldErr {}
 
-/// The consumer's fold over the postgres batch builder: erases typed
-/// payloads at push, copies the payload key onto `Intent` records,
-/// and attaches each record's envelope unchanged, per the
-/// `ReactionFold` contract. Stateless: nothing to share across
-/// clones.
+/// Exercises the consumer's obligation to preserve each envelope and
+/// copy each intent key into its payload.
 pub(super) struct PgFold;
 
 impl ReactionFold<PgBatchBuilder> for PgFold {
@@ -249,13 +244,8 @@ impl PortErr {
 #[derive(Debug)]
 pub(super) struct SimulatedCrash;
 
-/// A port that records every perform, applies the "external effect"
-/// only the FIRST time a key is seen (the dedupe set that absorbs
-/// at-least-once redelivery at the port, not the framework), can be
-/// scripted to fail a fixed number of attempts per key, and can be
-/// poisoned to crash - `panic_any` - on the perform that applies a
-/// given key, which is the crash between the external call and the
-/// outcome append. Clones share the record.
+/// Simulates an external effect with key-based deduplication. Failure
+/// and crash scripts exercise retries and the perform-to-append window.
 #[derive(Clone, Default)]
 pub(super) struct Port {
     pub(super) calls: Arc<Mutex<Vec<(String, Fx)>>>,
@@ -350,11 +340,8 @@ impl CompensationHook<Fx> for Hook {
 // The rig
 // ---------------------------------------------------------------------------
 
-/// One pool over the live compose postgres, migrated once, with the
-/// store and feed views the runner, the executor, and the assertions
-/// need. The source category is per-run unique, so the source feed
-/// sees only this run's rows; the outbox category is the shared
-/// framework-owned one, so executor polls see foreign backlogs.
+/// Shared PostgreSQL pool and per-run source category. Outbox entries
+/// from earlier runs remain visible to the executor feed.
 pub(super) struct Rig {
     pub(super) source_category: String,
     pub(super) db: PgDatabase,
@@ -376,7 +363,7 @@ impl Rig {
         let pool = pool_from_conn_str(&conn_str())
             .await
             .expect("pg pool from EPOCH_PG_TEST_URL");
-        let source_category = unique("e20-src");
+        let source_category = unique("saga-src");
         let source: PgEventStreams<String, Src> =
             PgEventStreams::new(pool.clone(), &source_category);
         source.migrate().await.expect("schema migrates");
