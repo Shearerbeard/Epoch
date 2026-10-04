@@ -10,22 +10,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install supported Rust toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
       - name: Format
-        run: cargo +1.88.0 fmt --check
+        run: cargo +1.95.0 fmt --check
       - name: Lint all targets and features
-        run: cargo +1.88.0 clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo +1.95.0 clippy --locked --all-targets --all-features -- -D warnings
       - name: Test without backends
-        run: cargo +1.88.0 test --locked --no-default-features
+        run: cargo +1.95.0 test --locked --no-default-features
       - name: Check README doctest and example
-        run: cargo +1.88.0 test --locked --doc && cargo +1.88.0 run --locked --no-default-features --example counter
+        run: cargo +1.95.0 test --locked --doc && cargo +1.95.0 run --locked --no-default-features --example counter
 
   backends:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install supported Rust toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal
+        run: rustup toolchain install 1.95.0 --profile minimal
       - name: Start test services
         run: |
           cp .env.example .env
@@ -41,9 +41,9 @@ jobs:
           docker compose ps
           exit 1
       - name: Test default backends
-        run: cargo +1.88.0 test --locked
+        run: cargo +1.95.0 test --locked
       - name: Test every backend
-        run: cargo +1.88.0 test --locked --all-features
+        run: cargo +1.95.0 test --locked --all-features
       - name: Stop test services
         if: always()
         run: docker compose down
