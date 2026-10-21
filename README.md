@@ -88,33 +88,38 @@ repository interfaces and backend implementations; `src/strategies/`
 composes repository operations with deciders. The `in_memory` feature
 needs no service. The default feature set enables `in_memory`, `esdb`
 (EventStoreDB), and `redis` (RedisJSON). `postgres` is opt-in and
-provides a PostgreSQL repository. Enable only the backend you use, for
-example:
+provides a PostgreSQL repository; `sqlite` is opt-in and provides an
+embedded SQLite repository that needs no service. Enable only the
+backend you use, for example:
 
 ```toml
 [dependencies]
-epoch = { package = "epoch-journal", version = "0.1.0", default-features = false, features = ["postgres"] }
+epoch = { package = "epoch-journal", version = "0.1.0", default-features = false, features = ["sqlite"] }
 ```
 
 This release has no `streams`, atomic-batch, feed, saga, or outbox API.
 Backend version semantics differ; consult the repository trait and
 backend implementation when moving stored events between backends.
 The PostgreSQL repository applies its schema with
-`PgEventRepository::migrate` before use. Deciders do not persist
-anything on their own.
+`PgEventRepository::migrate` before use; the SQLite repository does
+the same with `SqliteEventRepository::migrate` (open a database with
+`SqliteEventRepository::open`, or `open_in_memory` for a private
+database). Deciders do not persist anything on their own.
 
 ## Build and test
 
 Rust 1.88 or later is required. For the example and the pure domain
 surface, `cargo test --no-default-features` needs no external services.
 The default suite exercises EventStoreDB and Redis; the PostgreSQL
-tests run only with its feature enabled. From a clone of the repository:
+tests run only with its feature enabled. The SQLite tests need no
+service. From a clone of the repository:
 
 ```sh
 cp .env.example .env
 docker compose up -d
 cargo test
 cargo test --features postgres
+cargo test --features sqlite
 cargo test --doc
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
