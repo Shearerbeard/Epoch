@@ -100,7 +100,7 @@ pub trait Decider: Evolver {
 1. **Core Traits** (`src/decider.rs`) - Pure domain interfaces
 2. **Repository Abstractions** (`src/repository/`) - Persistence traits
 3. **Strategies** (`src/strategies/`) - Composition patterns (LoadDecideAppend, ReifyDecideSave)
-4. **Backend Implementations** (`src/repository/{in_memory, esdb, redis}/`) - Feature-gated implementations
+4. **Backend Implementations** (`src/repository/{in_memory, esdb, redis, postgres, sqlite}/`) - Feature-gated implementations
 
 ## Development Principles
 
@@ -119,7 +119,8 @@ pub trait Decider: Evolver {
 ### Backend Agnostic
 
 - Single trait definitions, multiple implementations
-- Feature flags: `in_memory`, `esdb`, `redis`
+- Feature flags: `in_memory`, `esdb`, `redis` (default); `postgres` and
+  `sqlite` (opt-in)
 - Swap backends without changing business logic
 
 ## Common Tasks
@@ -235,7 +236,8 @@ pub enum RepositoryVersion<V> {
 │   │   ├── in_memory/              # In-memory backend
 │   │   ├── esdb/                   # EventStoreDB backend
 │   │   ├── redis/                  # Redis backend
-│   │   └── postgres/               # PostgreSQL backend
+│   │   ├── postgres/               # PostgreSQL backend
+│   │   └── sqlite/                 # SQLite backend (opt-in feature)
 │   └── test_helpers/
 │       ├── deciders.rs             # Example UserDecider
 │       └── repository.rs           # Generic spec tests
@@ -306,6 +308,8 @@ cargo clippy -- -D warnings
 - **thiserror**: Error derivation
 - **eventstore**: EventStoreDB backend (optional)
 - **redis-om**: Redis backend (optional)
+- **tokio-postgres**: PostgreSQL backend (optional, with bb8 pooling)
+- **tokio-rusqlite**: SQLite backend (optional, bundled SQLite)
 - **actix-rt**: Test runtime (dev)
 
 ## When Working on Epoch

@@ -175,17 +175,37 @@ Before ending session:
 
 ## Session Notes
 
+**Date**: 2026-10-20
+
 **What I worked on**:
--
+- SQLite event repository backend, executed as the gated card plan
+  on branch `s4/sqlite-repository`: skeleton + two-seat design panel,
+  trait-bound spec tests written to fail on arrival, body fills
+  (migrate, load_from_version, append under `BEGIN IMMEDIATE`),
+  postgres rekeyed on the `(stream_type, stream_key)` pair, and the
+  README/CHANGELOG pass. All five card commits are on the branch.
 
 **Progress made**:
--
+- PR #22 open: https://github.com/Shearerbeard/Epoch/pull/22
+- CI green on the PR (both `rust` and `backends` jobs)
+- 8 sqlite tests including the generic spec and OCC suites by trait
+  bounds; full local matrix green incl. `cargo +1.88 check`
+- Review ledger, line-budget accounting, and query-method
+  compatibility matrix live in
+  `docs/internal/design/sqlite-repository-design.md`
 
 **Blockers or issues**:
--
+- None blocking review. Reviewer notes: the postgres table shape
+  changed, so long-lived databases need a one-time drop (the local
+  docker volume already had it); rusqlite is pinned to 0.37 because
+  0.40 declares MSRV 1.89, above the 1.88 floor; the sqlite module
+  exceeded its line cap with a per-cause accounting in the design
+  record.
 
 **Next session**:
--
+- Mike's code review of PR #22 on GitHub. Review entry points: the PR
+  diff itself, then `docs/internal/design/sqlite-repository-design.md`
+  for the panel and gate ledgers behind each decision.
 
 ---
 
