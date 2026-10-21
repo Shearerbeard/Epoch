@@ -146,12 +146,14 @@ the number.
 - `PRAGMA journal_mode=WAL` is a no-op on `:memory:` databases
   (reports back `memory`); harmless for tests, meaningful for
   file-backed use.
-- The postgres backend this module mirrors (before card 4) allocates
-  `global_sequence` at insert time, so concurrent cross-stream
-  appends can commit out of sequence order. That is a property of the
-  old repository surface; the feed's commit-ordered cursor belongs to
-  the streams surface (ADR 0010), which card 4 does not attempt to
-  backport. SQLite does not share this risk (single-writer actor).
+- The postgres backend this module mirrored originally keyed streams
+  on a concatenated name; card 4 aligned it with this module's pair
+  keying. Its `global_sequence` remains BIGSERIAL allocated at insert
+  time, so concurrent cross-stream appends can still commit out of
+  sequence order. That is a property of the old repository surface;
+  the feed's commit-ordered cursor belongs to the streams surface
+  (ADR 0010), which card 4 does not attempt to backport. SQLite does
+  not share this risk (single-writer actor).
 - Card 4 changes the postgres backend's table shape (pair keying).
   `CREATE TABLE IF NOT EXISTS` does not alter an existing table, so
   databases carrying the old `events` shape keep it until recreated;
@@ -173,4 +175,18 @@ rust-reviewer (gpt-6.1-sol); seat 2 logic/seams: frontier-reviewer
 | 5 | Coverage claim untracked; `StreamExists` arm, explicit conflict contract, empty-append pinned by no suite (2) | Fix: test module named as card-2 deliverable with the three unpinned semantics as named tests |
 | 6 | `None + Exact` category arm conflates orderings (2) | Fix: degenerate arm documented above; fill mirrors postgres comparison |
 | 7 | Seam table listed the test module as present (2) | Fix: row marked planned (card 2) |
+
+Card 3 fill gate (rust-reviewer, gpt-6.1-sol): PASS, two minor
+findings, both repaired - the ledger's open-signature claim corrected
+against the crate source (open returns rusqlite::Error; Handle is
+produced only by the envelope flatteners), and the
+independent-connections test added because the shared-actor race
+pins the outcome, not the BEGIN IMMEDIATE mechanism.
+
+Card 4 (user-directed follow-up): the postgres backend adopts the
+same pair keying - stream_type + stream_key columns, no surrogate
+id, CHECK (sequence > 0), pair-keyed advisory lock
+(pg_advisory_xact_lock(hashtext($1), hashtext($2))). Its four tests
+pass on the reshaped schema after a one-time DROP of the previous
+table in long-lived databases.
 
