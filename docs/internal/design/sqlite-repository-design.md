@@ -21,11 +21,14 @@ standing design reference.
   version comparison inside `append`, never by the driver; the type
   seam enforces this (`SqliteRepositoryError` has no conflict
   variant).
-- `tokio_rusqlite::Error` maps to `Handle` for actor-lifecycle
-  failures (connection open, actor closure). Its `Error(E)` payload
-  can duplicate a `Connection` failure; the overlap is accepted until
-  the fill card shows `call`'s true error shape, and is revisited
-  there if it can be narrowed.
+- `tokio_rusqlite::Error` envelopes every `call` result
+  (`Error<E>` wraps the unit of work's error; `ConnectionClosed` and
+  `Close` are actor-lifecycle failures). Two flatten functions resolve
+  the panel's deferred overlap at the seam: `actor_error` maps inner
+  and close failures to `Connection` and lifecycle failures to
+  `Handle`; `actor_outcome` passes append's unit-of-work failures
+  (including VersionConflict) through untouched. Underlying SQLite
+  failures always reach `Connection`, never `Handle`.
 - Panel finding dispositions live in the review ledger below.
 
 ## Concurrency model
@@ -99,27 +102,38 @@ inventing semantics the trait does not define for this arm.
 
 ## Hole inventory
 
-Baseline at the skeleton commit: `grep -rn 'todo!(' src/repository/sqlite/`
-returns `migrate`, `load_from_version`, `append`. Card 3 fills them in
-that order and must return zero. The `#[expect]` markers on
-`load_from_version` and `append` are swept by hand in the same card.
+Closed at card 3: `grep -rn 'todo!(' src/repository/sqlite/` returns
+nothing; both `#[expect]` markers and the module-level
+`#![allow(dead_code)]` are swept. Baseline (skeleton): `migrate`,
+`load_from_version`, `append`.
 
-Card 2 owns the test module (failing on arrival against the holes):
+Card 2 owned the test module (failing on arrival against the holes):
 - both generic suites by trait bounds (spec, OCC spec)
 - `load_missing_stream_reports_no_stream` (mirrors postgres)
 - `concurrent_appends_conflict_deterministically` (mirrors postgres)
 - `empty_load_on_existing_stream_reports_stream_exists` — pins the
-  two-step empty-result arm no generic suite exercises
+  two-step empty-result arm no generic suite exercises (the position
+  must be past the stream head: reads are inclusive)
 - `empty_append_returns_current_version` — pins the empty-append
   contract no generic suite exercises
-- conflict-contract assertions (`append(NoStream, existing)` ->
-  `VersionConflict`; `Exact` mismatch -> `VersionConflict` with the
-  expected `VersionDiff` contents)
+- `append_conflicts_report_expected_and_actual` — pins the
+  `VersionDiff` contents of both conflict classes
 
 ## Line budget (plan commitment, `wc -l` at cards 3–4)
 
-schema.sql 23, version.rs 19, error.rs 16, mod.rs ~360 (of which ~110
-tests). Module cap: 430.
+Planned: schema.sql 23, version.rs 19, error.rs 16, mod.rs ~360 (of
+which ~110 tests). Module cap: 430.
+
+Actual at card 3: schema.sql 32, version.rs 18, error.rs 14, mod.rs
+487 (331 code + 156 tests); module total 551. The code surface
+(schema + version + error + mod code = 395) lands inside the original
+feasibility estimate (350-400). The module cap is exceeded by 121,
+accounted: panel finding 5's three added tests (+55), the actor
+envelope flatten functions the driver's `call` signature forced at
+fill time (+33, ledger finding 4), the inclusive-position fix in the
+stream-exists test (+12), and rustfmt reflow (~21). Accepted with
+this accounting rather than cutting tests or documentation to reach
+the number.
 
 ## Residual risks
 
@@ -155,7 +169,7 @@ rust-reviewer (gpt-6.1-sol); seat 2 logic/seams: frontier-reviewer
 | 1b | `From<i64>` accepts 0/negative; proposed `TryFrom` (1) | Rejected: the failure mode is unreachable through owned paths — sequence positivity is schema-`CHECK`ed at ingress and append arithmetic starts from a schema-positive base. Fix: `CHECK (sequence > 0)` added; rule map reworded |
 | 2 | `stream_name` concatenation aliases `(type "a-b", id "c")` with `(type "a", id "b-c")` (1, also seat 2 obs. 6) | Fix: user chose the pair-keying repair (option A). `stream_name` replaced by `(stream_type, stream_key)` columns aligned with the lineage's `stream_events` vocabulary; validated against every query method (matrix above). A follow-up card (card 4) applies the same simplification to the postgres backend |
 | 3 | `Config(String)` has no producer (1, 2) | Fix: variant removed; revisit when a config-parsing operation exists |
-| 4 | `Handle` justification misstated open's error type; payload overlaps `Connection` (1) | Partially rejected: compilation proves `open` produces `tokio_rusqlite::Error`, so the variant has a real producer. Fix: design-record wording corrected; overlap revisited at fill when `call`'s error shape is visible |
+| 4 | `Handle` justification misstated open's error type; payload overlaps `Connection` (1) | Partially rejected, ledger corrected twice: tokio-rusqlite 0.7.0's `open`/`open_in_memory` return `rusqlite::Error` (verified against the crate source), so open failures route to `Connection` through `?`; `Handle`'s producers are actor-lifecycle failures only, via the envelope flatteners `actor_error`/`actor_outcome` that the fill card added |
 | 5 | Coverage claim untracked; `StreamExists` arm, explicit conflict contract, empty-append pinned by no suite (2) | Fix: test module named as card-2 deliverable with the three unpinned semantics as named tests |
 | 6 | `None + Exact` category arm conflates orderings (2) | Fix: degenerate arm documented above; fill mirrors postgres comparison |
 | 7 | Seam table listed the test module as present (2) | Fix: row marked planned (card 2) |
