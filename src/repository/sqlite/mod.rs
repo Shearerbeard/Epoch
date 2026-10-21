@@ -118,3 +118,149 @@ where
         todo!()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::test_helpers::{
+        deciders::user::{User, UserEvent, UserName},
+        repository::{
+            versioned_event_repository_with_streams_occ_spec,
+            versioned_event_repository_with_streams_spec,
+        },
+    };
+
+    // Every test builds its repository over a private in-memory
+    // database, so no stream-type namespacing or teardown is needed.
+    async fn fresh_repo() -> SqliteEventRepository<UserEvent> {
+        let repo = SqliteEventRepository::open_in_memory("spec")
+            .await
+            .expect("memory connection");
+        repo.migrate().await.expect("schema migrates");
+        repo
+    }
+
+    fn one_event(name: &str) -> Vec<UserEvent> {
+        vec![UserEvent::UserAdded(User::new(
+            1,
+            UserName::try_from(name.to_string()).expect("valid name"),
+        ))]
+    }
+
+    #[actix_rt::test]
+    async fn versioned_event_repository_with_streams_spec_sqlite() {
+        let repo = fresh_repo().await;
+        versioned_event_repository_with_streams_spec(repo, None).await;
+    }
+
+    #[actix_rt::test]
+    async fn versioned_event_repository_with_streams_occ_spec_sqlite() {
+        let repo = fresh_repo().await;
+        versioned_event_repository_with_streams_occ_spec(repo).await;
+    }
+
+    #[actix_rt::test]
+    async fn load_missing_stream_reports_no_stream() {
+        let repo = fresh_repo().await;
+        let res = repo.load(Some(&"never-written".to_string())).await;
+        assert!(matches!(res, Ok((v, RepositoryVersion::NoStream)) if v.is_empty()));
+    }
+
+    #[actix_rt::test]
+    async fn empty_load_on_existing_stream_reports_stream_exists() {
+        let mut repo = fresh_repo().await;
+        let stream_id = "one-event".to_string();
+        let (_, version) = repo
+            .append(&RepositoryVersion::NoStream, &stream_id, &one_event("Mike"))
+            .await
+            .expect("seed append");
+
+        let res = repo.load_from_version(&version, Some(&stream_id)).await;
+        assert!(matches!(res, Ok((v, RepositoryVersion::StreamExists)) if v.is_empty()));
+    }
+
+    #[actix_rt::test]
+    async fn empty_append_returns_current_version() {
+        let mut repo = fresh_repo().await;
+        let stream_id = "seeded".to_string();
+        let (_, version) = repo
+            .append(&RepositoryVersion::NoStream, &stream_id, &one_event("Mike"))
+            .await
+            .expect("seed append");
+
+        let res = repo.append(&version, &stream_id, &[]).await;
+        assert!(matches!(
+            res,
+            Ok((v, returned)) if v.is_empty() && returned == version
+        ));
+    }
+
+    #[actix_rt::test]
+    async fn append_conflicts_report_expected_and_actual() {
+        let mut repo = fresh_repo().await;
+        let stream_id = "conflict".to_string();
+        let (_, version) = repo
+            .append(&RepositoryVersion::NoStream, &stream_id, &one_event("Mike"))
+            .await
+            .expect("seed append");
+
+        // NoStream expected on an existing stream conflicts.
+        let res = repo
+            .append(
+                &RepositoryVersion::NoStream,
+                &stream_id,
+                &one_event("Stella"),
+            )
+            .await;
+        match res {
+            Err(VersionedRepositoryError::VersionConflict(diff)) => {
+                assert_eq!(diff.expected(), RepositoryVersion::NoStream);
+                assert_eq!(diff.actual(), version);
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+
+        // A stale Exact expectation conflicts with the actual head.
+        let stale = RepositoryVersion::Exact(SqliteVersion::from(7));
+        let res = repo.append(&stale, &stream_id, &one_event("Stella")).await;
+        match res {
+            Err(VersionedRepositoryError::VersionConflict(diff)) => {
+                assert_eq!(diff.expected(), stale);
+                assert_eq!(diff.actual(), version);
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+    }
+
+    #[actix_rt::test]
+    async fn concurrent_appends_conflict_deterministically() {
+        let repo = fresh_repo().await;
+        let repo_b = repo.clone();
+        let stream_id = "shared".to_string();
+
+        let (first, second) = (one_event("Mike"), one_event("Stella"));
+
+        let (res_a, res_b) = futures::future::join(
+            repo.clone()
+                .append(&RepositoryVersion::NoStream, &stream_id, &first),
+            repo_b
+                .clone()
+                .append(&RepositoryVersion::NoStream, &stream_id, &second),
+        )
+        .await;
+
+        let outcomes = [res_a, res_b];
+        let conflicts = outcomes
+            .iter()
+            .filter(|r| matches!(r, Err(VersionedRepositoryError::VersionConflict(_))))
+            .count();
+        assert_eq!(
+            conflicts, 1,
+            "exactly one racer must conflict: {outcomes:?}"
+        );
+
+        let (events, _) = repo.load(Some(&stream_id)).await.expect("stream loads");
+        assert_eq!(events.len(), 1, "only the winning append landed");
+    }
+}
