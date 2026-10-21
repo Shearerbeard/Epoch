@@ -94,8 +94,12 @@ dedupe by intent key. Effect delivery is ordered and at least once.
 
 The default features also include EventStoreDB (`esdb`) and
 RedisJSON (`redis`) for the earlier repository API. Those backends
-do not implement the new atomic-batch or feed interfaces. For an
-in-memory preview without external services:
+do not implement the new atomic-batch or feed interfaces. The
+earlier repository API also offers an opt-in SQLite backend
+(`sqlite`): an embedded repository that needs no service, opened
+with `SqliteEventRepository::open` (or `open_in_memory` for a
+private database) and migrated with `SqliteEventRepository::migrate`.
+For an in-memory preview without external services:
 
 ```toml
 epoch = { package = "epoch-journal", version = "=0.2.0-alpha.1", default-features = false, features = ["in_memory"] }
@@ -109,9 +113,10 @@ explain the batch, cursor, and outbox contracts.
 
 ## Build and test from a clone
 
-The no-default-feature tests need no external service. Default
-features exercise RedisJSON and EventStoreDB; the all-feature run
-also exercises PostgreSQL.
+The no-default-feature tests need no external service; neither do the
+SQLite tests. Default features exercise RedisJSON and EventStoreDB;
+the all-feature run also exercises PostgreSQL. Rust 1.88 or later is
+required.
 The repository's `.env.example` lists the fixture connections:
 
 ```sh
@@ -119,6 +124,7 @@ cargo +1.88 test --locked --no-default-features
 cp .env.example .env
 docker compose up -d
 cargo +1.88 test --locked
+cargo +1.88 test --locked --features sqlite
 cargo +1.88 test --locked --all-features
 cargo +1.88 fmt --check
 cargo +1.88 clippy --all-targets --all-features -- -D warnings

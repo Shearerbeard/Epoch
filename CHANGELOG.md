@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- SQLite event repository backend behind the opt-in `sqlite` feature
+  (`tokio-rusqlite` with bundled SQLite). Implements
+  `VersionedEventRepositoryWithStreams` with the same semantics as the
+  PostgreSQL backend; runs the generic spec and OCC conformance suites
+  by trait bounds, needs no external service.
+
+### Changed
+
+- PostgreSQL repository schema: streams key on the
+  `(stream_type, stream_key)` pair instead of a concatenated
+  `stream_name`, the unused `id` surrogate column is gone (the global
+  sequence is the primary key), and per-stream positions are enforced
+  1-based in storage. Existing databases keep the previous table until
+  recreated; the previous shape allowed two distinct repositories
+  (`a-b`/`c` and `a`/`b-c`) to collide on one stream.
+
 ## [0.2.0-alpha.1] - 2026-10-03
 
 First prerelease of the stream and saga redesign under the

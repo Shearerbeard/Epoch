@@ -124,16 +124,16 @@ Card 2 owned the test module (failing on arrival against the holes):
 Planned: schema.sql 23, version.rs 19, error.rs 16, mod.rs ~360 (of
 which ~110 tests). Module cap: 430.
 
-Actual at card 3: schema.sql 32, version.rs 18, error.rs 14, mod.rs
-487 (331 code + 156 tests); module total 551. The code surface
+Actual at card 5: schema.sql 32, version.rs 18, error.rs 14, mod.rs
+531 (331 code + 200 tests); module total 595. The code surface
 (schema + version + error + mod code = 395) lands inside the original
-feasibility estimate (350-400). The module cap is exceeded by 121,
+feasibility estimate (350-400). The module cap is exceeded by 165,
 accounted: panel finding 5's three added tests (+55), the actor
 envelope flatten functions the driver's `call` signature forced at
 fill time (+33, ledger finding 4), the inclusive-position fix in the
-stream-exists test (+12), and rustfmt reflow (~21). Accepted with
-this accounting rather than cutting tests or documentation to reach
-the number.
+stream-exists test (+12), the gate-A independent-connections test
+(+44), and rustfmt reflow (~21). Accepted with this accounting rather
+than cutting tests or documentation to reach the number.
 
 ## Residual risks
 
