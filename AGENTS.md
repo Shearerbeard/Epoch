@@ -56,6 +56,9 @@ improvise it here.
 
 `src/decider.rs` defines the domain interfaces. The public counter
 example is in `examples/counter.rs` and appears verbatim in the README.
+`examples/test_drive.rs` is a local dev harness (E27) for
+test-driving old-surface event journal backends; it needs the
+`in_memory` and `sqlite` features and is not a shipped API.
 
 Treat the README's Rust block as executable: it is included in crate
 docs and runs under `cargo test --doc`. Run the relevant feature tests

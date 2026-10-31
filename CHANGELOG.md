@@ -9,6 +9,11 @@
   `VersionedEventRepositoryWithStreams` with the same semantics as the
   PostgreSQL backend; runs the generic spec and OCC conformance suites
   by trait bounds, needs no external service.
+- A `test_drive` example binary: a local dev harness for test-driving
+  event journal backends. It seeds a deterministic event set into a
+  chosen backend (in-memory or SQLite) and prints stream, event, and
+  reified-state views, so identical seeds can be diffed
+  backend-to-backend. Not a shipped API.
 
 ### Changed
 
