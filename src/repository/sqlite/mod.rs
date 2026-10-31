@@ -528,4 +528,53 @@ mod tests {
         let (events, _) = repo_a.load(Some(&stream_id)).await.expect("stream loads");
         assert_eq!(events.len(), 1, "only the winning append landed");
     }
+
+    #[actix_rt::test]
+    async fn pair_keyed_streams_never_alias() {
+        // Regression for the concatenated-key collision the pair-keyed
+        // schema removes: ("a-b", "c") and ("a", "b-c") both rendered
+        // as the stream_name "a-b-c" under the old keying. In one
+        // database the two repos must now see only their own stream.
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let path = file.path().to_str().expect("utf8 path").to_string();
+
+        let repo_ab = SqliteEventRepository::open(&path, "a-b")
+            .await
+            .expect("open a-b");
+        let repo_a = SqliteEventRepository::open(&path, "a")
+            .await
+            .expect("open a");
+        repo_ab.migrate().await.expect("migrate a-b");
+        repo_a.migrate().await.expect("migrate a");
+
+        let (event_ab, event_a) = (one_event("Mike"), one_event("Stella"));
+        repo_ab
+            .clone()
+            .append(&RepositoryVersion::NoStream, &"c".to_string(), &event_ab)
+            .await
+            .expect("append to (a-b, c)");
+        repo_a
+            .clone()
+            .append(&RepositoryVersion::NoStream, &"b-c".to_string(), &event_a)
+            .await
+            .expect("append to (a, b-c)");
+
+        // Per-stream reads return only the stream's own events.
+        let (events_ab, _) = repo_ab
+            .load(Some(&"c".to_string()))
+            .await
+            .expect("load (a-b, c)");
+        assert_eq!(events_ab, event_ab);
+        let (events_a, _) = repo_a
+            .load(Some(&"b-c".to_string()))
+            .await
+            .expect("load (a, b-c)");
+        assert_eq!(events_a, event_a);
+
+        // Category reads stay within the stream_type namespace.
+        let (category_ab, _) = repo_ab.load(None).await.expect("category a-b");
+        assert_eq!(category_ab, event_ab);
+        let (category_a, _) = repo_a.load(None).await.expect("category a");
+        assert_eq!(category_a, event_a);
+    }
 }
