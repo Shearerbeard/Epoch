@@ -300,7 +300,15 @@ struct Args {
 const USAGE: &str = "usage: test_drive --backend <in-memory|sqlite> [--db PATH] \
                      <seed|streams|events STREAM|reify STREAM>";
 
-fn parse_args() -> Result<Args, String> {
+/// What the command line asked for: a run, or the usage text. A help
+/// request is not an error - it prints to stdout and exits
+/// successfully; only malformed arguments are errors (stderr, failure).
+enum Parsed {
+    Run(Args),
+    Help,
+}
+
+fn parse_args() -> Result<Parsed, String> {
     let mut backend: Option<Backend> = None;
     let mut db: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -319,7 +327,7 @@ fn parse_args() -> Result<Args, String> {
             "--db" => {
                 db = Some(argv.next().ok_or("--db needs a value")?);
             }
-            "-h" | "--help" => return Err(USAGE.to_owned()),
+            "-h" | "--help" => return Ok(Parsed::Help),
             other => positional.push(other.to_owned()),
         }
     }
@@ -343,7 +351,7 @@ fn parse_args() -> Result<Args, String> {
         _ => return Err(format!("unknown command\n{USAGE}")),
     };
 
-    Ok(Args { backend, command })
+    Ok(Parsed::Run(Args { backend, command }))
 }
 
 const STREAM_TYPE: &str = "counter";
@@ -476,7 +484,11 @@ async fn run(args: Args) -> Result<(), String> {
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = match parse_args() {
-        Ok(args) => args,
+        Ok(Parsed::Run(args)) => args,
+        Ok(Parsed::Help) => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::FAILURE;
