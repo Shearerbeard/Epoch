@@ -360,7 +360,7 @@ mod tests {
     #[actix_rt::test]
     async fn versioned_event_repository_with_streams_spec_sqlite() {
         let repo = fresh_repo().await;
-        versioned_event_repository_with_streams_spec(repo, None).await;
+        versioned_event_repository_with_streams_spec(repo).await;
     }
 
     #[actix_rt::test]
@@ -409,7 +409,7 @@ mod tests {
             .await
             .expect("seed append");
 
-        let res = repo.append(&version, &stream_id, &[]).await;
+        let res = repo.append(&version, &stream_id, &vec![]).await;
         assert!(matches!(
             res,
             Ok((v, returned)) if v.is_empty() && returned == version
