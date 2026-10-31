@@ -131,6 +131,22 @@ cargo +1.88 clippy --all-targets --all-features -- -D warnings
 docker compose down
 ```
 
+For test-driving an event journal locally, the `test_drive` example
+seeds a deterministic event set into a chosen backend and prints
+stream, event, and reified-state views of it, with the same output
+across backends:
+
+```sh
+cargo run --no-default-features --features in_memory,sqlite --example test_drive -- \
+    --backend sqlite --db /tmp/ejtd.db seed
+cargo run --no-default-features --features in_memory,sqlite --example test_drive -- \
+    --backend sqlite --db /tmp/ejtd.db streams
+```
+
+The other commands are `events STREAM` and `reify STREAM`; `--backend
+in-memory` needs no `--db` and reseeds per invocation. The example's
+doc header has the full usage.
+
 See `CHANGELOG.md` for version history and `LICENSE` for the
 Apache-2.0 terms. The stable 0.1.x package remains available for
 consumers that do not need the redesign.
