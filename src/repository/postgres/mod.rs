@@ -75,10 +75,6 @@ impl<E> PgEventRepository<E> {
         tx.commit().await?;
         Ok(())
     }
-
-    fn stream_name(&self, stream_id: &str) -> String {
-        format!("{}-{}", self.stream_type, stream_id)
-    }
 }
 
 #[async_trait]
@@ -120,9 +116,9 @@ where
             Some(stream_id) => {
                 conn.query(
                     "SELECT event_data, sequence FROM events \
-                     WHERE stream_name = $1 AND sequence >= $2 \
+                     WHERE stream_type = $1 AND stream_key = $2 AND sequence >= $3 \
                      ORDER BY sequence ASC",
-                    &[&self.stream_name(stream_id), &from_sequence],
+                    &[&self.stream_type, stream_id, &from_sequence],
                 )
                 .await
             }
@@ -147,8 +143,9 @@ where
             if let Some(stream_id) = id {
                 let exists: bool = conn
                     .query_one(
-                        "SELECT EXISTS(SELECT 1 FROM events WHERE stream_name = $1)",
-                        &[&self.stream_name(stream_id)],
+                        "SELECT EXISTS(SELECT 1 FROM events \
+                         WHERE stream_type = $1 AND stream_key = $2)",
+                        &[&self.stream_type, stream_id],
                     )
                     .await
                     .map_err(PgRepositoryError::Connection)
@@ -189,8 +186,6 @@ where
         'a: 'async_trait,
         E: 'async_trait,
     {
-        let stream_name = self.stream_name(stream);
-
         let mut conn = self
             .pool
             .get()
@@ -204,11 +199,12 @@ where
             .map_err(PgRepositoryError::Connection)
             .map_err(VersionedRepositoryError::RepoErr)?;
 
-        // Serialize appends per stream for the life of this transaction.
+        // Serialize appends per stream for the life of this
+        // transaction; the lock keys on the stream's identity pair.
         transaction
             .execute(
-                "SELECT pg_advisory_xact_lock(hashtext($1))",
-                &[&stream_name],
+                "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+                &[&self.stream_type, stream],
             )
             .await
             .map_err(PgRepositoryError::Connection)
@@ -216,8 +212,9 @@ where
 
         let row = transaction
             .query_one(
-                "SELECT COALESCE(MAX(sequence), 0) AS max_seq FROM events WHERE stream_name = $1",
-                &[&stream_name],
+                "SELECT COALESCE(MAX(sequence), 0) AS max_seq FROM events \
+                 WHERE stream_type = $1 AND stream_key = $2",
+                &[&self.stream_type, stream],
             )
             .await
             .map_err(PgRepositoryError::Connection)
@@ -263,11 +260,11 @@ where
 
             transaction
                 .execute(
-                    "INSERT INTO events (stream_name, stream_type, event_type, sequence, event_data) \
+                    "INSERT INTO events (stream_type, stream_key, event_type, sequence, event_data) \
                      VALUES ($1, $2, $3, $4, $5)",
                     &[
-                        &stream_name,
                         &self.stream_type,
+                        stream,
                         &event.event_type(),
                         &next_sequence,
                         &event_data,
@@ -397,5 +394,56 @@ mod tests {
 
         let (events, _) = repo_a.load(Some(&stream_id)).await.expect("stream loads");
         assert_eq!(events.len(), 1, "only the winning append landed");
+    }
+
+    #[actix_rt::test]
+    async fn pair_keyed_streams_never_alias() {
+        use crate::test_helpers::deciders::user::{User, UserName};
+
+        // Regression for the concatenated-key collision the pair-keyed
+        // schema removes: ("a-b", "c") and ("a", "b-c") both rendered
+        // as the stream_name "a-b-c" under the old keying. In one
+        // database the two repos must now see only their own stream.
+        let event = |n: &str| {
+            vec![UserEvent::UserAdded(User::new(
+                1,
+                UserName::try_from(n.to_string()).expect("valid name"),
+            ))]
+        };
+
+        // stream_types "a-b" and "a" with keys "c" and "b-c": the old
+        // concatenation `{stream_type}-{stream_key}` collides on "a-b-c".
+        let repo_ab = repo_from_environment("a-b").await;
+        let repo_a = repo_from_environment("a").await;
+
+        let (event_ab, event_a) = (event("Mike"), event("Stella"));
+        repo_ab
+            .clone()
+            .append(&RepositoryVersion::NoStream, &"c".to_string(), &event_ab)
+            .await
+            .expect("append to (a-b, c)");
+        repo_a
+            .clone()
+            .append(&RepositoryVersion::NoStream, &"b-c".to_string(), &event_a)
+            .await
+            .expect("append to (a, b-c)");
+
+        // Per-stream reads return only the stream's own events.
+        let (events_ab, _) = repo_ab
+            .load(Some(&"c".to_string()))
+            .await
+            .expect("load (a-b, c)");
+        assert_eq!(events_ab, event_ab);
+        let (events_a, _) = repo_a
+            .load(Some(&"b-c".to_string()))
+            .await
+            .expect("load (a, b-c)");
+        assert_eq!(events_a, event_a);
+
+        // Category reads stay within the stream_type namespace.
+        let (category_ab, _) = repo_ab.load(None).await.expect("category a-b");
+        assert_eq!(category_ab, event_ab);
+        let (category_a, _) = repo_a.load(None).await.expect("category a");
+        assert_eq!(category_a, event_a);
     }
 }

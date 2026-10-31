@@ -12,6 +12,8 @@ pub mod in_memory;
 pub mod postgres;
 #[cfg(feature = "redis")]
 pub mod redis;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 pub mod state;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

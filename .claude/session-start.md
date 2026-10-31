@@ -175,17 +175,33 @@ Before ending session:
 
 ## Session Notes
 
+**Date**: 2026-10-30
+
 **What I worked on**:
--
+- The sqlite event repository backend ported from `s4/sqlite-repository`
+  (six commits `f1fecef..d869a4f`) onto `s5/sqlite-on-redesign`, off the
+  redesign trunk: conflict resolutions per the integration-prep doc
+  (Cargo.toml/lock unions, CHANGELOG/README unions), postgres pair-keying
+  applied clean, and drift fixes for the redesign-lineage `append(&Vec<E>)`
+  signature and spec-helper arity. Gates green: feature-matrix `cargo
+  check`, fmt, lib clippy across feature sets, and the full test suites
+  against live esdb/postgres/redis via compose.
 
 **Progress made**:
--
+- Seven commits on the branch (`eee66d0..` tip): the six ports plus one
+  drift-fix commit. PR to be opened against `redesign/bootstrap`.
+- Review ledger, line-budget accounting, and query-method compatibility
+  matrix live in `docs/internal/design/sqlite-repository-design.md`.
 
 **Blockers or issues**:
--
+- None blocking review. Notes carried from the original work: the
+  postgres table shape changed, so long-lived databases need a one-time
+  drop; rusqlite is pinned to 0.37 because 0.40 declares MSRV 1.89,
+  above the 1.88 floor.
 
 **Next session**:
--
+- Mike's code review of the PR, then card E27 (the event-journal
+  test-drive CLI).
 
 ---
 
