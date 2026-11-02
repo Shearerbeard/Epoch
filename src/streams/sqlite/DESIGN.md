@@ -235,6 +235,14 @@ the board owner instead. Seat 1's shell was permission-gated, so its
 skeleton gate claims are unverified by it; the board owner ran the
 clippy matrix against the Stage 0 baselines.
 
+**Re-review of the repair commit.** Both seats ran a fresh review over
+the repair commit, against their own findings. Seat 1 (`frontier-
+reviewer`, moonshot family): **PASS**, 0 findings - the `Progress::
+from_row` repair verified as a faithful mirror of the PostgreSQL
+constructor, signature and body alike. Seat 2 (`rust-reviewer`, openai
+family): **PASS**, 0 findings - all three repairs verified in place, and
+no repair-induced defect or unfillable seam found.
+
 **Gate S after the repairs.** `cargo fmt --check` clean. The clippy
 matrix against the Stage 0 baselines: default features 0 (baseline 0),
 `--no-default-features` 15 (baseline 15), `--no-default-features
