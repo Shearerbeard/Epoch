@@ -202,10 +202,11 @@ what the shared suites do not reach.
 
 | Member | Covered by |
 |---|---|
-| `load_stream` | shared `single_event_occ_race_on_empty_stream` (asserts `Missing`), shared `a_keyed_append_loads_back_with_its_envelope`; local `a_missing_stream_loads_missing_and_slices_empty` |
-| `load_stream_from` | shared `a_keyed_append_loads_back_with_its_envelope` (with `None`); local `a_slice_from_a_cursor_is_inclusive`, `a_slice_past_the_tail_is_empty_at_the_head`, `a_missing_stream_loads_missing_and_slices_empty` |
+| `load_stream` | the shared OCC races and the shared envelope case; local `a_missing_stream_loads_missing_and_slices_empty` |
+| `load_stream_from` | the shared envelope case (with `None`); local `a_slice_from_a_cursor_is_inclusive`, `a_slice_past_the_tail_is_empty_at_the_head`, `a_missing_stream_loads_missing_and_slices_empty` |
 | `load_category` | local `a_category_read_returns_the_typed_id` |
-| `append` | the shared OCC races (`single_event_occ_race_on_empty_stream`, `single_event_occ_race_on_seeded_stream`), the shared flash sale (`flash_sale_sells_exactly_the_stock`), the shared envelope case (`a_keyed_append_loads_back_with_its_envelope`); local `independent_actors_conflict_deterministically`, `a_cancelled_append_still_commits`, `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound`, `the_envelope_written_is_the_envelope_stored` |
+| `append` | the shared OCC races, the shared flash sale, the shared envelope case; local `independent_actors_conflict_deterministically`, `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`, `a_cancelled_append_still_commits`, `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound`, `the_envelope_written_is_the_envelope_stored` |
+
 ### `AtomicStreams`
 
 | Member | Covered by |
@@ -216,7 +217,7 @@ what the shared suites do not reach.
 
 | Member | Covered by |
 |---|---|
-| `poll` | the shared redelivery case (`poll_redelivers_until_acked`), the shared paging case (`poll_pages_the_backlog`), the shared envelope case (`delivery_carries_the_envelope`) |
+| `poll` | the shared redelivery case (`poll_redelivers_until_acked`), the shared paging case (`poll_pages_the_backlog`), the shared envelope case (`delivery_carries_the_envelope`); local `a_wedged_writer_times_out_a_feed_poll` |
 | `ack` | the shared redelivery case (`poll_redelivers_until_acked`), the shared paging case (`poll_pages_the_backlog`), the shared monotonicity case (`ack_is_monotonic`), the shared undelivered case (`ack_rejects_undelivered`) |
 
 ### The backend's own error variants
@@ -226,21 +227,23 @@ what the shared suites do not reach.
 | `SqliteStreamsError::Connection` | local `an_unmigrated_database_is_a_driver_fault` |
 | `SqliteStreamsError::Handle` | local `a_closed_connection_is_a_handle_failure` |
 | `SqliteStreamsError::Serialization` | local `a_stored_payload_that_does_not_decode_is_a_serialization_error` |
-| `SqliteStreamsError::LockTimeout` | local `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound` |
+| `SqliteStreamsError::LockTimeout` | local `a_wedged_writer_times_out_a_feed_poll` - the feed's poll returns the backend's own error type, not the append wrapper |
+| `SqliteWriteError::Duplicate` | local `a_second_write_for_one_stream_is_a_build_error` |
+| `SqliteWriteError::Encoding` | local `an_event_that_will_not_encode_is_a_build_error` |
 
 ### The shared error variants this backend produces
 
 | Variant | Covered by |
 |---|---|
-| `AppendError::Conflict` | shared `single_event_occ_race_on_empty_stream`, shared `single_event_occ_race_on_seeded_stream`; local `independent_actors_conflict_deterministically`, `a_batch_and_an_append_race_for_one_stream` |
+| `AppendError::Conflict` | the shared OCC races; local `independent_actors_conflict_deterministically`, `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`, `a_batch_and_an_append_race_for_one_stream` |
 | `AppendError::LockTimeout` | local `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound` |
 | `TransactError::Conflict` | local `overlapping_batches_leave_exactly_one_winner`, `a_batch_and_an_append_contend_on_one_stream`, `a_batch_and_an_append_race_for_one_stream` |
 | `TransactError::ConstraintViolated` | local `a_violated_constraint_aborts_the_whole_batch` |
 | `TransactError::DuplicateIntent` | local `a_duplicate_intent_is_rejected_by_the_index` |
 | `TransactError::LockTimeout` | local `an_unavailable_lock_is_a_retryable_timeout`, `a_zero_funnel_bound_times_out_reporting_the_floor` |
 | `LoadError::InvalidKey` | local `a_stored_key_that_does_not_parse_is_an_invalid_key` |
-| `AckError::Regression` | shared `ack_is_monotonic` |
-| `AckError::NotDelivered` | shared `ack_rejects_undelivered` |
+| `AckError::Regression` | the shared monotonicity case (`ack_is_monotonic`) |
+| `AckError::NotDelivered` | the shared undelivered case (`ack_rejects_undelivered`) |
 
 ### Exclusions
 
@@ -249,9 +252,7 @@ what the shared suites do not reach.
 | `a_batch_cannot_contradict_a_category_event_type` (in-memory suite) | The case enforces the in-memory backend's Rust `TypeId` category registry (`src/streams/in_memory/batch.rs:129`, `src/streams/in_memory.rs:182`). Neither the PostgreSQL backend nor this one carries such a registry. A stored row holds an event-type string, not a type identity. |
 | `two_writes_cannot_disagree_over_an_unclaimed_category` (in-memory suite) | The same registry, reached from the other side. |
 | `AppendError::Backend`, `TransactError::Backend`, `AckError::Backend` | These are the wrappers the backend's own error takes. The variants they wrap are covered individually above, and a wrapper's identity is the shared type's business, not this backend's. |
-| `SqliteWriteError::Duplicate` | The batch builder rejects a second write for one stream before any transaction starts, and the shared `BatchBuilder` tests already pin that rejection on the shared type (`src/streams/batch.rs:452`). |
-| `SqliteWriteError::Encoding` | The encoding failure surfaces at build time, before a transaction starts. It needs an event whose serialization fails, and the shared `Batch` vocabulary does not admit one; the failure mode is the shared `DuplicateWrite` and `serde_json` error, both already covered by the shared surface. |
-| The `PostgreSQL` funnel's advisory-lock proof (`a_funnel_holder_blocks_a_rival_append_until_release`) | The proof reads PostgreSQL's `pg_locks`, which SQLite has no equivalent of. This backend's equivalent proof is `independent_actors_conflict_deterministically`, which opens two separately opened actors on one database file and shows the database's write lock is what serializes them. |
+| The PostgreSQL funnel's advisory-lock proof (`a_funnel_holder_blocks_a_rival_append_until_release`) | The proof reads PostgreSQL's `pg_locks`, which SQLite has no equivalent of. This backend's equivalent is `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`. A holder owns the database write lock and commits a row for the contested stream. The rival is observed still waiting while the holder owns the lock, and once the holder commits the rival observes the committed head and conflicts. |
 
 ### The scope of the identity claim
 
@@ -260,7 +261,6 @@ the shared contract says it should have stored. It does not prove that
 a consumer's behavior downstream of the store is unchanged, and it does
 not compare the stored bytes with another backend's: the raw bytes
 differ by design (divergence D3).
-
 
 ## Findings ledger
 
@@ -308,6 +308,20 @@ from_row` repair verified as a faithful mirror of the PostgreSQL
 constructor, signature and body alike. Seat 2 (`rust-reviewer`, openai
 family): **PASS**, 0 findings - all three repairs verified in place, and
 no repair-induced defect or unfillable seam found.
+
+**Stage 2 Gate A - `rust-reviewer` (amazon-bedrock `us.openai.gpt-6.1-sol`),
+over the conformance set.** Verdict: **FAIL**, 7 blocking, 0 minor.
+Every finding was verified against the test file before disposition.
+
+| # | Finding | Disposition | Repair or reason |
+|---|---|---|---|
+| 1 | BLOCKING - the slice cases asserted the cursor as the slice's position. The contract reports the stream's observed position, so the cases rejected a correct implementation and accepted one that echoed the cursor. | Accepted | Repaired. Both slice cases now assert the stream's head, and the inclusive case uses a payload-carrying event so the slice's contents are checked to be exactly the suffix from the cursor. |
+| 2 | BLOCKING - the serialization-error fixture wrote one stream and read another, because each key was generated separately. | Accepted | Repaired. The key is bound once and used for both the write and the read. |
+| 3 | BLOCKING - the cancellation case was not synchronized with submission: one pending poll does not establish that the actor received the work, and a fast actor could complete it first. | Accepted | Repaired. The actor is held behind a blocker closure, so the append's submission is observable and its pending state is deterministic. The blocker is released, the queued append runs, and the load - queued behind it - observes the committed event. |
+| 4 | BLOCKING - the race fixtures did not deterministically prove that the write lock is taken before the head is observed; a task-start barrier is not a database-operation barrier. | Accepted | Repaired with a new case, `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`. A holder owns the write lock and commits a row for the contested stream; the rival is observed still waiting while the holder owns the lock; once the holder commits, the rival observes the committed head and conflicts. The coverage manifest's exclusion row now points at this case instead of claiming equivalence with the PostgreSQL proof. |
+| 5 | BLOCKING - the per-handle bound case checked the reported payload only, so an implementation that always installed one fixed bound would pass it. | Accepted | Repaired. The case now reads the connection's installed `busy_timeout` back after each operation, so it verifies the effective bound each handle installed, not only the duration each handle reported. |
+| 6 | BLOCKING - the manifest's error coverage and exclusion reasons were inaccurate: the append cases produce the wrapper variant rather than the backend's own, and the shared batch suite does not exercise this backend's typed write or its error mapping. | Accepted | Repaired. A feed poll against a wedged writer now covers the backend's own `LockTimeout`, and two new cases cover the builder's `Duplicate` and `Encoding` errors. The manifest rows now name the assertions that exist. |
+| 7 | BLOCKING - the duplicate-intent case did not prove the whole-batch rollback: the rejecting write came first, so a backend that stored writes one at a time would leave the same state. | Accepted | Repaired. The successful write now comes first and the rejected one second, and the case asserts that the first write was rolled back. It also asserts the rejected stream's full identity, not only its category. |
 
 **Gate S after the repairs.** `cargo fmt --check` clean. The clippy
 matrix against the Stage 0 baselines: default features 0 (baseline 0),

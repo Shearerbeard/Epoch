@@ -15,6 +15,7 @@ use crate::streams::feed::spec::{
     ack_is_monotonic, ack_rejects_undelivered, delivery_carries_the_envelope,
     poll_pages_the_backlog, poll_redelivers_until_acked,
 };
+use crate::streams::feed::{ConsumerGroup, EventFeed, PollLimit};
 use crate::streams::spec::{
     a_keyed_append_loads_back_with_its_envelope, flash_sale_sells_exactly_the_stock,
     single_event_occ_race_on_empty_stream, single_event_occ_race_on_seeded_stream, under_deadline,
@@ -24,7 +25,7 @@ use crate::streams::{
     RecordedEvent, StreamSequence, StreamState, StreamVersion,
 };
 
-use super::batch::{SqliteBatch, SqliteBatchBuilder, SqliteDatabase};
+use super::batch::{SqliteBatch, SqliteBatchBuilder, SqliteDatabase, SqliteWriteError};
 use super::{SqliteEventFeed, SqliteEventStreams, SqliteStreamsError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +67,45 @@ async fn writer_and_feed() -> (
     (writer, feed)
 }
 
+/// An event carrying a payload, so a slice's contents can be told
+/// apart from one another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Counted(u32);
+
+impl Event for Counted {
+    type EntityId = ();
+
+    fn event_type(&self) -> String {
+        "Counted".to_owned()
+    }
+
+    fn get_id(&self) -> Self::EntityId {}
+}
+
+/// An event whose serialization fails, so the builder's encoding error
+/// is reachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefusesToSerialize;
+
+impl Serialize for RefusesToSerialize {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Err(serde::ser::Error::custom("this event refuses to serialize"))
+    }
+}
+
+impl Event for RefusesToSerialize {
+    type EntityId = ();
+
+    fn event_type(&self) -> String {
+        "RefusesToSerialize".to_owned()
+    }
+
+    fn get_id(&self) -> Self::EntityId {}
+}
+
 fn one_event() -> EventBatch<SomethingHappened> {
     EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty")
 }
@@ -78,6 +118,18 @@ fn unique_key(prefix: &str) -> String {
 /// independent actors on one database.
 fn temp_database() -> tempfile::NamedTempFile {
     tempfile::NamedTempFile::new().expect("temp file")
+}
+
+/// The busy timeout the connection carries right now: the pragma
+/// reads back what the last operation installed, which is the
+/// operation's own bound and not the handle's report of it.
+async fn installed_busy_timeout(store: &SqliteEventStreams<String, SomethingHappened>) -> i64 {
+    store
+        .connection
+        .clone()
+        .call(|conn| conn.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0)))
+        .await
+        .expect("the busy timeout reads back")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -155,19 +207,23 @@ async fn sqlite_delivery_carries_the_envelope() {
 }
 
 /// A slice from a cursor is inclusive of the cursor's own position,
-/// and reports the stream's head as its observation. The shared suite
-/// only ever calls `load_stream_from` with `None`, so an
-/// implementation that ignored the cursor entirely would pass every
+/// and observes the stream's head - not the cursor - as its position.
+/// The shared suite only ever calls `load_stream_from` with `None`, so
+/// an implementation that ignored the cursor entirely would pass every
 /// shared case.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slice_from_a_cursor_is_inclusive() {
-    let store = store().await;
+    let store = SqliteEventStreams::<String, Counted>::open_in_memory("slice")
+        .await
+        .expect("memory connection");
+    store.migrate().await.expect("schema migrates");
     let key = unique_key("slice");
     store
         .append(
             ExpectedVersion::NoStream,
             &key,
-            &EventBatch::new(vec![SomethingHappened; 3]).expect("three events are nonempty"),
+            &EventBatch::new(vec![Counted(1), Counted(2), Counted(3)])
+                .expect("three events are nonempty"),
         )
         .await
         .expect("append succeeds");
@@ -182,7 +238,21 @@ async fn a_slice_from_a_cursor_is_inclusive() {
         2,
         "the cursor's own position is included"
     );
-    assert_eq!(slice.at(), StreamVersion::Exact(cursor));
+    let events: Vec<&Counted> = slice
+        .records()
+        .iter()
+        .map(|record| record.event())
+        .collect();
+    assert_eq!(
+        events,
+        vec![&Counted(2), &Counted(3)],
+        "the slice holds exactly the suffix from the cursor"
+    );
+    assert_eq!(
+        slice.at(),
+        StreamVersion::Exact(StreamSequence::new(3).expect("3 is a position")),
+        "the slice observes the stream's head, not the cursor"
+    );
 }
 
 /// A cursor past the tail reads nothing and still reports the stream's
@@ -206,7 +276,11 @@ async fn a_slice_past_the_tail_is_empty_at_the_head() {
         .await
         .expect("slice load succeeds");
     assert!(slice.records().is_empty(), "nothing sits past the tail");
-    assert_eq!(slice.at(), StreamVersion::Exact(past));
+    assert_eq!(
+        slice.at(),
+        StreamVersion::Exact(StreamSequence::new(2).expect("2 is a position")),
+        "a cursor past the tail still observes the stream's head"
+    );
 }
 
 /// A missing stream is two different answers by two different methods:
@@ -335,6 +409,75 @@ async fn independent_actors_conflict_deterministically() {
     .await;
 }
 
+/// The database's write lock is what a contender waits for, and what
+/// makes it observe the committed head rather than a stale one. A
+/// holder takes the write lock and commits a row for the contested
+/// stream; a rival append started while the holder owns the lock must
+/// wait, and after the holder commits it must observe the holder's row
+/// and conflict rather than write beside it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contender_waits_for_the_write_lock_and_sees_the_committed_head() {
+    under_deadline(async {
+        let file = temp_database();
+        let path = file.path().to_str().expect("utf8 path").to_owned();
+
+        let store = SqliteEventStreams::<String, SomethingHappened>::open(&path, "contender")
+            .await
+            .expect("open");
+        store.migrate().await.expect("schema migrates");
+        let key = unique_key("contended");
+
+        // The holder: a second connection that takes the write lock and
+        // commits a row for the contested stream. It holds the lock
+        // until the test releases it.
+        let (releasing, released) = std::sync::mpsc::channel::<()>();
+        let holder = Connection::open(&path).await.expect("a second connection");
+        let holder_key = key.clone();
+        let mut held = Box::pin(holder.call(move |conn| {
+            let transaction =
+                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            transaction.execute(
+                "INSERT INTO stream_events \
+                 (category, stream_key, event_type, sequence, event_data, event_metadata) \
+                 VALUES ('contender', ?1, 'SomethingHappened', 1, 'null', '{}')",
+                [&holder_key],
+            )?;
+            let _ = released.recv();
+            transaction.commit()
+        }));
+        let polled = futures::poll!(&mut held);
+        assert!(polled.is_pending(), "the holder is queued");
+
+        // The rival: it cannot get the write lock while the holder owns
+        // it, so it must wait.
+        let rival = {
+            let store = store.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                store
+                    .append(ExpectedVersion::NoStream, &key, &one_event())
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !rival.is_finished(),
+            "the rival waits for the write lock the holder owns"
+        );
+
+        // Release the holder, so its row commits.
+        releasing.send(()).expect("the holder releases");
+        held.await.expect("the holder resolves");
+
+        let outcome = rival.await.expect("the rival task");
+        assert!(
+            matches!(outcome, Err(AppendError::Conflict(_))),
+            "the rival observed the committed head and conflicted, got {outcome:?}"
+        );
+    })
+    .await;
+}
+
 /// A cancelled append still commits. The tokio-rusqlite actor runs a
 /// submitted closure unconditionally and only then attempts to deliver
 /// the result, so dropping the awaiting future cannot stop the work.
@@ -344,8 +487,20 @@ async fn independent_actors_conflict_deterministically() {
 async fn a_cancelled_append_still_commits() {
     let store = store().await;
     let key = unique_key("cancelled");
-
     let event = one_event();
+
+    // The actor is held behind a blocker, so the append's submission
+    // is observable: the queued closure cannot run until the blocker
+    // releases it, and the append cannot be ready before then.
+    let (releasing, released) = std::sync::mpsc::channel::<()>();
+    let blocker_connection = store.connection.clone();
+    let mut blocker = Box::pin(blocker_connection.call(move |_conn| {
+        let _ = released.recv();
+        Ok::<(), rusqlite::Error>(())
+    }));
+    let polled = futures::poll!(&mut blocker);
+    assert!(polled.is_pending(), "the blocker is queued on the actor");
+
     let mut append = Box::pin(store.append(ExpectedVersion::NoStream, &key, &event));
     let polled = futures::poll!(&mut append);
     assert!(
@@ -353,6 +508,10 @@ async fn a_cancelled_append_still_commits() {
         "the append is still in flight after the work was enqueued"
     );
     drop(append);
+
+    // Release the actor, so the queued append runs.
+    releasing.send(()).expect("the blocker releases");
+    blocker.await.expect("the blocker resolves");
 
     // The load goes through the same actor, and the actor runs closures
     // in the order they were enqueued, so the load sees whatever the
@@ -486,17 +645,27 @@ async fn each_handle_times_out_on_its_own_bound() {
         let quick_outcome = quick
             .append(ExpectedVersion::NoStream, &unique_key("quick"), &one_event())
             .await;
-        let slow_outcome = slow
-            .append(ExpectedVersion::NoStream, &unique_key("slow"), &one_event())
-            .await;
-
         assert!(
             matches!(quick_outcome, Err(AppendError::LockTimeout(reported)) if reported == Duration::from_millis(100)),
             "the quick handle times out on its own bound, got {quick_outcome:?}"
         );
+        assert_eq!(
+            installed_busy_timeout(&store).await,
+            100,
+            "the quick handle's bound is the one installed on the connection"
+        );
+
+        let slow_outcome = slow
+            .append(ExpectedVersion::NoStream, &unique_key("slow"), &one_event())
+            .await;
         assert!(
             matches!(slow_outcome, Err(AppendError::LockTimeout(reported)) if reported == Duration::from_millis(600)),
             "the slow handle times out on its own bound, got {slow_outcome:?}"
+        );
+        assert_eq!(
+            installed_busy_timeout(&store).await,
+            600,
+            "the slow handle replaced the connection's bound with its own"
         );
     })
     .await;
@@ -558,15 +727,16 @@ async fn a_stored_payload_that_does_not_decode_is_a_serialization_error() {
         .await
         .expect("open");
     writer.migrate().await.expect("schema migrates");
+    let key = unique_key("k");
     writer
-        .append(ExpectedVersion::NoStream, &unique_key("k"), &one_event())
+        .append(ExpectedVersion::NoStream, &key, &one_event())
         .await
         .expect("append succeeds");
 
     let reader = SqliteEventStreams::<String, NeedsAnObject>::open(&path, "decode")
         .await
         .expect("open");
-    let outcome = reader.load_stream(&unique_key("k")).await;
+    let outcome = reader.load_stream(&key).await;
     assert!(
         matches!(outcome, Err(SqliteStreamsError::Serialization(_))),
         "a payload that does not decode is a serialization error, got {outcome:?}"
@@ -1053,6 +1223,44 @@ async fn a_keyed_batch_write_stores_its_envelope() {
     .await;
 }
 
+/// A second write for a stream the batch already writes is a
+/// build-time error, before any transaction starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_write_for_one_stream_is_a_build_error() {
+    let fixture = fixture().await;
+    let kid = unique_key("kid");
+    let mut builder = fixture.db.batch();
+    builder
+        .write(KIDS, &kid, ExpectedVersion::NoStream, &kid_event())
+        .expect("the first write for a stream is admitted");
+
+    let outcome = builder.write(KIDS, &kid, ExpectedVersion::NoStream, &kid_event());
+    assert!(
+        matches!(outcome, Err(SqliteWriteError::Duplicate(_))),
+        "a second write for one stream is a build error, got {outcome:?}"
+    );
+}
+
+/// An event that will not encode is a build-time error too, and the
+/// failed write leaves the builder without a write.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_that_will_not_encode_is_a_build_error() {
+    let fixture = fixture().await;
+    let kid = unique_key("kid");
+    let events = EventBatch::new(vec![RefusesToSerialize]).expect("one event is nonempty");
+
+    let mut builder = fixture.db.batch();
+    let outcome = builder.write(KIDS, &kid, ExpectedVersion::NoStream, &events);
+    assert!(
+        matches!(outcome, Err(SqliteWriteError::Encoding(_))),
+        "an event that will not encode is a build error, got {outcome:?}"
+    );
+    assert!(
+        builder.build().is_err(),
+        "the failed write left the builder without a write"
+    );
+}
+
 /// A duplicate intent key is rejected by the storage-level index, not
 /// by a version expectation: the `Any` expectation is what makes the
 /// index the rejecting mechanism. The batch rolls back whole, so its
@@ -1082,11 +1290,14 @@ async fn a_duplicate_intent_is_rejected_by_the_index() {
             .expect("one event is nonempty");
         let other = unique_key("other");
         let mut builder = fixture.db.batch();
-        builder
-            .write(OUTBOX, &other, ExpectedVersion::Any, &second)
-            .expect("one write per stream");
+        // The successful write comes first, so a backend that stored
+        // writes one at a time would leave it behind, and the rollback
+        // is what this case proves.
         builder
             .write(CHORES, &other, ExpectedVersion::Any, &chore_event())
+            .expect("one write per stream");
+        builder
+            .write(OUTBOX, &other, ExpectedVersion::Any, &second)
             .expect("one write per stream");
         let outcome = fixture
             .db
@@ -1096,6 +1307,7 @@ async fn a_duplicate_intent_is_rejected_by_the_index() {
         match outcome {
             Err(TransactError::DuplicateIntent(duplicate)) => {
                 assert_eq!(duplicate.stream().category(), OUTBOX);
+                assert_eq!(duplicate.stream().key(), other);
             }
             other => panic!("expected a duplicate intent rejection, got {other:?}"),
         }
@@ -1103,7 +1315,7 @@ async fn a_duplicate_intent_is_rejected_by_the_index() {
         assert_eq!(
             chore_state(&fixture, &other).await,
             StreamState::Missing,
-            "the rejected batch stored neither write"
+            "the rejected batch rolled back the write that came first"
         );
     })
     .await;
@@ -1139,6 +1351,37 @@ async fn an_unavailable_lock_is_a_retryable_timeout() {
             kid_state(&fixture, &kid).await,
             StreamState::Missing,
             "a timed-out batch stores nothing"
+        );
+    })
+    .await;
+}
+
+/// A zero configured bound is floored to 1ms, and the timeout payload
+/// reports that effective bound, not the zero the caller configured.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wedged_writer_times_out_a_feed_poll() {
+    under_deadline(async {
+        let file = temp_database();
+        let path = file.path().to_str().expect("utf8 path").to_owned();
+
+        let store = SqliteEventStreams::<String, SomethingHappened>::open(&path, "feed")
+            .await
+            .expect("open");
+        store.migrate().await.expect("schema migrates");
+        let feed = SqliteEventFeed::<SomethingHappened>::new(store.connection.clone(), "feed")
+            .with_lock_timeout(Duration::from_millis(100));
+
+        let (held, waiting) = oneshot::channel();
+        wedge_the_write_lock(&path, held).await;
+        await_the_wedge(waiting).await;
+
+        let group = ConsumerGroup::new("wedged").expect("a non-empty group");
+        let outcome = feed
+            .poll(&group, PollLimit::new(10).expect("a nonzero limit"))
+            .await;
+        assert!(
+            matches!(outcome, Err(SqliteStreamsError::LockTimeout(reported)) if reported == Duration::from_millis(100)),
+            "expected a retryable lock timeout, got {outcome:?}"
         );
     })
     .await;
