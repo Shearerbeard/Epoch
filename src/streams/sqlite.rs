@@ -22,8 +22,6 @@
 //! statement, and a statement is its own snapshot, so a rival append
 //! committing mid-read cannot split a read across two views.
 
-#![allow(dead_code)]
-
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::time::Duration;
@@ -39,7 +37,6 @@ use super::{
     RecordedEvent, StreamId, StreamSequence, StreamSlice, StreamState, StreamVersion, ZeroSequence,
 };
 
-#[expect(unused_imports, reason = "todo!() bodies; filled by E28")]
 use super::{batch::expectation_satisfied, EventMetadata, VersionConflict};
 
 pub mod batch;
@@ -174,14 +171,19 @@ fn stored_position(raw: i64) -> u64 {
 /// it cannot leave the actor's closure. Decoding happens on the
 /// caller's side of that boundary, which also keeps the event type
 /// off the closure's `'static` bound.
-#[expect(unused_variables, reason = "todo!() body; filled by E28")]
 fn decode_records<E>(
     rows: impl IntoIterator<Item = (String, String)>,
 ) -> Result<Vec<RecordedEvent<E>>, SqliteStreamsError>
 where
     E: DeserializeOwned,
 {
-    todo!("E28: decode_records")
+    rows.into_iter()
+        .map(|(payload, envelope)| {
+            let event = serde_json::from_str(&payload)?;
+            let metadata: EventMetadata = serde_json::from_str(&envelope)?;
+            Ok(RecordedEvent::keyed(event, metadata))
+        })
+        .collect()
 }
 
 /// One category of streams in a SQLite database, addressed by a typed
@@ -282,18 +284,91 @@ where
     type Id = Id;
     type Error = SqliteStreamsError;
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E28")]
     async fn load_stream(&self, id: &Self::Id) -> Result<StreamState<E>, Self::Error> {
-        todo!("E28: load_stream")
+        let key = id.stream_key();
+        let category = self.category.clone();
+        let connection = self.connection.clone();
+        let outcome = connection
+            .call(move |conn| {
+                let mut statement = conn.prepare(
+                    "SELECT event_data, event_metadata FROM stream_events \
+                      WHERE category = ?1 AND stream_key = ?2 \
+                      ORDER BY sequence ASC",
+                )?;
+                let rows = statement
+                    .query_map(rusqlite::params![category, key], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+                Ok::<_, SqliteStreamsError>(rows)
+            })
+            .await;
+        let records = decode_records(actor_outcome(outcome)?)?;
+        if records.is_empty() {
+            Ok(StreamState::Missing)
+        } else {
+            Ok(StreamState::Present(
+                EventBatch::from_records(records).expect("records were checked nonempty"),
+            ))
+        }
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E28")]
     async fn load_stream_from(
         &self,
         id: &Self::Id,
         from: Option<StreamSequence>,
     ) -> Result<StreamSlice<E>, Self::Error> {
-        todo!("E28: load_stream_from")
+        let key = id.stream_key();
+        let category = self.category.clone();
+        // `from` is 1-based and inclusive; the decisive comparison is in
+        // `u64`, so a cursor past any tail - including one beyond what
+        // SQLite can store - reads nothing.
+        let cursor = from.map_or(1, StreamSequence::get);
+        let lower_bound = i64::try_from(cursor).unwrap_or(i64::MAX);
+        let connection = self.connection.clone();
+        let outcome = connection
+            .call(move |conn| {
+                // One statement, so the head and the joined rows derive
+                // from one snapshot. The outer join carries the head on a
+                // row with null event columns when nothing is in range.
+                let mut statement = conn.prepare(
+                    "SELECT s.head, e.sequence, e.event_data, e.event_metadata \
+                       FROM (SELECT COALESCE(MAX(sequence), 0) AS head \
+                               FROM stream_events \
+                              WHERE category = ?1 AND stream_key = ?2) s \
+                       LEFT JOIN stream_events e \
+                         ON e.category = ?1 AND e.stream_key = ?2 AND e.sequence >= ?3 \
+                      ORDER BY e.sequence ASC",
+                )?;
+                let rows = statement
+                    .query_map(rusqlite::params![category, key, lower_bound], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+                let head = rows.first().map_or(0, |row| row.0);
+                let in_range = rows
+                    .into_iter()
+                    .filter_map(|(_, sequence, payload, envelope)| {
+                        let sequence = sequence?;
+                        (stored_position(sequence) >= cursor).then_some((
+                            payload.expect("an in-range row carries its payload"),
+                            envelope.expect("an in-range row carries its envelope"),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                Ok::<_, SqliteStreamsError>((head, in_range))
+            })
+            .await;
+        let (head, rows) = actor_outcome(outcome)?;
+        Ok(
+            StreamSlice::new(decode_records(rows)?, version_of(stored_position(head)))
+                .expect("in-range rows imply an Exact observation"),
+        )
     }
 
     async fn load_category(
@@ -302,16 +377,115 @@ where
         Vec<CategoryEvent<Self::Id, E>>,
         LoadError<Self::Error, <Self::Id as StreamId>::ParseError>,
     > {
-        todo!("E28: load_category")
+        let category = self.category.clone();
+        let connection = self.connection.clone();
+        let outcome = connection
+            .call(move |conn| {
+                let mut statement = conn.prepare(
+                    "SELECT stream_key, event_data FROM stream_events \
+                      WHERE category = ?1 \
+                      ORDER BY global_sequence ASC",
+                )?;
+                let rows = statement
+                    .query_map(rusqlite::params![category], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+                Ok::<_, SqliteStreamsError>(rows)
+            })
+            .await;
+        actor_outcome(outcome)
+            .map_err(LoadError::Backend)?
+            .into_iter()
+            .map(|(key, payload)| {
+                let id = Self::Id::parse_key(&key).map_err(LoadError::InvalidKey)?;
+                let event = serde_json::from_str(&payload)
+                    .map_err(SqliteStreamsError::Serialization)
+                    .map_err(LoadError::Backend)?;
+                Ok(CategoryEvent { id, event })
+            })
+            .collect()
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E28")]
     async fn append(
         &self,
         expected: ExpectedVersion,
         stream: &Self::Id,
         events: &EventBatch<E>,
     ) -> Result<StreamSequence, AppendError<Self::Error>> {
-        todo!("E28: append")
+        let key = stream.stream_key();
+        let category = self.category.clone();
+        let lock_timeout = self.lock_timeout;
+
+        // Encode before the actor boundary: a failed encoding is a
+        // serialization fault, and the owned wire strings keep the event
+        // type off the closure's `'static` bound.
+        let encoded = events
+            .records()
+            .iter()
+            .map(|record| {
+                let event_type = record.event().event_type();
+                let payload = serde_json::to_value(record.event())
+                    .and_then(|value| serde_json::to_string(&value))
+                    .map_err(SqliteStreamsError::Serialization)?;
+                let envelope = serde_json::to_value(record.metadata())
+                    .and_then(|value| serde_json::to_string(&value))
+                    .map_err(SqliteStreamsError::Serialization)?;
+                Ok((event_type, payload, envelope))
+            })
+            .collect::<Result<Vec<_>, SqliteStreamsError>>()
+            .map_err(AppendError::Backend)?;
+
+        let connection = self.connection.clone();
+        let outcome = connection
+            .call(move |conn| {
+                install_busy_timeout(conn, lock_timeout)
+                    .map_err(|error| classify_lock_failure(error, lock_timeout))?;
+                let transaction = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|error| classify_lock_failure(error, lock_timeout))?;
+
+                let position: i64 = transaction
+                    .query_row(
+                        "SELECT COALESCE(MAX(sequence), 0) AS position FROM stream_events \
+                          WHERE category = ?1 AND stream_key = ?2",
+                        rusqlite::params![category, key],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| classify_lock_failure(error, lock_timeout))?;
+                let observed = version_of(stored_position(position));
+
+                if !expectation_satisfied(expected, observed) {
+                    return Ok(Err(VersionConflict::new(expected, observed)
+                        .expect("the expectation just failed against the observation")));
+                }
+
+                let mut next = position;
+                for (event_type, payload, envelope) in encoded {
+                    next += 1;
+                    transaction
+                        .execute(
+                            "INSERT INTO stream_events \
+                             (category, stream_key, event_type, sequence, event_data, event_metadata) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            rusqlite::params![category, key, event_type, next, payload, envelope],
+                        )
+                        .map_err(|error| classify_lock_failure(error, lock_timeout))?;
+                }
+
+                transaction
+                    .commit()
+                    .map_err(|error| classify_lock_failure(error, lock_timeout))?;
+                Ok(Ok(StreamSequence::new(stored_position(next))
+                    .expect("a batch holds at least one event")))
+            })
+            .await;
+
+        match actor_outcome(outcome) {
+            Ok(Ok(sequence)) => Ok(sequence),
+            Ok(Err(conflict)) => Err(AppendError::Conflict(conflict)),
+            Err(SqliteStreamsError::LockTimeout(bound)) => Err(AppendError::LockTimeout(bound)),
+            Err(error) => Err(AppendError::Backend(error)),
+        }
     }
 }
