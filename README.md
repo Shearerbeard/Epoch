@@ -84,13 +84,18 @@ events and effect intents together. `outbox::Executor` performs
 effects later through a caller-supplied port.
 
 The stream implementation is available in memory with the
-`in_memory` feature and in PostgreSQL with the opt-in `postgres`
-feature. The PostgreSQL writer serializes event transactions so a
-feed cursor cannot skip committed events. Its intent-key uniqueness
-index rejects repeated outbox intents. The in-memory backend does
-not enforce that storage-level intent uniqueness. A feed may
-redeliver after a crash; effect ports and compensation hooks must
-dedupe by intent key. Effect delivery is ordered and at least once.
+`in_memory` feature, in PostgreSQL with the opt-in `postgres`
+feature, and in SQLite with the opt-in `sqlite` feature. The
+PostgreSQL writer serializes event transactions so a feed cursor
+cannot skip committed events. Its intent-key uniqueness index rejects
+repeated outbox intents, while the in-memory backend does not enforce
+that storage-level intent uniqueness. The SQLite backend serializes writers
+the same way - SQLite locks the database for writers, and every write
+path opens its transaction with `BEGIN IMMEDIATE` - so its feed cursor
+is an honest plain maximum too, and it enforces the intent-key
+uniqueness index as well. A feed may redeliver after a crash; effect
+ports and compensation hooks must dedupe by intent key. Effect delivery
+is ordered and at least once.
 
 The default features also include EventStoreDB (`esdb`) and
 RedisJSON (`redis`) for the earlier repository API. Those backends
@@ -106,8 +111,10 @@ epoch = { package = "epoch-journal", version = "=0.2.0-alpha.1", default-feature
 ```
 
 For the PostgreSQL stream backend, select `postgres` instead. Call
-`PgEventStreams::migrate` before using the store. The package
-requires Rust 1.88 or later.
+`PgEventStreams::migrate` before using the store. For the SQLite stream
+backend, select `sqlite` and call `SqliteEventStreams::migrate` before
+using the store; opening a store does not create the schema. The
+package requires Rust 1.88 or later.
 The [architecture decisions](https://github.com/Shearerbeard/Epoch/tree/v0.2.0-alpha.1/docs/adr)
 explain the batch, cursor, and outbox contracts.
 

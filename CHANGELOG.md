@@ -9,6 +9,15 @@
   `VersionedEventRepositoryWithStreams` with the same semantics as the
   PostgreSQL backend; runs the generic spec and OCC conformance suites
   by trait bounds, needs no external service.
+- SQLite streams backend behind the same opt-in `sqlite` feature. It
+  implements the new surface's `EventStreams`, `AtomicStreams`, and
+  `EventFeed`, passes the shared stream and feed suites unchanged, and
+  needs no external service. SQLite serializes writers database-wide
+  and every write path opens its transaction with `BEGIN IMMEDIATE`, so
+  the feed cursor is an honest plain maximum and the intent-key
+  uniqueness index rejects repeated outbox intents. The schema arrives
+  as numbered migration steps recorded in a ledger; call
+  `SqliteEventStreams::migrate` before using the store.
 
 ### Changed
 
