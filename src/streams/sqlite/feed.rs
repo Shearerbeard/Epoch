@@ -105,7 +105,10 @@ impl<E> Clone for SqliteEventFeed<E> {
 
 impl<E> EventFeed<E> for SqliteEventFeed<E>
 where
-    E: Event + DeserializeOwned + Send + Sync + Debug,
+    // The 'static bound is the actor's: the rows decode inside the
+    // closure that holds the transaction, so the decoded events have to
+    // leave that closure's lifetime.
+    E: Event + DeserializeOwned + Send + Sync + Debug + 'static,
 {
     type Error = SqliteStreamsError;
 
@@ -177,7 +180,29 @@ where
                     .map_err(|error| super::classify_lock_failure(error, lock_timeout))?;
                 drop(statement);
 
-                if let Some((tip, ..)) = rows.last() {
+                // The rows decode inside the transaction, before the
+                // watermark moves. A payload the event type cannot
+                // decode must leave the group where it was: the group
+                // was never delivered those entries, so a watermark
+                // that claimed otherwise would let an ack skip them.
+                let mut entries = Vec::with_capacity(rows.len());
+                for (global_sequence, stream_key, event_data, event_metadata) in rows {
+                    let position = FeedPosition::new(
+                        u64::try_from(global_sequence).expect("global_sequence is non-negative"),
+                    )
+                    .expect("a stored global_sequence of a committed event is nonzero");
+                    let event: E = serde_json::from_str(&event_data)?;
+                    let metadata: crate::streams::EventMetadata =
+                        serde_json::from_str(&event_metadata)?;
+                    entries.push(FeedEntry::new(
+                        position,
+                        StreamRef::new(&category, &stream_key),
+                        RecordedEvent::keyed(event, metadata),
+                    ));
+                }
+
+                if let Some(tip) = entries.last() {
+                    let tip = i64::try_from(tip.position().get()).expect("a position fits i64");
                     // The `max` keeps the delivered watermark monotonic.
                     transaction
                         .execute(
@@ -185,7 +210,7 @@ where
                              VALUES (?1, ?2, 0, ?3) \
                              ON CONFLICT (category, group_name) \
                              DO UPDATE SET delivered_to = max(epoch_feed_cursors.delivered_to, excluded.delivered_to)",
-                            tokio_rusqlite::rusqlite::params![&category, &group, *tip],
+                            tokio_rusqlite::rusqlite::params![&category, &group, tip],
                         )
                         .map_err(|error| super::classify_lock_failure(error, lock_timeout))?;
                 }
@@ -193,26 +218,11 @@ where
                 transaction
                     .commit()
                     .map_err(|error| super::classify_lock_failure(error, lock_timeout))?;
-                Ok(rows)
+                Ok(entries)
             })
             .await;
 
-        let rows = super::actor_outcome(outcome)?;
-        let mut entries = Vec::with_capacity(rows.len());
-        for (global_sequence, stream_key, event_data, event_metadata) in rows {
-            let position = FeedPosition::new(
-                u64::try_from(global_sequence).expect("global_sequence is non-negative"),
-            )
-            .expect("a stored global_sequence of a committed event is nonzero");
-            let event: E = serde_json::from_str(&event_data)?;
-            let metadata: crate::streams::EventMetadata = serde_json::from_str(&event_metadata)?;
-            entries.push(FeedEntry::new(
-                position,
-                StreamRef::new(&self.category, &stream_key),
-                RecordedEvent::keyed(event, metadata),
-            ));
-        }
-        Ok(entries)
+        super::actor_outcome(outcome)
     }
 
     async fn ack(

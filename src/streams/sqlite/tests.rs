@@ -15,7 +15,9 @@ use crate::streams::feed::spec::{
     ack_is_monotonic, ack_rejects_undelivered, delivery_carries_the_envelope,
     poll_pages_the_backlog, poll_redelivers_until_acked,
 };
-use crate::streams::feed::{ConsumerGroup, EventFeed, PollLimit};
+use crate::streams::feed::{
+    AckError, ConsumerGroup, DeliveredWatermark, EventFeed, FeedPosition, PollLimit,
+};
 use crate::streams::spec::{
     a_keyed_append_loads_back_with_its_envelope, flash_sale_sells_exactly_the_stock,
     single_event_occ_race_on_empty_stream, single_event_occ_race_on_seeded_stream, under_deadline,
@@ -486,6 +488,72 @@ async fn independent_actors_conflict_deterministically() {
         );
     })
     .await;
+}
+
+/// A payload the feed's event type cannot decode must not advance the
+/// group's delivered watermark. The group was never delivered those
+/// entries, so a watermark that claimed otherwise would let an ack
+/// skip them: the poll fails, the group stays where it was, and an
+/// ack of the undelivered position is rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undecodable_payload_does_not_advance_the_delivered_watermark() {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct NeedsAnObject {
+        name: String,
+    }
+
+    impl Event for NeedsAnObject {
+        type EntityId = ();
+
+        fn event_type(&self) -> String {
+            "NeedsAnObject".to_owned()
+        }
+
+        fn get_id(&self) -> Self::EntityId {}
+    }
+
+    let file = temp_database();
+    let path = file.path().to_str().expect("utf8 path").to_owned();
+    let category = "undecodable";
+
+    let writer = SqliteEventStreams::<String, SomethingHappened>::open(&path, category)
+        .await
+        .expect("open");
+    writer.migrate().await.expect("schema migrates");
+    writer
+        .append(ExpectedVersion::NoStream, &unique_key("k"), &one_event())
+        .await
+        .expect("append succeeds");
+
+    // The feed reads the same category with an event type the stored
+    // payload does not fit.
+    let feed = SqliteEventFeed::<NeedsAnObject>::new(
+        Connection::open(&path).await.expect("a feed connection"),
+        category,
+    );
+    let group = ConsumerGroup::new("undecodable").expect("a non-empty group");
+
+    let outcome = feed
+        .poll(&group, PollLimit::new(10).expect("a nonzero limit"))
+        .await;
+    assert!(
+        matches!(outcome, Err(SqliteStreamsError::Serialization(_))),
+        "a payload that does not decode is a serialization error, got {outcome:?}"
+    );
+
+    // The group was never delivered the entry, so an ack of it is
+    // rejected as undelivered.
+    let position = FeedPosition::new(1).expect("1 is a position");
+    match feed.ack(&group, position).await {
+        Err(AckError::NotDelivered(rejection)) => {
+            assert_eq!(
+                rejection.delivered_to(),
+                DeliveredWatermark::at(0),
+                "the delivered watermark never moved"
+            );
+        }
+        other => panic!("expected an undelivered rejection, got {other:?}"),
+    }
 }
 
 /// The database's write lock is what a contender waits for, and what
