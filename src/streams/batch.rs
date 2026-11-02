@@ -350,7 +350,7 @@ impl DuplicateIntent {
     /// backends construct it, so a consumer cannot mint a redelivery
     /// signal.
     #[cfg_attr(
-        not(feature = "postgres"),
+        not(any(feature = "postgres", feature = "sqlite")),
         expect(
             dead_code,
             reason = "constructed only by the postgres intent-index mapping"
