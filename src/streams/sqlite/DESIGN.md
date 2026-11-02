@@ -252,7 +252,7 @@ what the shared suites do not reach.
 | `a_batch_cannot_contradict_a_category_event_type` (in-memory suite) | The case enforces the in-memory backend's Rust `TypeId` category registry (`src/streams/in_memory/batch.rs:129`, `src/streams/in_memory.rs:182`). Neither the PostgreSQL backend nor this one carries such a registry. A stored row holds an event-type string, not a type identity. |
 | `two_writes_cannot_disagree_over_an_unclaimed_category` (in-memory suite) | The same registry, reached from the other side. |
 | `AppendError::Backend`, `TransactError::Backend`, `AckError::Backend` | These are the wrappers the backend's own error takes. The variants they wrap are covered individually above, and a wrapper's identity is the shared type's business, not this backend's. |
-| The PostgreSQL funnel's advisory-lock proof (`a_funnel_holder_blocks_a_rival_append_until_release`) | The proof reads PostgreSQL's `pg_locks`, which SQLite has no equivalent of. This backend's equivalent is `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`. A holder owns the database write lock and commits a row for the contested stream; the rival is started while the holder owns it. Both connections are traced, and the rival's head read appears in the trace only after the holder's commit, so the head was read under the write lock. The rival then observes the committed head and conflicts. |
+| The PostgreSQL funnel's advisory-lock proof (`a_funnel_holder_blocks_a_rival_append_until_release`) | The proof reads PostgreSQL's `pg_locks`, which SQLite has no equivalent of. This backend's equivalent is `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`. A holder owns the database write lock and commits a row for the contested stream, and the rival is started while the holder owns it. The rival's own statements are traced, and its head read appears after its lock-taking statement, so the head was read under the write lock. The rival then observes the committed head and conflicts. |
 
 ### The scope of the identity claim
 
@@ -332,6 +332,15 @@ was not.
 |---|---|---|---|
 | 1 | BLOCKING - the replacement lock-order proof still lacked synchronization. Polling the holder's future once queued its closure but did not prove it had taken the lock, and a rival that had not finished after 200ms might not have reached its lock attempt at all. | Accepted | Repaired. The holder now acknowledges the lock it holds. The order is checked at the statement level through rusqlite's trace API. The rival's head read must appear after the holder's commit. A backend that read the head before taking the lock shows that read first. The trace needs rusqlite's `trace` feature, which `tokio-rusqlite` now enables. |
 | 2 | MINOR - the new feed-timeout case carried a doc comment about a zero bound it did not test. | Accepted | Repaired. The comment describes the assertion the case makes. |
+
+**Stage 2 Gate A, second fix-commit re-review.** `rust-reviewer`
+(amazon-bedrock `us.openai.gpt-6.1-sol`): **FAIL**, 1 blocking, 1
+minor.
+
+| # | Finding | Disposition | Repair or reason |
+|---|---|---|---|
+| 1 | BLOCKING - the lock-order proof still passed accidentally. The holder's acknowledgement is in place, but nothing observes the rival's database operation before the holder is released. The assertion compares the head read against the holder's commit rather than against the rival's own lock-taking statement, and temporal order alone cannot establish lock ownership. | Accepted | Repaired. Each traced connection now feeds its own sink, so the order is read per connection. The test waits until the rival's own trace shows its lock-taking statement before it releases the holder. The assertion is that the rival's head read comes after the rival's lock-taking statement. One connection runs one statement at a time, so that order means the head was read under the lock. The committed-head conflict assertion stays. |
+| 2 | MINOR - the feed-timeout case still carried the zero-bound comment, and the ledger claimed it was repaired when it was not. | Accepted | Repaired. The comment now describes the assertion the case makes, and the ledger records it. |
 
 **Gate S after the repairs.** `cargo fmt --check` clean. The clippy
 matrix against the Stage 0 baselines: default features 0 (baseline 0),
