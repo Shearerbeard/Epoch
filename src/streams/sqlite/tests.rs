@@ -570,7 +570,7 @@ async fn a_contender_waits_for_the_write_lock_and_sees_the_committed_head() {
         // Wait until the rival has begun its lock-taking statement, so
         // the release happens after the rival reached the lock rather
         // than after the rival was merely spawned.
-        statements_until(&mut rival_receiver, |sql| {
+        let mut rival_statements = statements_until(&mut rival_receiver, |sql| {
             sql.starts_with("BEGIN IMMEDIATE")
         })
         .await;
@@ -591,7 +591,7 @@ async fn a_contender_waits_for_the_write_lock_and_sees_the_committed_head() {
         // The rival's own statements, in the order that connection
         // began them. Its head read came after its lock-taking
         // statement, so the head was read under the write lock.
-        let rival_statements = drain_statements(&mut rival_receiver);
+        rival_statements.extend(drain_statements(&mut rival_receiver));
         let lock = rival_statements
             .iter()
             .position(|sql| sql.starts_with("BEGIN IMMEDIATE"))
