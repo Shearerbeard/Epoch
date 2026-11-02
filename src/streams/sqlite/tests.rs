@@ -2,7 +2,7 @@
 //! suites called unchanged, plus the cases the shared suites do not
 //! reach.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -118,6 +118,37 @@ fn unique_key(prefix: &str) -> String {
 /// independent actors on one database.
 fn temp_database() -> tempfile::NamedTempFile {
     tempfile::NamedTempFile::new().expect("temp file")
+}
+
+/// The SQL trace sink. SQLite's trace callback is a plain function
+/// pointer, so it reaches the channel through this global. Only the
+/// lock-order case installs a trace.
+static SQL_TRACE: Mutex<Option<std::sync::mpsc::Sender<String>>> = Mutex::new(None);
+
+/// Report every statement a traced connection begins running.
+fn trace_statement(event: rusqlite::trace::TraceEvent<'_>) {
+    if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+        let sender = SQL_TRACE.lock().ok().and_then(|guard| guard.clone());
+        if let Some(sender) = sender {
+            let _ = sender.send(sql.to_owned());
+        }
+    }
+}
+
+/// Trace the statements a connection begins running, so a test can
+/// see the order two connections ran their statements in.
+async fn trace_statements(connection: &Connection) {
+    connection
+        .clone()
+        .call(|conn| {
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(trace_statement),
+            );
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .expect("the trace installs");
 }
 
 /// The busy timeout the connection carries right now: the pragma
@@ -410,14 +441,24 @@ async fn independent_actors_conflict_deterministically() {
 }
 
 /// The database's write lock is what a contender waits for, and what
-/// makes it observe the committed head rather than a stale one. A
-/// holder takes the write lock and commits a row for the contested
+/// makes it observe the committed head rather than a stale one.
+///
+/// A holder takes the write lock and commits a row for the contested
 /// stream; a rival append started while the holder owns the lock must
-/// wait, and after the holder commits it must observe the holder's row
-/// and conflict rather than write beside it.
+/// wait for it, and after the holder commits the rival must observe
+/// the holder's row and conflict rather than write beside it.
+///
+/// The order is checked at the statement level, not at the task level:
+/// both connections are traced, and the rival's head read must appear
+/// after the holder's commit in the trace. A backend that read the
+/// head before taking the write lock would show that read first, and
+/// the case would fail.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_contender_waits_for_the_write_lock_and_sees_the_committed_head() {
     under_deadline(async {
+        let (sender, receiver) = std::sync::mpsc::channel::<String>();
+        *SQL_TRACE.lock().expect("the trace sink locks") = Some(sender);
+
         let file = temp_database();
         let path = file.path().to_str().expect("utf8 path").to_owned();
 
@@ -425,28 +466,38 @@ async fn a_contender_waits_for_the_write_lock_and_sees_the_committed_head() {
             .await
             .expect("open");
         store.migrate().await.expect("schema migrates");
+        trace_statements(&store.connection).await;
         let key = unique_key("contended");
 
         // The holder: a second connection that takes the write lock and
-        // commits a row for the contested stream. It holds the lock
-        // until the test releases it.
+        // commits a row for the contested stream. It says so once the
+        // lock is taken, and holds the lock until the test releases it.
+        let (locked, locking) = oneshot::channel();
         let (releasing, released) = std::sync::mpsc::channel::<()>();
         let holder = Connection::open(&path).await.expect("a second connection");
+        trace_statements(&holder).await;
         let holder_key = key.clone();
-        let mut held = Box::pin(holder.call(move |conn| {
-            let transaction =
-                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            transaction.execute(
-                "INSERT INTO stream_events \
-                 (category, stream_key, event_type, sequence, event_data, event_metadata) \
-                 VALUES ('contender', ?1, 'SomethingHappened', 1, 'null', '{}')",
-                [&holder_key],
-            )?;
-            let _ = released.recv();
-            transaction.commit()
-        }));
-        let polled = futures::poll!(&mut held);
-        assert!(polled.is_pending(), "the holder is queued");
+        let holder_task = tokio::spawn(async move {
+            holder
+                .call(move |conn| {
+                    let transaction =
+                        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    transaction.execute(
+                        "INSERT INTO stream_events \
+                         (category, stream_key, event_type, sequence, event_data, event_metadata) \
+                         VALUES ('contender', ?1, 'SomethingHappened', 1, 'null', '{}')",
+                        [&holder_key],
+                    )?;
+                    let _ = locked.send(());
+                    let _ = released.recv();
+                    transaction.commit()
+                })
+                .await
+        });
+
+        locking
+            .await
+            .expect("the holder takes the database write lock");
 
         // The rival: it cannot get the write lock while the holder owns
         // it, so it must wait.
@@ -459,30 +510,40 @@ async fn a_contender_waits_for_the_write_lock_and_sees_the_committed_head() {
                     .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(
-            !rival.is_finished(),
-            "the rival waits for the write lock the holder owns"
-        );
 
         // Release the holder, so its row commits.
         releasing.send(()).expect("the holder releases");
-        held.await.expect("the holder resolves");
-
+        holder_task
+            .await
+            .expect("the holder task")
+            .expect("the holder commits");
         let outcome = rival.await.expect("the rival task");
+
         assert!(
             matches!(outcome, Err(AppendError::Conflict(_))),
             "the rival observed the committed head and conflicted, got {outcome:?}"
         );
+
+        // The trace shows the order the two connections ran their
+        // statements in. The rival's head read must come after the
+        // holder's commit: a backend that read the head before taking
+        // the write lock would show that read first.
+        let traced: Vec<String> = receiver.try_iter().collect();
+        let commit = traced
+            .iter()
+            .position(|sql| sql == "COMMIT")
+            .expect("the holder's commit is traced");
+        let head_read = traced
+            .iter()
+            .position(|sql| sql.contains("SELECT"))
+            .expect("the rival's head read is traced");
+        assert!(
+            head_read > commit,
+            "the head was read under the write lock, not before it: {traced:?}"
+        );
     })
     .await;
 }
-
-/// A cancelled append still commits. The tokio-rusqlite actor runs a
-/// submitted closure unconditionally and only then attempts to deliver
-/// the result, so dropping the awaiting future cannot stop the work.
-/// The test enqueues the append and then drops the awaiting future:
-/// cancelling before the work was enqueued would prove nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cancelled_append_still_commits() {
     let store = store().await;

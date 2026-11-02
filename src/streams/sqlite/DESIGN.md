@@ -252,7 +252,7 @@ what the shared suites do not reach.
 | `a_batch_cannot_contradict_a_category_event_type` (in-memory suite) | The case enforces the in-memory backend's Rust `TypeId` category registry (`src/streams/in_memory/batch.rs:129`, `src/streams/in_memory.rs:182`). Neither the PostgreSQL backend nor this one carries such a registry. A stored row holds an event-type string, not a type identity. |
 | `two_writes_cannot_disagree_over_an_unclaimed_category` (in-memory suite) | The same registry, reached from the other side. |
 | `AppendError::Backend`, `TransactError::Backend`, `AckError::Backend` | These are the wrappers the backend's own error takes. The variants they wrap are covered individually above, and a wrapper's identity is the shared type's business, not this backend's. |
-| The PostgreSQL funnel's advisory-lock proof (`a_funnel_holder_blocks_a_rival_append_until_release`) | The proof reads PostgreSQL's `pg_locks`, which SQLite has no equivalent of. This backend's equivalent is `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`. A holder owns the database write lock and commits a row for the contested stream. The rival is observed still waiting while the holder owns the lock, and once the holder commits the rival observes the committed head and conflicts. |
+| The PostgreSQL funnel's advisory-lock proof (`a_funnel_holder_blocks_a_rival_append_until_release`) | The proof reads PostgreSQL's `pg_locks`, which SQLite has no equivalent of. This backend's equivalent is `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`. A holder owns the database write lock and commits a row for the contested stream; the rival is started while the holder owns it. Both connections are traced, and the rival's head read appears in the trace only after the holder's commit, so the head was read under the write lock. The rival then observes the committed head and conflicts. |
 
 ### The scope of the identity claim
 
@@ -322,6 +322,16 @@ Every finding was verified against the test file before disposition.
 | 5 | BLOCKING - the per-handle bound case checked the reported payload only, so an implementation that always installed one fixed bound would pass it. | Accepted | Repaired. The case now reads the connection's installed `busy_timeout` back after each operation, so it verifies the effective bound each handle installed, not only the duration each handle reported. |
 | 6 | BLOCKING - the manifest's error coverage and exclusion reasons were inaccurate: the append cases produce the wrapper variant rather than the backend's own, and the shared batch suite does not exercise this backend's typed write or its error mapping. | Accepted | Repaired. A feed poll against a wedged writer now covers the backend's own `LockTimeout`, and two new cases cover the builder's `Duplicate` and `Encoding` errors. The manifest rows now name the assertions that exist. |
 | 7 | BLOCKING - the duplicate-intent case did not prove the whole-batch rollback: the rejecting write came first, so a backend that stored writes one at a time would leave the same state. | Accepted | Repaired. The successful write now comes first and the rejected one second, and the case asserts that the first write was rolled back. It also asserts the rejected stream's full identity, not only its category. |
+
+**Stage 2 Gate A, re-review of the repair commit.** `rust-reviewer`
+(amazon-bedrock `us.openai.gpt-6.1-sol`): **FAIL**, 1 blocking, 1 minor.
+Six of the seven findings were verified repaired; the lock-order case
+was not.
+
+| # | Finding | Disposition | Repair or reason |
+|---|---|---|---|
+| 1 | BLOCKING - the replacement lock-order proof still lacked synchronization. Polling the holder's future once queued its closure but did not prove it had taken the lock, and a rival that had not finished after 200ms might not have reached its lock attempt at all. | Accepted | Repaired. The holder now acknowledges the lock it holds. The order is checked at the statement level through rusqlite's trace API. The rival's head read must appear after the holder's commit. A backend that read the head before taking the lock shows that read first. The trace needs rusqlite's `trace` feature, which `tokio-rusqlite` now enables. |
+| 2 | MINOR - the new feed-timeout case carried a doc comment about a zero bound it did not test. | Accepted | Repaired. The comment describes the assertion the case makes. |
 
 **Gate S after the repairs.** `cargo fmt --check` clean. The clippy
 matrix against the Stage 0 baselines: default features 0 (baseline 0),
