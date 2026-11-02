@@ -19,8 +19,6 @@
 //! SQLite is transactional, so a failed step rolls everything back, the
 //! ledger table included.
 
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::time::Duration;
 
