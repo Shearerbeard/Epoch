@@ -364,3 +364,29 @@ matrix against the Stage 0 baselines: default features 0 (baseline 0),
 now references the shared `expectation_satisfied`), `--all-features` 0
 (baseline 0). No configuration gained a diagnostic.
 
+
+**Fills Gate A.** `rust-reviewer` (amazon-bedrock
+`us.openai.gpt-6.1-sol`) over the fill range: **FAIL**, 1 blocking.
+
+| # | Finding | Disposition | Repair or reason |
+|---|---|---|---|
+| 1 | BLOCKING - the feed's `poll` updated the delivered watermark and committed before it decoded the payloads and envelopes. A payload the event type cannot decode left the group recorded as having received the whole page, so an ack inside that page could succeed instead of being rejected as undelivered, and unread events could be skipped. | Accepted | Repaired. The rows decode inside the transaction that holds them, before the watermark moves - what the PostgreSQL backend does. The feed's event type gained the `'static` bound the actor needs for decoded events to leave the closure. The regression case writes an undecodable payload, asserts the poll fails, the watermark never moved, and the ack is rejected. |
+
+**Fills Gate A, fix-commit re-review.** `rust-reviewer`: **PASS**, 0
+findings.
+
+**Final feed review (frontier, pre-PR).** `frontier-reviewer`:
+**PASS**, 0 blocking, 4 minor.
+
+| # | Finding | Disposition | Repair or reason |
+|---|---|---|---|
+| 1 | MINOR - `SqliteEventFeed::new` takes a raw `Connection` and neither the store nor the batch handle exposes its own, so a consumer keeps and clones the connection themselves. Parity with PostgreSQL holds, but an in-memory store cannot hand its connection to a feed at all. | Deferred | Follow-up. The reviewer's repair is a `feed()` method on the store, mirroring `InMemoryDatabase::feed`. It is new public API after the final review, so it waits for the maintainer's call in the PR rather than landing unreviewed. |
+| 2 | MINOR - no cancelled-poll or cancelled-ack case. A cancelled ack still commits, and the retried ack lands as the silent no-op at the cursor. Entailed by the actor property the append-cancellation case pins, but not itself pinned. | Deferred | Follow-up card. The behavior is documented in D2 and D2a; the missing case is coverage, not a defect. |
+| 3 | MINOR - `ack`'s `UPDATE` row count is unasserted, where PostgreSQL asserts one row. The write lock makes a missing row unreachable, and the design note records the deviation. | Accepted, no change | The argument was walked: no row means `delivered_to` is zero, so every nonzero position is rejected before the update. Optional symmetry only. |
+| 4 | MINOR - the `expect` calls on stored values are a panic-on-corrupt-row posture. | Accepted, no change | Identical to the PostgreSQL feed and recorded in the module docs as storage-corruption assertions. Corrupt-file resilience would be a cross-backend decision, not a SQLite-local one. |
+
+**Gate S at the PR.** `cargo fmt --check` clean. Clippy: default 0,
+`--no-default-features` 15, `--no-default-features --features sqlite` 5
+(baseline 9), `--all-features` 0. The test suite is green under
+`--features sqlite`, `--features in_memory,sqlite`, `--all-features`,
+and `--doc`.
