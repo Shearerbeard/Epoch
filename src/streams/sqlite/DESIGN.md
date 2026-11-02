@@ -192,9 +192,75 @@ that cannot fire is itself a lint error.
 
 ## The coverage manifest
 
-Filled at Stage 2, alongside the conformance tests: every trait method
-and every error variant mapped to the case that covers it, plus the
-exclusion rows with their reasons.
+Every trait method and every error variant on this backend, mapped to
+the case that covers it. The exclusion rows carry their reason.
+
+The shared suites are called unchanged; the SQLite-local cases cover
+what the shared suites do not reach.
+
+### `EventStreams`
+
+| Member | Covered by |
+|---|---|
+| `load_stream` | shared `single_event_occ_race_on_empty_stream` (asserts `Missing`), shared `a_keyed_append_loads_back_with_its_envelope`; local `a_missing_stream_loads_missing_and_slices_empty` |
+| `load_stream_from` | shared `a_keyed_append_loads_back_with_its_envelope` (with `None`); local `a_slice_from_a_cursor_is_inclusive`, `a_slice_past_the_tail_is_empty_at_the_head`, `a_missing_stream_loads_missing_and_slices_empty` |
+| `load_category` | local `a_category_read_returns_the_typed_id` |
+| `append` | the shared OCC races (`single_event_occ_race_on_empty_stream`, `single_event_occ_race_on_seeded_stream`), the shared flash sale (`flash_sale_sells_exactly_the_stock`), the shared envelope case (`a_keyed_append_loads_back_with_its_envelope`); local `independent_actors_conflict_deterministically`, `a_cancelled_append_still_commits`, `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound`, `the_envelope_written_is_the_envelope_stored` |
+### `AtomicStreams`
+
+| Member | Covered by |
+|---|---|
+| `transact` | local `overlapping_batches_leave_exactly_one_winner`, `a_violated_constraint_aborts_the_whole_batch`, `a_batch_and_an_append_contend_on_one_stream`, `a_batch_and_an_append_race_for_one_stream`, `a_satisfied_batch_commits_every_write`, `a_keyed_batch_write_stores_its_envelope`, `a_duplicate_intent_is_rejected_by_the_index`, `an_unavailable_lock_is_a_retryable_timeout`, `a_zero_funnel_bound_times_out_reporting_the_floor` |
+
+### `EventFeed`
+
+| Member | Covered by |
+|---|---|
+| `poll` | the shared redelivery case (`poll_redelivers_until_acked`), the shared paging case (`poll_pages_the_backlog`), the shared envelope case (`delivery_carries_the_envelope`) |
+| `ack` | the shared redelivery case (`poll_redelivers_until_acked`), the shared paging case (`poll_pages_the_backlog`), the shared monotonicity case (`ack_is_monotonic`), the shared undelivered case (`ack_rejects_undelivered`) |
+
+### The backend's own error variants
+
+| Variant | Covered by |
+|---|---|
+| `SqliteStreamsError::Connection` | local `an_unmigrated_database_is_a_driver_fault` |
+| `SqliteStreamsError::Handle` | local `a_closed_connection_is_a_handle_failure` |
+| `SqliteStreamsError::Serialization` | local `a_stored_payload_that_does_not_decode_is_a_serialization_error` |
+| `SqliteStreamsError::LockTimeout` | local `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound` |
+
+### The shared error variants this backend produces
+
+| Variant | Covered by |
+|---|---|
+| `AppendError::Conflict` | shared `single_event_occ_race_on_empty_stream`, shared `single_event_occ_race_on_seeded_stream`; local `independent_actors_conflict_deterministically`, `a_batch_and_an_append_race_for_one_stream` |
+| `AppendError::LockTimeout` | local `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound` |
+| `TransactError::Conflict` | local `overlapping_batches_leave_exactly_one_winner`, `a_batch_and_an_append_contend_on_one_stream`, `a_batch_and_an_append_race_for_one_stream` |
+| `TransactError::ConstraintViolated` | local `a_violated_constraint_aborts_the_whole_batch` |
+| `TransactError::DuplicateIntent` | local `a_duplicate_intent_is_rejected_by_the_index` |
+| `TransactError::LockTimeout` | local `an_unavailable_lock_is_a_retryable_timeout`, `a_zero_funnel_bound_times_out_reporting_the_floor` |
+| `LoadError::InvalidKey` | local `a_stored_key_that_does_not_parse_is_an_invalid_key` |
+| `AckError::Regression` | shared `ack_is_monotonic` |
+| `AckError::NotDelivered` | shared `ack_rejects_undelivered` |
+
+### Exclusions
+
+| Excluded | Why |
+|---|---|
+| `a_batch_cannot_contradict_a_category_event_type` (in-memory suite) | The case enforces the in-memory backend's Rust `TypeId` category registry (`src/streams/in_memory/batch.rs:129`, `src/streams/in_memory.rs:182`). Neither the PostgreSQL backend nor this one carries such a registry. A stored row holds an event-type string, not a type identity. |
+| `two_writes_cannot_disagree_over_an_unclaimed_category` (in-memory suite) | The same registry, reached from the other side. |
+| `AppendError::Backend`, `TransactError::Backend`, `AckError::Backend` | These are the wrappers the backend's own error takes. The variants they wrap are covered individually above, and a wrapper's identity is the shared type's business, not this backend's. |
+| `SqliteWriteError::Duplicate` | The batch builder rejects a second write for one stream before any transaction starts, and the shared `BatchBuilder` tests already pin that rejection on the shared type (`src/streams/batch.rs:452`). |
+| `SqliteWriteError::Encoding` | The encoding failure surfaces at build time, before a transaction starts. It needs an event whose serialization fails, and the shared `Batch` vocabulary does not admit one; the failure mode is the shared `DuplicateWrite` and `serde_json` error, both already covered by the shared surface. |
+| The `PostgreSQL` funnel's advisory-lock proof (`a_funnel_holder_blocks_a_rival_append_until_release`) | The proof reads PostgreSQL's `pg_locks`, which SQLite has no equivalent of. This backend's equivalent proof is `independent_actors_conflict_deterministically`, which opens two separately opened actors on one database file and shows the database's write lock is what serializes them. |
+
+### The scope of the identity claim
+
+A green suite proves that the events this backend stored are the events
+the shared contract says it should have stored. It does not prove that
+a consumer's behavior downstream of the store is unchanged, and it does
+not compare the stored bytes with another backend's: the raw bytes
+differ by design (divergence D3).
+
 
 ## Findings ledger
 

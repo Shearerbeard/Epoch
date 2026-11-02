@@ -46,6 +46,9 @@ pub mod batch;
 pub mod feed;
 mod migrations;
 
+#[cfg(test)]
+mod tests;
+
 pub use batch::{
     SqliteBatch, SqliteBatchBuilder, SqliteDatabase, SqliteEncodedEvent, SqliteWriteError,
 };
