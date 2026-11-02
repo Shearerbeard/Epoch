@@ -350,6 +350,13 @@ minor.
 |---|---|---|---|
 | 1 | BLOCKING - the acknowledgement that waits for the rival's lock-taking statement consumed the statement it matched and threw the vector away, so the ordering assertion saw only the later statements. A correct backend would have panicked on the missing lock statement, and a head read that preceded the lock would have been discarded rather than shown. | Accepted | Repaired. The vector the wait returns is kept and extended with the statements drained afterwards, so the assertion reads the rival's whole statement sequence. A head read before the lock attempt now shows up first, and the case fails. |
 
+**Stage 2 Gate A, fourth fix-commit re-review.** `rust-reviewer`
+(amazon-bedrock `us.openai.gpt-6.1-sol`): **PASS**, 0 findings. The
+ordering assertion was verified as sound for the regression it targets:
+a head read before the lock attempt stays in the retained prefix and
+fails the comparison, and the separate connection sinks keep the
+holder's statements from satisfying it by accident.
+
 **Gate S after the repairs.** `cargo fmt --check` clean. The clippy
 matrix against the Stage 0 baselines: default features 0 (baseline 0),
 `--no-default-features` 15 (baseline 15), `--no-default-features
