@@ -137,6 +137,18 @@ fn actor_outcome<T>(
     }
 }
 
+/// Classify a driver failure: a lock wait that ran out of time is the
+/// retryable outcome, and every other failure is a backend fault. The
+/// payload names the effective bound, so a retry policy sizing its
+/// backoff from it never reads a bound that was never in effect.
+pub(crate) fn classify_lock_failure(error: rusqlite::Error, bound: Duration) -> SqliteStreamsError {
+    if is_lock_timeout(&error) {
+        SqliteStreamsError::LockTimeout(Duration::from_millis(lock_timeout_ms(bound)))
+    } else {
+        SqliteStreamsError::Connection(error)
+    }
+}
+
 /// A stream's highest stored position as the observed version: no rows
 /// is `NoStream`, otherwise sequence N.
 fn version_of(position: u64) -> StreamVersion {
@@ -153,9 +165,15 @@ fn stored_position(raw: i64) -> u64 {
 }
 
 /// Rows to records, each with the envelope stored beside it.
+///
+/// The actor hands back owned payload and envelope strings rather than
+/// rows: a rusqlite `Row` borrows the statement that produced it, so
+/// it cannot leave the actor's closure. Decoding happens on the
+/// caller's side of that boundary, which also keeps the event type
+/// off the closure's `'static` bound.
 #[expect(unused_variables, reason = "todo!() body; filled by E28")]
-fn decode_records<'a, E>(
-    rows: impl IntoIterator<Item = rusqlite::Row<'a>>,
+fn decode_records<E>(
+    rows: impl IntoIterator<Item = (String, String)>,
 ) -> Result<Vec<RecordedEvent<E>>, SqliteStreamsError>
 where
     E: DeserializeOwned,
@@ -218,11 +236,20 @@ impl<Id, E> SqliteEventStreams<Id, E> {
         let lock_timeout = self.lock_timeout;
         let outcome = connection
             .call(move |conn| {
+                // The effective bound goes in before any statement
+                // that can contend for the write lock, the WAL pragma
+                // included: switching journal mode needs a brief
+                // exclusive lock, and it must wait under this
+                // operation's own bound rather than under whatever the
+                // connection happened to carry.
+                install_busy_timeout(conn, lock_timeout)
+                    .map_err(|error| classify_lock_failure(error, lock_timeout))?;
                 // WAL lets file-backed readers proceed beside the
                 // writer; on a `:memory:` database SQLite reports
                 // "memory" back, which this query consumes
                 // harmlessly.
-                conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))?;
+                conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+                    .map_err(|error| classify_lock_failure(error, lock_timeout))?;
                 migrations::apply(conn, lock_timeout)
             })
             .await;

@@ -34,7 +34,7 @@ could not be given one line would be two types, or a bag.
 |---|---|---|
 | `SqliteEventStreams<Id, E>` | One category of streams in one SQLite database, addressed by a typed id (ADR 0004). | A store that reads or writes two categories at once; a store whose category is not a namespace. |
 | `SqliteStreamsError` | The backend failure surface: a fault, or a lock wait that ran out of time. | Collapsing a retryable lock timeout into a fault, or a fault into a version conflict. |
-| `SqliteDatabase` | The database handle: the only value whose scope covers a cross-category batch (ADR 0006's ownership seam). | A batch that could reach a database other than the one it was built against. |
+| `SqliteDatabase` | The database handle: the only value whose scope covers a cross-category batch (ADR 0006's ownership seam). | A batch that carries a connection or a store of its own, so a transact could reach a database other than the handle's. |
 | `SqliteEncodedEvent` | An event erased to the backend's wire form at push, fallibly, before any transaction starts (ADR 0006's erasure contract). | A batch carrying an event that was never encoded, or an encoding failure that reaches a transaction. |
 | `SqliteBatch` | A set of writes that commit as one unit or not at all, at most one write per stream. | A batch with two writes for one stream, so no write can observe another write's head. |
 | `SqliteBatchBuilder` | The one route by which a typed event joins a batch. | A batch assembled outside the backend's own erasure bound. |
@@ -134,11 +134,18 @@ that cannot fire is itself a lint error.
   conflict.
 - **The busy timeout is installed per operation.** It is a property of
   the connection, and cloned handles share one connection, so the bound
-  in force is the one the operation installs inside its own closure -
+  in force is the one the operation installs inside its own closure,
   never one set once at connect.
 - **The batch's checks all precede its writes.** The batch reads every
   addressed head, evaluates every constraint, evaluates every write
   expectation, and only then inserts.
+- **A batch carries no handle.** The batch holds a category, a rendered
+  key, and its events; it never holds a connection or a store. A
+  transact reaches only the database of the handle it was
+  handed to. Which handle that is stays the caller's discipline, the
+  same way `BatchSource` leaves it on the shared surface: the
+  guarantee is that a batch cannot reach a *second* database, not that
+  it is branded for the first.
 - **The feed's cursor is a plain maximum over `global_sequence`.** The
   funnel makes insert order commit order, so a poll reading
   `global_sequence > cursor` can neither skip a committed event nor
@@ -194,3 +201,44 @@ exclusion rows with their reasons.
 The design panel's findings land here, numbered, each marked blocking
 or minor, each with its disposition (the repair, or the reason it was
 rejected), and the author and reviewer models per row.
+
+Author of the artifact under review: the board-owner session, fireworks-ai
+`minimax-m3p1-flash`.
+
+**Seat 1 - `frontier-reviewer` (amazon-bedrock `us.moonshotai.kimi-k3`),
+the invalid-states seat.** Verdict: **PASS**, 1 minor, 0 blocking.
+
+| # | Finding | Disposition | Repair or reason |
+|---|---|---|---|
+| 1 | MINOR - `src/streams/sqlite/feed.rs` - `Progress` carries a cross-field invariant the type does not defend, with no validating constructor on the surface yet. The struct needs `delivered_to >= cursor`, the same rule the cursor table's `CHECK` enforces. | Accepted | Repaired in the skeleton, ahead of the fill unit that would have carried it. `Progress::from_row` now exists and mirrors `src/streams/postgres/feed.rs:116`. Its non-negativity casts are storage-corruption assertions. |
+
+The seat recorded two observations that carry no repair: the
+`DuplicateIntent::new` `cfg_attr` widening lands with the fill unit
+that first constructs the type (the widening would leave the
+expectation unfulfilled before that point), and the unvalidated
+`category: &str` matches every other backend on the shared surface.
+
+**Seat 2 - `rust-reviewer` (amazon-bedrock `us.openai.gpt-6.1-sol`),
+the logic-and-seams seat.** Verdict: **FAIL**, 2 blocking, 1 minor.
+
+| # | Finding | Disposition | Repair or reason |
+|---|---|---|---|
+| 1 | BLOCKING - `src/streams/sqlite.rs` - the decoding signature could not consume production query rows. `decode_records` required an ordinary iterator of owned `rusqlite::Row` values, but rusqlite exposes a fallible lending cursor (`Rows::next()` yields `Result<Option<&Row>>`) and `Row` has no public constructor. The hole compiled only because no caller existed yet; filling the load methods would have forced a seam change. | Accepted | Repaired in the skeleton. `decode_records` now takes owned `(String, String)` payload and envelope pairs, and the actor closure hands those back. Decoding happens on the caller's side of the actor boundary, which also keeps the event type off the closure's `'static` bound. |
+| 2 | BLOCKING - `src/streams/sqlite.rs` - the migration performed lock-taking SQL before installing its operation's timeout, and bypassed timeout classification. `PRAGMA journal_mode=WAL` ran under whatever bound the connection carried, and its failure was converted straight into a backend fault, hiding the retryable outcome. | Accepted | Repaired in the skeleton. The effective bound goes in inside the actor closure, ahead of every statement that can contend for the write lock - the WAL pragma among them. The pragma's failure now routes through `classify_lock_failure`, so a busy expiry surfaces as the retryable `LockTimeout`. |
+| 3 | MINOR - `src/streams/sqlite/DESIGN.md` - the record claimed the types forbid a batch from reaching a database other than the one it was built against. Every database returns the same unbranded `Batch<SqliteEncodedEvent>`, so any `SqliteDatabase` accepts any batch; `BatchSource` leaves handle identity to caller discipline. | Accepted | Repaired in this record. The map now states the guarantee that holds - a batch carries no connection or store, so a transact reaches only the receiving handle's database - and the rules section says plainly that choosing the receiving database stays the caller's discipline. No branding was added. |
+
+**Checks the reviewers could not run.** Seat 2 ran `cargo check`,
+`cargo fmt --check`, and the SQLite-only all-targets check, all passing;
+its git-diff inspection and its Vale run were denied by its sandbox, so
+the diff's scope and the prose lint are unverified by it and were run by
+the board owner instead. Seat 1's shell was permission-gated, so its
+skeleton gate claims are unverified by it; the board owner ran the
+clippy matrix against the Stage 0 baselines.
+
+**Gate S after the repairs.** `cargo fmt --check` clean. The clippy
+matrix against the Stage 0 baselines: default features 0 (baseline 0),
+`--no-default-features` 15 (baseline 15), `--no-default-features
+--features sqlite` 8 (baseline 9 - a reduction, because the module
+now references the shared `expectation_satisfied`), `--all-features` 0
+(baseline 0). No configuration gained a diagnostic.
+

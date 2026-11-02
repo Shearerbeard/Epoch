@@ -52,6 +52,19 @@ struct Progress {
     delivered_to: u64,
 }
 
+impl Progress {
+    /// One group's progress row, read from the cursor table. The two
+    /// values move together: the schema's checks keep the watermark at
+    /// or above the cursor and both non-negative, so the u64 casts
+    /// are storage-corruption assertions rather than branches.
+    fn from_row(cursor: i64, delivered_to: i64) -> Self {
+        Self {
+            cursor: u64::try_from(cursor).expect("stored cursors are non-negative"),
+            delivered_to: u64::try_from(delivered_to).expect("stored watermarks are non-negative"),
+        }
+    }
+}
+
 /// A feed over one category of a SQLite database.
 pub struct SqliteEventFeed<E> {
     connection: Connection,
