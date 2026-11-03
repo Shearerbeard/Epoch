@@ -149,6 +149,37 @@ pub(crate) fn classify_lock_failure(error: rusqlite::Error, bound: Duration) -> 
     }
 }
 
+/// Apply pending schema migrations over one connection: the WAL
+/// pragma, then the whole pending set, under the operation's own
+/// bound. Shared by [`SqliteEventStreams::migrate`] and
+/// [`batch::SqliteDatabase::migrate`], so the two cannot drift.
+pub(crate) async fn migrate_connection(
+    connection: &Connection,
+    lock_timeout: Duration,
+) -> Result<(), SqliteStreamsError> {
+    let connection = connection.clone();
+    let outcome = connection
+        .call(move |conn| {
+            // The effective bound goes in before any statement
+            // that can contend for the write lock, the WAL pragma
+            // included: switching journal mode needs a brief
+            // exclusive lock, and it must wait under this
+            // operation's own bound rather than under whatever the
+            // connection happened to carry.
+            install_busy_timeout(conn, lock_timeout)
+                .map_err(|error| classify_lock_failure(error, lock_timeout))?;
+            // WAL lets file-backed readers proceed beside the
+            // writer; on a `:memory:` database SQLite reports
+            // "memory" back, which this query consumes
+            // harmlessly.
+            conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+                .map_err(|error| classify_lock_failure(error, lock_timeout))?;
+            migrations::apply(conn, lock_timeout)
+        })
+        .await;
+    actor_outcome(outcome)
+}
+
 /// A stream's highest stored position as the observed version: no rows
 /// is `NoStream`, otherwise sequence N.
 fn version_of(position: u64) -> StreamVersion {
@@ -237,28 +268,7 @@ impl<Id, E> SqliteEventStreams<Id, E> {
     /// Opening a store does not create the schema; this call does
     /// (E12's rule, carried onto this backend).
     pub async fn migrate(&self) -> Result<(), SqliteStreamsError> {
-        let connection = self.connection.clone();
-        let lock_timeout = self.lock_timeout;
-        let outcome = connection
-            .call(move |conn| {
-                // The effective bound goes in before any statement
-                // that can contend for the write lock, the WAL pragma
-                // included: switching journal mode needs a brief
-                // exclusive lock, and it must wait under this
-                // operation's own bound rather than under whatever the
-                // connection happened to carry.
-                install_busy_timeout(conn, lock_timeout)
-                    .map_err(|error| classify_lock_failure(error, lock_timeout))?;
-                // WAL lets file-backed readers proceed beside the
-                // writer; on a `:memory:` database SQLite reports
-                // "memory" back, which this query consumes
-                // harmlessly.
-                conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
-                    .map_err(|error| classify_lock_failure(error, lock_timeout))?;
-                migrations::apply(conn, lock_timeout)
-            })
-            .await;
-        actor_outcome(outcome)
+        migrate_connection(&self.connection, self.lock_timeout).await
     }
 }
 
@@ -351,6 +361,12 @@ where
                     })?
                     .collect::<Result<Vec<_>, rusqlite::Error>>()?;
                 let head = rows.first().map_or(0, |row| row.0);
+                // The SQL's `?3` bind filters the ordinary range; the
+                // u64 comparison below is decisive only where that
+                // bind clamped - a cursor beyond i64::MAX binds as
+                // i64::MAX and would SQL-match a stored sequence of
+                // exactly i64::MAX, where the contract still reads
+                // nothing past the tail.
                 let in_range = rows
                     .into_iter()
                     .filter_map(|(_, sequence, payload, envelope)| {

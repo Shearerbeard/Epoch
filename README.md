@@ -113,7 +113,10 @@ epoch = { package = "epoch-journal", version = "=0.2.0-alpha.1", default-feature
 For the PostgreSQL stream backend, select `postgres` instead. Call
 `PgEventStreams::migrate` before using the store. For the SQLite stream
 backend, select `sqlite` and call `SqliteEventStreams::migrate` before
-using the store; opening a store does not create the schema. The
+using the store; opening a store does not create the schema. A
+`SqliteDatabase` handle can hold the one connection an application
+root owns and hand out stores and feeds from it (`category`, `feed`)
+after `migrate`. The
 package requires Rust 1.88 or later.
 The [architecture decisions](https://github.com/Shearerbeard/Epoch/tree/v0.2.0-alpha.1/docs/adr)
 explain the batch, cursor, and outbox contracts.

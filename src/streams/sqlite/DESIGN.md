@@ -34,7 +34,7 @@ could not be given one line would be two types, or a bag.
 |---|---|---|
 | `SqliteEventStreams<Id, E>` | One category of streams in one SQLite database, addressed by a typed id (ADR 0004). | A store that reads or writes two categories at once; a store whose category is not a namespace. |
 | `SqliteStreamsError` | The backend failure surface: a fault, or a lock wait that ran out of time. | Collapsing a retryable lock timeout into a fault, or a fault into a version conflict. |
-| `SqliteDatabase` | The database handle: the only value whose scope covers a cross-category batch (ADR 0006's ownership seam). | A batch that carries a connection or a store of its own, so a transact could reach a database other than the handle's. |
+| `SqliteDatabase` | The database handle: the root an application holds, whose `category`, `feed`, and `migrate` hand out per-category stores, feeds, and the schema over one connection, and the only value whose scope covers a cross-category batch (ADR 0006's ownership seam). | A batch that carries a connection or a store of its own, so a transact could reach a database other than the handle's; a handle whose children do not share its connection or its lock bound. |
 | `SqliteEncodedEvent` | An event erased to the backend's wire form at push, fallibly, before any transaction starts (ADR 0006's erasure contract). | A batch carrying an event that was never encoded, or an encoding failure that reaches a transaction. |
 | `SqliteBatch` | A set of writes that commit as one unit or not at all, at most one write per stream. | A batch with two writes for one stream, so no write can observe another write's head. |
 | `SqliteBatchBuilder` | The one route by which a typed event joins a batch. | A batch assembled outside the backend's own erasure bound. |
@@ -56,7 +56,8 @@ watermark, read together so the two can never disagree), `Migration`
 | `crate::decider::Event` | `pub`, already there | The domain event trait. |
 | `crate::streams::sqlite::{lock_timeout_ms, install_busy_timeout, is_lock_timeout}` | `pub(crate)`, module-private | Shared by the store, the batch, the feed, and the migration runner. Not part of the public surface. |
 | `crate::streams::sqlite::migrations` | private module, `pub(super) fn apply` | The migration runner is an implementation detail of this backend. |
-| `crate::streams::sqlite::batch::{statement_error, insert_error, locked_heads, head_of}` | private to the module | Failure classification and head lookup are the backend's own. |
+| `crate::streams::sqlite::batch::{statement_error, locked_heads, head_of}` | private to the module | Failure classification and head lookup are the backend's own. |
+| `crate::streams::sqlite::batch::insert_error` | `pub(super)`, module-internal | The intent-index classification, driven directly by the conformance tests with the synthetic error pair real SQLite cannot produce. Not public API. |
 
 Nothing in `src/streams/spec.rs`, `src/streams/feed/spec.rs`,
 `src/streams/postgres/**`, or `src/streams/in_memory/**` is touched.
@@ -205,20 +206,20 @@ what the shared suites do not reach.
 | `load_stream` | the shared OCC races and the shared envelope case; local `a_missing_stream_loads_missing_and_slices_empty` |
 | `load_stream_from` | the shared envelope case (with `None`); local `a_slice_from_a_cursor_is_inclusive`, `a_slice_past_the_tail_is_empty_at_the_head`, `a_missing_stream_loads_missing_and_slices_empty` |
 | `load_category` | local `a_category_read_returns_the_typed_id` |
-| `append` | the shared OCC races, the shared flash sale, the shared envelope case; local `independent_actors_conflict_deterministically`, `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`, `a_cancelled_append_still_commits`, `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound`, `the_envelope_written_is_the_envelope_stored` |
+| `append` | the shared OCC races, the shared flash sale, the shared envelope case; local `independent_actors_conflict_deterministically`, `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`, `a_cancelled_append_still_commits`, `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound`, `a_child_of_the_root_handle_times_out_on_the_root_bound`, `the_envelope_written_is_the_envelope_stored` |
 
 ### `AtomicStreams`
 
 | Member | Covered by |
 |---|---|
-| `transact` | local `overlapping_batches_leave_exactly_one_winner`, `a_violated_constraint_aborts_the_whole_batch`, `a_batch_and_an_append_contend_on_one_stream`, `a_batch_and_an_append_race_for_one_stream`, `a_satisfied_batch_commits_every_write`, `a_keyed_batch_write_stores_its_envelope`, `a_duplicate_intent_is_rejected_by_the_index`, `an_unavailable_lock_is_a_retryable_timeout`, `a_zero_funnel_bound_times_out_reporting_the_floor` |
+| `transact` | local `overlapping_batches_leave_exactly_one_winner`, `a_violated_constraint_aborts_the_whole_batch`, `a_batch_and_an_append_contend_on_one_stream`, `a_batch_and_an_append_race_for_one_stream`, `a_satisfied_batch_commits_every_write`, `a_keyed_batch_write_stores_its_envelope`, `a_duplicate_intent_is_rejected_by_the_index`, `a_check_violation_is_a_backend_fault_not_a_duplicate_intent`, `an_unavailable_lock_is_a_retryable_timeout`, `a_zero_funnel_bound_times_out_reporting_the_floor` |
 
 ### `EventFeed`
 
 | Member | Covered by |
 |---|---|
-| `poll` | the shared redelivery case (`poll_redelivers_until_acked`), the shared paging case (`poll_pages_the_backlog`), the shared envelope case (`delivery_carries_the_envelope`); local `a_wedged_writer_times_out_a_feed_poll` |
-| `ack` | the shared redelivery case (`poll_redelivers_until_acked`), the shared paging case (`poll_pages_the_backlog`), the shared monotonicity case (`ack_is_monotonic`), the shared undelivered case (`ack_rejects_undelivered`) |
+| `poll` | the shared redelivery case (`poll_redelivers_until_acked`), the shared paging case (`poll_pages_the_backlog`), the shared envelope case (`delivery_carries_the_envelope`); local `a_wedged_writer_times_out_a_feed_poll`, `a_root_handle_hands_out_a_store_and_a_feed_over_one_connection`, `a_child_of_the_root_handle_times_out_on_the_root_bound` |
+| `ack` | the shared redelivery case (`poll_redelivers_until_acked`), the shared paging case (`poll_pages_the_backlog`), the shared monotonicity case (`ack_is_monotonic`), the shared undelivered case (`ack_rejects_undelivered`); local `a_root_handle_hands_out_a_store_and_a_feed_over_one_connection` |
 
 ### The backend's own error variants
 
@@ -239,7 +240,8 @@ what the shared suites do not reach.
 | `AppendError::LockTimeout` | local `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound` |
 | `TransactError::Conflict` | local `overlapping_batches_leave_exactly_one_winner`, `a_batch_and_an_append_contend_on_one_stream`, `a_batch_and_an_append_race_for_one_stream` |
 | `TransactError::ConstraintViolated` | local `a_violated_constraint_aborts_the_whole_batch` |
-| `TransactError::DuplicateIntent` | local `a_duplicate_intent_is_rejected_by_the_index` |
+| `TransactError::DuplicateIntent` | local `a_duplicate_intent_is_rejected_by_the_index`, `only_a_unique_violation_maps_to_a_duplicate_intent` |
+| `TransactError::Backend` | local `a_check_violation_is_a_backend_fault_not_a_duplicate_intent`, `only_a_unique_violation_maps_to_a_duplicate_intent` |
 | `TransactError::LockTimeout` | local `an_unavailable_lock_is_a_retryable_timeout`, `a_zero_funnel_bound_times_out_reporting_the_floor` |
 | `LoadError::InvalidKey` | local `a_stored_key_that_does_not_parse_is_an_invalid_key` |
 | `AckError::Regression` | the shared monotonicity case (`ack_is_monotonic`) |
@@ -251,7 +253,7 @@ what the shared suites do not reach.
 |---|---|
 | `a_batch_cannot_contradict_a_category_event_type` (in-memory suite) | The case enforces the in-memory backend's Rust `TypeId` category registry (`src/streams/in_memory/batch.rs:129`, `src/streams/in_memory.rs:182`). Neither the PostgreSQL backend nor this one carries such a registry. A stored row holds an event-type string, not a type identity. |
 | `two_writes_cannot_disagree_over_an_unclaimed_category` (in-memory suite) | The same registry, reached from the other side. |
-| `AppendError::Backend`, `TransactError::Backend`, `AckError::Backend` | These are the wrappers the backend's own error takes. The variants they wrap are covered individually above, and a wrapper's identity is the shared type's business, not this backend's. |
+| `AppendError::Backend`, `AckError::Backend` | These are the wrappers the backend's own error takes. The variants they wrap are covered individually above, and a wrapper's identity is the shared type's business, not this backend's. (`TransactError::Backend` was in this row until the fix round; the CHECK-violation and classifier cases now assert it directly, so it moved up.) |
 | The PostgreSQL funnel's advisory-lock proof (`a_funnel_holder_blocks_a_rival_append_until_release`) | The proof reads PostgreSQL's `pg_locks`, which SQLite has no equivalent of. This backend's equivalent is `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`. A holder owns the database write lock and commits a row for the contested stream, and the rival is started while the holder owns it. The rival's own statements are traced, and its head read appears after its lock-taking statement, so the head was read under the write lock. The rival then observes the committed head and conflicts. |
 
 ### The scope of the identity claim
@@ -390,3 +392,54 @@ findings.
 (baseline 9), `--all-features` 0. The test suite is green under
 `--features sqlite`, `--features in_memory,sqlite`, `--all-features`,
 and `--doc`.
+
+**Maintainer review round (Gate U), and the PR's open decision made.**
+Reviewer: the maintainer's session (opencode-go glm-5.3), over the
+whole PR range. Verdict: PASS to continue - five findings, none a
+correctness defect in the shipped paths, every one dispositioned
+below. The one decision the PR body left open is decided: the
+feed-constructor seam closes **in this card**, as a root-handle
+pattern, because the maintainer's consumer shape (one handle at a
+web-server root, sqlite default with postgres for HA) needs exactly
+that.
+
+| # | Finding | Disposition | Repair or reason |
+|---|---|---|---|
+| 1 | `SqliteEventFeed::new` takes a raw `Connection` and no type exposes its own, so a feed cannot be built over a store's private in-memory connection; the conformance tests reached a private field to do it. | Accepted | Repaired in this round. `SqliteDatabase` gains `category`, `feed`, and `migrate` - the root handle mirroring `InMemoryDatabase`'s verbs - sharing one connection and propagating its lock bound. The maintainer decided it lands here, not on a follow-up card. |
+| 2 | A poll is a writer on SQLite; the test drive opens a second connection for the consumer without ever saying why that matters. | Accepted | Repaired. The example's header carries a sixth bullet naming the write lock and the contention, and a final section demonstrates the root-handle shape over one in-memory connection. |
+| 3 | The `load_stream_from` Rust-side `>= cursor` re-check was unexplained next to the SQL's own `>= ?3` filter. | Accepted, kept | The re-check is decisive where the SQL bind clamps a cursor beyond i64::MAX (a clamped bind would match a stored sequence of exactly i64::MAX). The comment now says so; removal would change that edge. |
+| 4 | `insert_error` matched the intent index by message substring only, gated by the primary code that a CHECK violation shares. | Accepted | Repaired. The extended code `SQLITE_CONSTRAINT_UNIQUE` now gates the message test; a CHECK-violation case pins the fall-through; a classifier test drives the synthetic pair real SQLite cannot produce. |
+| 5 | `applied_versions` classified its failures through the lock classifier with a hardcoded 5s bound that was never in effect. | Accepted | Repaired. The read runs under the write lock the migration transaction already holds, so it now classifies as a backend fault - the same classification the batch's locked head read gives its own reads. |
+
+The fix range's authors: `rust-write` (fireworks `kimi-k3`) for
+`batch.rs`, `tests.rs`, and `examples/test_drive.rs`, one file per
+dispatch per the sizing rule; the board owner (opencode-go glm-5.3)
+for `sqlite.rs`, `migrations.rs`, `CHANGELOG.md`, `README.md`, and
+this record.
+
+**Gate A on the fix range.** `rust-reviewer` (amazon-bedrock
+`us.openai.gpt-6.1-sol`, a family different from every author above):
+**PASS**, 0 blocking, 1 minor - the CHECK-violation case could not
+discriminate the extended-code gate, because no real CHECK
+constraint's message names the intent index, so the pre-hardening
+message-only match already rejects that path. Accepted and repaired:
+`insert_error` is `pub(super)` and
+`only_a_unique_violation_maps_to_a_duplicate_intent` drives the
+classifier with the synthetic pair. Re-review of the repair:
+**PASS**, 0 findings, one accuracy note on the test's comment (the
+two errors' messages differ as well; both satisfy the same index-name
+predicate, so the extended code remains the only difference the
+classifier can key on) - taken into the comment.
+
+**Gate S over the fix range, measured on clippy 1.96.0.** fmt clean;
+check clean under no-default, sqlite, and all-features, all targets;
+tests green under `--features sqlite` (112), `--features
+in_memory,sqlite` (112), `--all-features` (142), and `--doc`. The
+clippy matrix was measured same-machine before and after (stash,
+re-lint, restore, re-lint): default 1/1, no-default 23/23,
+sqlite-only 7/7, all-features 3/3 - zero new diagnostics in every
+configuration. The card's recorded baselines (0/15/5/0) are stale
+under clippy 1.96.0: the pre-fix tree itself measures 1/23/7/3 on
+this machine, the two extra sqlite-only diagnostics living in
+`src/test_helpers/`. The operative rule - no increase against the
+configuration's own baseline, measured like for like - passes.

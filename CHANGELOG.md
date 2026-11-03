@@ -17,7 +17,10 @@
   the feed cursor is an honest plain maximum and the intent-key
   uniqueness index rejects repeated outbox intents. The schema arrives
   as numbered migration steps recorded in a ledger; call
-  `SqliteEventStreams::migrate` before using the store.
+  `SqliteEventStreams::migrate` before using the store. A
+  `SqliteDatabase` handle is the root an application holds:
+  `category`, `feed`, and `migrate` hand out per-category stores,
+  feeds, and the schema over its one shared connection.
 
 ### Changed
 

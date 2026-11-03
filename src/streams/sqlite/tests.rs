@@ -10,7 +10,7 @@ use tokio::sync::{oneshot, Barrier};
 use tokio_rusqlite::{rusqlite, Connection};
 
 use crate::decider::Event;
-use crate::streams::batch::{BatchConstraint, TransactError};
+use crate::streams::batch::{BatchConstraint, StreamRef, TransactError};
 use crate::streams::feed::spec::{
     ack_is_monotonic, ack_rejects_undelivered, delivery_carries_the_envelope,
     poll_pages_the_backlog, poll_redelivers_until_acked,
@@ -1524,6 +1524,105 @@ async fn a_duplicate_intent_is_rejected_by_the_index() {
     .await;
 }
 
+/// The negative half of the intent-index classification: a CHECK
+/// violation is a backend fault, never a duplicate intent. SQLite
+/// reports UNIQUE and CHECK violations under one primary
+/// `ConstraintViolation` code; the extended code is what separates
+/// them, and this case pins that a CHECK violation falls through to
+/// the shared classification. `ExpectedVersion::Any` passes the head
+/// check, so the insert itself is what fails - the `stream_key`
+/// character bound in `stream_events_text_bounds` - and the dropped
+/// transaction rolls the batch back whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_violation_is_a_backend_fault_not_a_duplicate_intent() {
+    under_deadline(async {
+        let fixture = fixture().await;
+        let kid = format!("kid-{}", "k".repeat(256));
+
+        // The successful write comes first, so a backend that stored
+        // writes one at a time would leave it behind; the rollback is
+        // what this case proves, exactly as the duplicate-intent case
+        // does.
+        let chore = unique_key("chore");
+        let mut builder = fixture.db.batch();
+        builder
+            .write(CHORES, &chore, ExpectedVersion::Any, &chore_event())
+            .expect("one write per stream");
+        builder
+            .write(KIDS, &kid, ExpectedVersion::Any, &kid_event())
+            .expect("one write per stream");
+        let outcome = fixture
+            .db
+            .transact(builder.build().expect("the batch has writes"))
+            .await;
+
+        match outcome {
+            Err(TransactError::Backend(SqliteStreamsError::Connection(_))) => {}
+            Err(TransactError::DuplicateIntent(_)) => {
+                panic!("a CHECK violation must not classify as a duplicate intent")
+            }
+            other => panic!("expected a backend connection fault, got {other:?}"),
+        }
+        assert_eq!(
+            kid_state(&fixture, &kid).await,
+            StreamState::Missing,
+            "the failed insert rolled the batch back whole"
+        );
+        assert_eq!(
+            chore_state(&fixture, &chore).await,
+            StreamState::Missing,
+            "the write that came first rolled back with the rejected one"
+        );
+    })
+    .await;
+}
+
+/// The extended code, not the message, separates the intent index's
+/// unique violation from every other constraint kind. The case above
+/// cannot pin this: no real CHECK constraint's message names the
+/// intent index, so the pre-hardening message-only match already
+/// rejects it. The classifier is therefore driven directly with the
+/// one error pair real SQLite cannot produce - two failures whose
+/// messages both satisfy the index-name predicate and whose extended
+/// codes differ - so the extended code is the only difference the
+/// classifier can key on, and only the unique one may classify as
+/// the redelivery signal.
+#[test]
+fn only_a_unique_violation_maps_to_a_duplicate_intent() {
+    let stream = StreamRef::new(OUTBOX, &"k".to_owned());
+    let bound = Duration::from_secs(5);
+
+    let unique = rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error {
+            code: rusqlite::ErrorCode::ConstraintViolation,
+            extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
+        },
+        Some("UNIQUE constraint failed: index 'stream_events_outbox_intent'".to_owned()),
+    );
+    assert!(
+        matches!(
+            super::batch::insert_error(unique, &stream, bound),
+            TransactError::DuplicateIntent(_)
+        ),
+        "a unique violation naming the intent index is the redelivery signal"
+    );
+
+    let check = rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error {
+            code: rusqlite::ErrorCode::ConstraintViolation,
+            extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_CHECK,
+        },
+        Some("CHECK constraint failed: stream_events_outbox_intent_bounds".to_owned()),
+    );
+    assert!(
+        matches!(
+            super::batch::insert_error(check, &stream, bound),
+            TransactError::Backend(SqliteStreamsError::Connection(_))
+        ),
+        "a non-unique constraint naming the index in its message is a backend fault"
+    );
+}
+
 /// A lock the batch cannot take inside its bound is a retryable
 /// timeout, not a conflict, and the timed-out batch stores nothing.
 #[tokio::test(flavor = "multi_thread")]
@@ -1621,6 +1720,87 @@ async fn a_zero_funnel_bound_times_out_reporting_the_floor() {
             kid_state(&fixture, &kid).await,
             StreamState::Missing,
             "a timed-out batch stores nothing"
+        );
+    })
+    .await;
+}
+
+/// One handle at an application root hands out a store and a feed over
+/// its one connection: the embedder's shape, every child sharing the
+/// handle's connection and contending on the same stored streams. The
+/// in-memory form is exactly what the raw constructors cannot express -
+/// an in-memory database belongs to its one connection, and
+/// `SqliteEventStreams::open_in_memory` keeps that connection to
+/// itself, so only the root handle can put a store and a feed over one
+/// private in-memory database.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_handle_hands_out_a_store_and_a_feed_over_one_connection() {
+    let root = SqliteDatabase::new(
+        Connection::open_in_memory()
+            .await
+            .expect("memory connection"),
+    );
+    root.migrate().await.expect("schema migrates");
+
+    let store = root.category::<String, SomethingHappened>("root");
+    let feed = root.feed::<SomethingHappened>("root");
+
+    let key = unique_key("root");
+    store
+        .append(ExpectedVersion::NoStream, &key, &one_event())
+        .await
+        .expect("append succeeds");
+
+    let group = ConsumerGroup::new("root").expect("a non-empty group");
+    let limit = PollLimit::new(10).expect("a nonzero limit");
+    let entries = feed.poll(&group, limit).await.expect("poll delivers");
+    assert_eq!(entries.len(), 1, "the feed sees the store's append");
+
+    feed.ack(&group, entries[0].position())
+        .await
+        .expect("ack the delivered position");
+
+    let entries = feed.poll(&group, limit).await.expect("poll succeeds");
+    assert!(entries.is_empty(), "an acked entry does not redeliver");
+}
+
+/// A child of the root handle inherits the root's lock bound, not the
+/// 5s default: the bound propagates to the store and the feed at
+/// derivation, so a wedged write lock times both children out on the
+/// bound the root was configured with. Both asserts name the
+/// propagated bound - it, not the default, is the one in force.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_of_the_root_handle_times_out_on_the_root_bound() {
+    under_deadline(async {
+        let file = temp_database();
+        let path = file.path().to_str().expect("utf8 path").to_owned();
+
+        let root =
+            SqliteDatabase::new(Connection::open(&path).await.expect("a database connection"))
+                .with_lock_timeout(Duration::from_millis(100));
+        root.migrate().await.expect("schema migrates");
+
+        let (held, waiting) = oneshot::channel();
+        wedge_the_write_lock(&path, held).await;
+        await_the_wedge(waiting).await;
+
+        let store = root.category::<String, SomethingHappened>("root-bound");
+        let outcome = store
+            .append(ExpectedVersion::NoStream, &unique_key("wedged"), &one_event())
+            .await;
+        assert!(
+            matches!(outcome, Err(AppendError::LockTimeout(reported)) if reported == Duration::from_millis(100)),
+            "the root's store times out on the root's bound, got {outcome:?}"
+        );
+
+        let feed = root.feed::<SomethingHappened>("root-bound");
+        let group = ConsumerGroup::new("root-bound").expect("a non-empty group");
+        let outcome = feed
+            .poll(&group, PollLimit::new(10).expect("a nonzero limit"))
+            .await;
+        assert!(
+            matches!(outcome, Err(SqliteStreamsError::LockTimeout(reported)) if reported == Duration::from_millis(100)),
+            "the root's feed times out on the root's bound, got {outcome:?}"
         );
     })
     .await;

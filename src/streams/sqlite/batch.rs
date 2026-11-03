@@ -24,7 +24,7 @@ use crate::streams::batch::{
     expectation_satisfied, BatchConflict, ConstraintViolation, DuplicateIntent,
 };
 
-use super::{SqliteStreamsError, DEFAULT_LOCK_TIMEOUT};
+use super::{SqliteEventFeed, SqliteEventStreams, SqliteStreamsError, DEFAULT_LOCK_TIMEOUT};
 
 /// An event erased to the backend's wire form at push (ADR 0006):
 /// encoding is fallible and happens before any transaction starts. The
@@ -89,6 +89,42 @@ impl SqliteDatabase {
     /// A builder for a batch this handle can commit.
     pub fn batch(&self) -> SqliteBatchBuilder {
         SqliteBatchBuilder::new()
+    }
+
+    /// A per-category store over this handle's connection, mirroring
+    /// `InMemoryDatabase::category` in name and role. Clones of the
+    /// connection share one actor and one database (ADR 0005), so the
+    /// store contends on the same stored streams as every other child
+    /// of the handle: a handle built once at an application root
+    /// serves every surface - store, batch, feed - over the one
+    /// connection. Infallible: the backend has no category registry to
+    /// claim, so there is nothing `Result`-shaped to return, the same
+    /// unvalidated `&str` posture [`SqliteEventStreams::new`] takes.
+    pub fn category<Id, E>(&self, category: &str) -> SqliteEventStreams<Id, E> {
+        SqliteEventStreams::new(self.connection.clone(), category)
+            .with_lock_timeout(self.lock_timeout)
+    }
+
+    /// A per-category feed over this handle's connection, mirroring
+    /// `InMemoryDatabase::feed`. This is how a handle over a private
+    /// in-memory database hands its connection to a feed, which the
+    /// raw constructors cannot express:
+    /// [`SqliteEventStreams::open_in_memory`] keeps the connection to
+    /// itself. Clones of the connection share one actor and one
+    /// database (ADR 0005), so the feed observes the same stored
+    /// streams the handle's stores and batches write.
+    pub fn feed<E>(&self, category: &str) -> SqliteEventFeed<E> {
+        SqliteEventFeed::new(self.connection.clone(), category).with_lock_timeout(self.lock_timeout)
+    }
+
+    /// Apply pending schema migrations over this handle's connection:
+    /// the same migration [`SqliteEventStreams::migrate`] makes, both
+    /// delegating to `super::migrate_connection` so the two cannot
+    /// drift. Run once at the application root, it prepares the one
+    /// database every child of the handle - store, batch, feed - then
+    /// shares (ADR 0005).
+    pub async fn migrate(&self) -> Result<(), SqliteStreamsError> {
+        super::migrate_connection(&self.connection, self.lock_timeout).await
     }
 }
 
@@ -159,23 +195,31 @@ fn statement_error(error: rusqlite::Error, bound: Duration) -> TransactError<Sql
 
 /// A per-event insert's failure. The intent-key index rejecting the
 /// row is the saga runner's typed redelivery signal on the write's
-/// stream; every other failure - including any other unique violation -
-/// falls through to the shared statement classification unchanged.
-fn insert_error(
+/// stream; every other failure - a non-unique constraint, another
+/// index's unique violation, anything else - falls through to the
+/// shared statement classification unchanged. `pub(super)` so the
+/// conformance tests can drive it with the synthetic error pair real
+/// SQLite cannot produce.
+pub(super) fn insert_error(
     error: rusqlite::Error,
     stream: &StreamRef,
     bound: Duration,
 ) -> TransactError<SqliteStreamsError> {
-    // SQLite reports a unique violation as a constraint code plus a
-    // message, with no structured field naming the index. The code is
-    // checked first so a different constraint never reaches the message
-    // test, and the index name is matched inside the message because that
-    // is the only place the driver reports it. This is the one fragile
-    // dependency on the driver's message text, deliberately isolated here.
+    // SQLite reports a constraint failure as a primary code, an
+    // extended code naming the violated constraint's kind, and a
+    // message, with no structured field naming the index. The primary
+    // code alone cannot separate a unique violation from a CHECK
+    // violation - both report `ConstraintViolation` - so the extended
+    // code is tested before the message text and only a
+    // `SQLITE_CONSTRAINT_UNIQUE` reaches it; the index name is matched
+    // inside the message because that is the only place the driver
+    // reports it. The message text remains the one fragile dependency,
+    // deliberately isolated here.
     let rejected_intent = matches!(
         &error,
         rusqlite::Error::SqliteFailure(failure, Some(message))
             if failure.code == rusqlite::ErrorCode::ConstraintViolation
+                && failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
                 && message.contains(OUTBOX_INTENT_INDEX)
     );
     if rejected_intent {

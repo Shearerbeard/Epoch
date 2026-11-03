@@ -11,7 +11,7 @@
 //! poll and acknowledge as a named consumer group would. Each step
 //! prints what it did and what came back, so the output is the lesson.
 //!
-//! Five things are worth watching for:
+//! Six things are worth watching for:
 //!
 //! 1. **A poll is not a read.** The entries a poll returns stay
 //!    delivered until they are acknowledged, so a second poll before an
@@ -26,6 +26,12 @@
 //!    log from the beginning, no matter how far the first group got.
 //! 5. **Paging is the caller's loop.** `poll` returns at most `limit`
 //!    entries; a consumer that wants the backlog asks again.
+//! 6. **A poll is a write on SQLite.** Polling records the delivered
+//!    watermark, so it takes the database's write lock and contends
+//!    with writers on the same file. The drive keeps a separate
+//!    connection for the consumer, but the lock is database-wide: a
+//!    slow poll loop can make an append wait out its `lock_timeout`.
+//!    Keep the bounds honest on both ends.
 
 #[cfg(feature = "sqlite")]
 mod drive {
@@ -287,6 +293,36 @@ mod drive {
             let page = feed.poll(group, two).await?;
             println!("  {name}: {} entries waiting", page.len());
         }
+
+        // ------------------------------------------------------------
+        println!("\n== 12. one handle at the root hands out the store, the feed, and the schema");
+        // ------------------------------------------------------------
+        // The embedder's shape: a web server builds one handle at its
+        // root over a private in-memory connection - the form the raw
+        // constructors cannot express, because an in-memory database
+        // belongs to its one connection - and the handle hands out
+        // every surface over that connection.
+        let root = SqliteDatabase::new(Connection::open_in_memory().await?);
+        root.migrate().await?;
+        println!("  one handle, one in-memory connection, migrated");
+
+        let store = root.category::<String, OrderPlaced>("embedded");
+        let feed = root.feed::<OrderPlaced>("embedded");
+
+        store
+            .append(
+                ExpectedVersion::NoStream,
+                &"order-9".to_owned(),
+                &batch_of(vec![order(9, 5_000)]),
+            )
+            .await?;
+        println!("  the store wrote order-9");
+
+        let page = feed.poll(&billing, two).await?;
+        print_page("billing poll (limit 2)", &page);
+        feed.ack(&billing, page.last().expect("one entry").position())
+            .await?;
+        println!("  the feed read it back: one connection served both");
 
         println!("\n== done");
         Ok(())

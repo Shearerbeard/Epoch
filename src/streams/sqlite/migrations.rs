@@ -113,18 +113,21 @@ fn apply_steps(
     Ok(())
 }
 
-/// The versions the ledger already records.
+/// The versions the ledger already records. A read here runs under the
+/// write lock the `BEGIN IMMEDIATE` already holds, so it cannot time
+/// out; a failure is a backend fault, the same classification the
+/// batch's locked head read gives its own reads.
 fn applied_versions(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<HashSet<i64>, SqliteStreamsError> {
     let mut statement = transaction
         .prepare("SELECT version FROM epoch_schema_migrations")
-        .map_err(|error| classify_lock_failure(error, Duration::from_secs(5)))?;
+        .map_err(SqliteStreamsError::Connection)?;
     let versions: Vec<i64> = statement
         .query_map([], |row| row.get::<_, i64>(0))
-        .map_err(|error| classify_lock_failure(error, Duration::from_secs(5)))?
+        .map_err(SqliteStreamsError::Connection)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| classify_lock_failure(error, Duration::from_secs(5)))?;
+        .map_err(SqliteStreamsError::Connection)?;
     Ok(versions.into_iter().collect())
 }
 
