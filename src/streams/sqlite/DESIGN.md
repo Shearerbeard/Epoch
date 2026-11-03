@@ -395,9 +395,9 @@ and `--doc`.
 
 **Maintainer review round (Gate U), and the PR's open decision made.**
 Reviewer: the maintainer's session (opencode-go glm-5.3), over the
-whole PR range. Verdict: PASS to continue - five findings, none a
-correctness defect in the shipped paths, every one dispositioned
-below. The one decision the PR body left open is decided: the
+whole PR range. Verdict: PASS to continue. Five findings, no
+correctness defect among them, and a disposition for each in the
+table below. The one decision the PR body left open is decided: the
 feed-constructor seam closes **in this card**, as a root-handle
 pattern, because the maintainer's consumer shape (one handle at a
 web-server root, sqlite default with postgres for HA) needs exactly
@@ -439,7 +439,7 @@ clippy matrix was measured same-machine before and after (stash,
 re-lint, restore, re-lint): default 1/1, no-default 23/23,
 sqlite-only 7/7, all-features 3/3 - zero new diagnostics in every
 configuration. The card's recorded baselines (0/15/5/0) are stale
-under clippy 1.96.0: the pre-fix tree itself measures 1/23/7/3 on
-this machine, the two extra sqlite-only diagnostics living in
+under clippy 1.96.0. The pre-fix tree itself measures 1/23/7/3 on
+this machine, with the two extra sqlite-only diagnostics in
 `src/test_helpers/`. The operative rule - no increase against the
 configuration's own baseline, measured like for like - passes.

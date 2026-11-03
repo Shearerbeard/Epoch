@@ -157,7 +157,7 @@ from the design. The spec suites do not exercise cancellation, so a
 SQLite-local test pins the actual behavior and makes it a documented fact. |
 | D3 | Stored bytes differ. PostgreSQL's `JSONB` normalizes; SQLite's `TEXT` stores serde_json's exact output. | The stored value is re-serialized on read, so the observable event is identical. The difference is visible only to someone diffing the database file. |
 | D4 | *A parity note, not a divergence.* `load_category` drops the envelope, because `CategoryEvent` has only `id` and `event` and no field for one. | The PostgreSQL backend reads only `event_data` too. This backend does the same, or E29's cross-backend diffing breaks. Do not "fix" it here. |
-| D5 | The intent-key uniqueness index is implemented on SQLite. | Decided by the maintainer on 2026-11-02 and recorded on the card. The cost is that SQLite exposes no structured constraint name, so the mapping to `DuplicateIntent` must inspect the primary code, the extended code (`SQLITE_CONSTRAINT_UNIQUE`, which separates a unique violation from a CHECK violation sharing the primary code), and the index identity in the message. That match is isolated in one helper with a comment naming the fragility. |
+| D5 | The intent-key uniqueness index is implemented on SQLite. | Decided by the maintainer on 2026-11-02 and recorded on the card. The cost is that SQLite exposes no structured constraint name, so the mapping to `DuplicateIntent` checks the primary code, the extended code (`SQLITE_CONSTRAINT_UNIQUE` - the primary code alone cannot separate a unique violation from a CHECK violation), and the index identity in the message, inside one helper with a comment naming the fragility. |
 | D6 | The grouped head read is bounded by SQLite's variable limit. | The `VALUES` list is chunked and the chunk results are merged in Rust, inside the one transaction. A capacity note, not a correctness one. |
 | D7 | No holder eviction. | An operational difference, not a correctness one. See the feed's divergences above. |
 | D8 | A feed poll takes the database write lock. | An operational difference, not a correctness one. See the feed's divergences above. |
@@ -226,11 +226,11 @@ for HA later - with every surface derived from it. `SqliteDatabase`
 is that handle: `category`, `feed`, and `migrate` hand out
 per-category stores, feeds, and the schema over its one connection,
 mirroring `InMemoryDatabase`'s verbs, and every child carries the
-handle's lock wait bound. The gap it closes is concrete: no type
-exposed its connection, so a feed could not be built over a store's
-private in-memory database - the conformance tests reached a private
-field to do it, and a consumer could not. The raw constructors stay;
-the handle is additive, and PostgreSQL's root remains the pool
+handle's lock wait bound. An in-memory store could not hand its
+connection to a feed, because no type exposed the connection it
+held. The tests reached the private field; a consumer could not.
+
+The raw constructors stay, and PostgreSQL's root remains the pool
 itself, which every constructor already accepts.
 
 ### The migration story
