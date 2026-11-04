@@ -142,8 +142,9 @@ docker compose down
 ```
 
 See `CHANGELOG.md` for version history and `LICENSE` for the
-Apache-2.0 terms. CI runs the same format, lint, and test steps on every
-push and pull request, plus a `cargo publish --dry-run`; the `backends`
-job starts the composed services and runs the default and all-feature
-suites. The stable 0.1.x package remains available for
+Apache-2.0 terms, and `NOTICE` for the copyright line Apache asks
+redistributors to reproduce. CI runs the same format, lint, and test
+steps on every push and pull request, plus a `cargo publish --dry-run`;
+the `backends` job starts the composed services and runs the default
+and all-feature suites. The stable 0.1.x package remains available for
 consumers that do not need the redesign.
