@@ -3,7 +3,7 @@
 //! Run it with:
 //!
 //! ```text
-//! cargo run --example test_drive --features sqlite
+//! cargo run --example feed_test_drive --features sqlite
 //! ```
 //!
 //! The drive is written the way a real consumer drives a feed: open the
@@ -339,7 +339,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn main() {
     eprintln!(
         "This example drives the SQLite backend. Run it with:\n\
-         \n    cargo run --example test_drive --features sqlite\n"
+         \n    cargo run --example feed_test_drive --features sqlite\n"
     );
     std::process::exit(1);
 }
