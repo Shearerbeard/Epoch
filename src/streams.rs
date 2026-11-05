@@ -22,6 +22,8 @@ pub mod postgres;
 mod retry;
 pub mod saga;
 pub mod spec;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 
 #[cfg(all(test, feature = "in_memory"))]
 mod saga_outbox_golden;
