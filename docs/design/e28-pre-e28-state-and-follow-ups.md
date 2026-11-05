@@ -22,7 +22,7 @@ The crate carried two storage surfaces side by side.
 | SQLite backend | yes, `src/repository/sqlite/`, landed by E26 | **none** |
 | PostgreSQL backend | yes | yes |
 | In-memory backend | yes | yes |
-| Feed | no | PostgreSQL only |
+| Feed | no | in-memory and PostgreSQL |
 | Schema | `schema.sql`, `CREATE TABLE IF NOT EXISTS` | numbered steps with a ledger |
 
 So SQLite already had a repository backend. What it did not have was a
@@ -33,10 +33,13 @@ migration style.
 
 ## What a consumer could not do before E28
 
-- Run the new surface embedded. A consumer wanting typed stream ids,
-  atomic multi-stream batches, or a feed needed PostgreSQL.
-- Test-drive saga or feed behavior without a service. This is the gap
-  that minted the card, after E27's CLI made it concrete.
+- Run the new surface with durable storage and no service. In-memory
+  covered a single process, so the gap was durability rather than
+  features: a feed cursor there lives only as long as its database
+  root.
+- Restart a consumer group without a service. That is the at-least-once
+  path - a crash between delivery and ack replays - and before this
+  card it needed PostgreSQL.
 - Use the old surface's feed, because there is no old-surface feed.
 
 ## What was already wrong before E28
