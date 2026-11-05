@@ -14,6 +14,12 @@ exclude = ["/.claude/", "/.github/", "/AGENTS.md", "/CLAUDE.md", "/TODO.md", "/d
 [lib]
 name = "epoch"
 
+# Dev harness for test-driving event journal implementations locally.
+# Not a shipped feature; needs the two backends it drives.
+[[example]]
+name = "test_drive"
+required-features = ["in_memory", "sqlite"]
+
 [features]
 default = ["in_memory", "esdb", "redis"]
 in_memory = []
