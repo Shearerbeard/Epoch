@@ -449,3 +449,12 @@ under clippy 1.96.0. The pre-fix tree itself measures 1/23/7/3 on
 this machine, with the two extra sqlite-only diagnostics in
 `src/test_helpers/`. The operative rule - no increase against the
 configuration's own baseline, measured like for like - passes.
+
+**Gate A on the Gate M commits (the drift audit's blocking finding).**
+`rust-reviewer` (amazon-bedrock `us.openai.gpt-6.1-sol`) over
+`d85f96d..7d97192`: **FAIL**, 2 blocking.
+
+| # | Finding | Disposition | Repair or reason |
+|---|---|---|---|
+| 1 | BLOCKING - `tests/e28_gate_m.rs` compared the two backends to each other but never to a specified transcript. Two backends that both lost the batch's events would have agreed. The batch poll would be empty, so its ack loop would do nothing and the audit poll would carry only the seed events. | Accepted | Repaired. `expected_transcript()` specifies all fourteen pages and all nine ack answers; each backend is asserted against it before the two are compared. A deliberately broken expected ack was verified to fail the test with the full diff. |
+| 2 | BLOCKING - the rejected batch never reached an insert. Its `StreamExists` constraint is evaluated before the first write, so the case proved a pre-write refusal rather than a rollback. | Accepted | Repaired. A third batch writes `order-5` first, then a stream whose key is one character past the bound both schemas enforce (PostgreSQL `VARCHAR(255)`, SQLite's explicit check). The first insert succeeds and the second fails at insert time. The case asserts the batch's write order, the `Backend` classification, and that `order-5` is `Missing` through both a direct load and the feed's next poll. |
