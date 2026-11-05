@@ -458,3 +458,24 @@ configuration's own baseline, measured like for like - passes.
 |---|---|---|---|
 | 1 | BLOCKING - `tests/e28_gate_m.rs` compared the two backends to each other but never to a specified transcript. Two backends that both lost the batch's events would have agreed. The batch poll would be empty, so its ack loop would do nothing and the audit poll would carry only the seed events. | Accepted | Repaired. `expected_transcript()` specifies all fourteen pages and all nine ack answers; each backend is asserted against it before the two are compared. A deliberately broken expected ack was verified to fail the test with the full diff. |
 | 2 | BLOCKING - the rejected batch never reached an insert. Its `StreamExists` constraint is evaluated before the first write, so the case proved a pre-write refusal rather than a rollback. | Accepted | Repaired. A third batch writes `order-5` first, then a stream whose key is one character past the bound both schemas enforce (PostgreSQL `VARCHAR(255)`, SQLite's explicit check). The first insert succeeds and the second fails at insert time. The case asserts the batch's write order, the `Backend` classification, and that `order-5` is `Missing` through both a direct load and the feed's next poll. |
+
+**Frontier pass over the store, the batch, and the migration runner.**
+`frontier-reviewer` over `sqlite.rs`, `sqlite/batch.rs`,
+`sqlite/migrations.rs`, and the three SQL steps: **PASS**, 0 blocking,
+11 minor, every one classified `accepted`. The round was
+documentation-only by the board owner's instruction, so none of these
+changed code.
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | `load_stream_from`'s `map_or(0, ...)` head default is defensive code the outer join makes unreachable; PostgreSQL states the same invariant with an `expect`. | Accepted. Posture alignment only, and it would be a change in the shape of an assertion, not behavior. |
+| 2 | The clamped-bind edge the comment names is real, and it is untested on both backends: a cursor above `i64::MAX` binds clamped, and only the Rust-side re-check enforces "nothing past the tail". | Accepted. Observable only with ~9.2e18 events in one stream, and PostgreSQL carries the identical re-check untested. A raw-insert fixture would pin both together. |
+| 3 | Read paths never install the busy timeout, so a read that ever hit `SQLITE_BUSY` would classify as `Connection`, not `LockTimeout`. | Accepted. Under WAL a reader never blocks on the writer's locks; on a rollback-journal database the unmigrated read fails on the missing table first. Revisit only if non-WAL becomes a supported shape. |
+| 4 | The chunked head merge cannot be exercised at its boundary cheaply. | Accepted. `locked_streams()` sorts and dedups before chunking, the chunks share one snapshot, and the correlated scalar subquery guarantees a row for every addressed stream. The boundary is a capacity limit rather than a correctness one. |
+| 5 | The batch re-serializes an already-valid `Value` per insert, effectively infallibly. | Accepted. A platform consequence of TEXT-versus-JSONB; a failure, were one possible, lands as `Backend(Serialization)`. |
+| 6 | No cancelled-`transact` case, where the append path has one. | Accepted as coverage, not defect. Fold into the same follow-up card as the cancelled poll/ack cases; the actor property is already pinned. |
+| 7 | No checksum or drift detection on applied migration steps; immutability is convention-only. | Accepted. The module docs state the rule and the order test pins the numbering. The PostgreSQL runner holds the same posture. A ledger checksum column is additive if drift ever bites. |
+| 8 | Two processes racing `migrate()` is sound by construction; no test races them. | Accepted. `BEGIN IMMEDIATE` serializes them; the loser waits out its bound or finds nothing pending. The failing-step rollback and idempotency are both proven. |
+| 9 | `created_at` is `TEXT`, the one column weaker than PostgreSQL's, and no code path reads it. | Accepted. Every constraint a caller can reach was checked clause by clause against the PostgreSQL schema; no row SQLite admits would PostgreSQL reject. |
+| 10 | `load_category` drops the envelope (D4). | Accepted. PostgreSQL drops the same one, `CategoryEvent` has no field for it, and the feed is the envelope-carrying read path. |
+| 11 | The intent classifier's message-substring dependency fails toward `Backend`, never a false `DuplicateIntent`. | Accepted. The extended-code gate and the synthetic-pair case pin both levels; a reworded driver message degrades loudly in the right direction. |

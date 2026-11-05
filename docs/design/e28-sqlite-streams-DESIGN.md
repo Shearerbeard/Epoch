@@ -270,3 +270,16 @@ returns a row with head 0 for a stream with no events, which the batch's head lo
   itself is not here.
 - It does not compare its stored bytes with another backend's. That
   comparison is E29's, and the raw bytes differ by design (D3).
+
+## The reviews, and what they left open
+
+Every surface had a frontier-class pass before the PR: the feed first,
+then the store, the batch, and the migration runner. The second pass
+found nothing to fix - eleven minor findings, each a platform
+consequence or a boundary the suite reasons about without exercising,
+and every one recorded in the module's ledger.
+
+Two notes cover what is left. This one states what the backend does and
+why. `e28-pre-e28-state-and-follow-ups.md` states what SQLite supported
+before this card, what was already wrong then, and the consolidated
+follow-up list with sizes.
