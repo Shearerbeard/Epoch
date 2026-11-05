@@ -38,7 +38,8 @@ use epoch::streams::feed::{
 use epoch::streams::postgres::{pool_from_conn_str, PgDatabase, PgEventFeed, PgEventStreams};
 use epoch::streams::sqlite::{SqliteBatchBuilder, SqliteDatabase};
 use epoch::streams::{
-    AtomicStreams, BatchConstraint, EventBatch, EventStreams, ExpectedVersion, TransactError,
+    AtomicStreams, BatchConstraint, EventBatch, EventStreams, ExpectedVersion, StreamState,
+    TransactError,
 };
 
 /// The event the consumer writes and reads back.
@@ -69,6 +70,12 @@ fn order(order: u32, amount_cents: u32) -> OrderPlaced {
 
 fn batch_of(events: Vec<OrderPlaced>) -> EventBatch<OrderPlaced> {
     EventBatch::new(events).expect("the flow never builds an empty batch")
+}
+
+/// One character past the key bound both schemas enforce: PostgreSQL's
+/// `VARCHAR(255)` and SQLite's explicit length check.
+fn too_long_key() -> String {
+    "x".repeat(256)
 }
 
 /// What a consumer observed, in the order it observed it.
@@ -138,12 +145,19 @@ where
 /// The consumer's flow, written once against the traits. The two batch
 /// commits are passed in because a batch's wire form is the backend's
 /// own type, which is the seam ADR 0006 deliberately keeps concrete.
-async fn drive<S, F, G, B>(store: S, feed: F, good_batch: G, bad_batch: B) -> Transcript
+async fn drive<S, F, G, B, I>(
+    store: S,
+    feed: F,
+    good_batch: G,
+    bad_batch: B,
+    insert_batch: I,
+) -> Transcript
 where
     S: EventStreams<OrderPlaced, Id = String> + Sync,
     F: EventFeed<OrderPlaced> + Sync,
     G: Future<Output = String>,
     B: Future<Output = String>,
+    I: Future<Output = String>,
 {
     let mut transcript = Transcript::default();
     let billing = ConsumerGroup::new("billing").expect("a non-empty group");
@@ -244,6 +258,29 @@ where
         .expect("the post-rejection poll");
     transcript.pages.push(render_page(&after_rejection));
 
+    // A batch whose second write fails at insert time, after the first
+    // has already been inserted. The constraint batch above is rejected
+    // before any write, so only this step proves a rollback rather than
+    // a pre-write refusal.
+    transcript.batches.push(insert_batch.await);
+
+    let after_insert_rejection = feed
+        .poll(&billing, ten)
+        .await
+        .expect("the post-insert-rejection poll");
+    transcript.pages.push(render_page(&after_insert_rejection));
+
+    assert!(
+        matches!(
+            store
+                .load_stream(&"order-5".to_owned())
+                .await
+                .expect("load the batch's first write"),
+            StreamState::Missing
+        ),
+        "the insert-time rejection rolled back the write that was already inserted"
+    );
+
     // A second group reads the whole log from the start, then drains it
     // two at a time.
     let audit_page = feed.poll(&audit, ten).await.expect("the audit poll");
@@ -296,6 +333,40 @@ async fn sqlite_good_batch(root: &SqliteDatabase, category: &str) -> String {
 
 /// The rejected batch: it writes a stream and asserts a stream that
 /// does not exist. Nothing it wrote may survive.
+/// The insert-time rejection. The first write is valid and is inserted
+/// before the second write fails on the key bound, so the rollback -
+/// not a pre-write check - has to undo it.
+async fn sqlite_insert_batch(root: &SqliteDatabase, category: &str) -> String {
+    let mut builder: SqliteBatchBuilder = root.batch();
+    if let Err(error) = builder.write(
+        category,
+        &"order-5".to_owned(),
+        ExpectedVersion::NoStream,
+        &batch_of(vec![order(5, 6_100)]),
+    ) {
+        return format!("write-refused:{error}");
+    }
+    let too_long = too_long_key();
+    if let Err(error) = builder.write(
+        category,
+        &too_long,
+        ExpectedVersion::NoStream,
+        &batch_of(vec![order(5, 6_200)]),
+    ) {
+        return format!("write-refused:{error}");
+    }
+    let batch = match builder.build() {
+        Ok(batch) => batch,
+        Err(error) => return format!("build-refused:{error}"),
+    };
+    // The rollback proof depends on this order: both backends insert in
+    // the batch's write order, so the valid write runs first and the
+    // failing one second.
+    assert_eq!(batch.writes()[0].stream().key(), "order-5");
+    assert_eq!(batch.writes()[1].stream().key(), too_long_key());
+    classify_transact(root.transact(batch).await)
+}
+
 async fn sqlite_bad_batch(root: &SqliteDatabase, category: &str) -> String {
     let mut builder: SqliteBatchBuilder = root.batch();
     if let Err(error) = builder.write(
@@ -340,6 +411,34 @@ async fn postgres_good_batch(db: &PgDatabase, category: &str) -> String {
     classify_transact(db.transact(batch).await)
 }
 
+async fn postgres_insert_batch(db: &PgDatabase, category: &str) -> String {
+    let mut builder = db.batch();
+    if let Err(error) = builder.write(
+        category,
+        &"order-5".to_owned(),
+        ExpectedVersion::NoStream,
+        &batch_of(vec![order(5, 6_100)]),
+    ) {
+        return format!("write-refused:{error}");
+    }
+    let too_long = too_long_key();
+    if let Err(error) = builder.write(
+        category,
+        &too_long,
+        ExpectedVersion::NoStream,
+        &batch_of(vec![order(5, 6_200)]),
+    ) {
+        return format!("write-refused:{error}");
+    }
+    let batch = match builder.build() {
+        Ok(batch) => batch,
+        Err(error) => return format!("build-refused:{error}"),
+    };
+    assert_eq!(batch.writes()[0].stream().key(), "order-5");
+    assert_eq!(batch.writes()[1].stream().key(), too_long_key());
+    classify_transact(db.transact(batch).await)
+}
+
 async fn postgres_bad_batch(db: &PgDatabase, category: &str) -> String {
     let mut builder = db.batch();
     if let Err(error) = builder.write(
@@ -360,6 +459,67 @@ async fn postgres_bad_batch(db: &PgDatabase, category: &str) -> String {
         Err(error) => return format!("build-refused:{error}"),
     };
     classify_transact(db.transact(batch).await)
+}
+
+/// One entry as the transcript renders it.
+fn rendered(stream: &str, event: OrderPlaced) -> String {
+    format!(
+        "{stream}|OrderPlaced|{}",
+        serde_json::to_string(&event).expect("the event serializes")
+    )
+}
+
+/// The transcript the flow is specified to produce. Comparing the two
+/// backends to each other is necessary but not sufficient: two backends
+/// that both lost the batch's events would agree. This is the oracle
+/// they are each compared against.
+fn expected_transcript() -> Transcript {
+    let seed_first = rendered("order-1", order(1, 1_000));
+    let seed_second = rendered("order-1", order(1, 2_500));
+    let alone = rendered("order-2", order(2, 700));
+    let batch_first = rendered("order-3", order(3, 4_200));
+    let batch_second = rendered("order-3", order(3, 4_300));
+
+    Transcript {
+        pages: vec![
+            vec![seed_first.clone(), seed_second.clone()],
+            vec![seed_first.clone(), seed_second.clone()],
+            vec![alone.clone()],
+            Vec::new(),
+            vec![batch_first.clone(), batch_second.clone()],
+            Vec::new(),
+            Vec::new(),
+            vec![
+                seed_first.clone(),
+                seed_second.clone(),
+                alone.clone(),
+                batch_first.clone(),
+                batch_second.clone(),
+            ],
+            vec![seed_first, seed_second],
+            vec![alone, batch_first],
+            vec![batch_second],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ],
+        acks: vec![
+            "not-delivered:+1".to_owned(),
+            "ok".to_owned(),
+            "regression:-1".to_owned(),
+            "ok".to_owned(),
+            "ok".to_owned(),
+            "ok".to_owned(),
+            "ok".to_owned(),
+            "ok".to_owned(),
+            "ok".to_owned(),
+        ],
+        batches: vec![
+            "ok".to_owned(),
+            "constraint".to_owned(),
+            "backend".to_owned(),
+        ],
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -390,6 +550,7 @@ async fn a_consumer_drives_sqlite_and_postgres_to_the_same_transcript() {
         postgres_feed,
         postgres_good_batch(&postgres_db, &category),
         postgres_bad_batch(&postgres_db, &category),
+        postgres_insert_batch(&postgres_db, &category),
     )
     .await;
 
@@ -409,6 +570,7 @@ async fn a_consumer_drives_sqlite_and_postgres_to_the_same_transcript() {
         sqlite_feed,
         sqlite_good_batch(&sqlite_root, &category),
         sqlite_bad_batch(&sqlite_root, &category),
+        sqlite_insert_batch(&sqlite_root, &category),
     )
     .await;
 
@@ -428,27 +590,29 @@ async fn a_consumer_drives_sqlite_and_postgres_to_the_same_transcript() {
         postgres.batches,
     );
 
-    // The transcript is only worth comparing if it saw what the flow
-    // intended: a rejected batch that wrote nothing, a second group
-    // that read from the start, and acks that both advanced and were
-    // refused.
-    assert_eq!(postgres.batches, vec!["ok", "constraint"]);
-    assert!(
-        postgres.acks.iter().any(|ack| ack == "regression:-1"),
-        "the flow must exercise a regression: {:?}",
-        postgres.acks
+    // The oracle, then the cross-backend comparison. Order matters:
+    // checking the two against each other first would let a failure in
+    // both read as agreement.
+    let expected = expected_transcript();
+    assert_eq!(
+        postgres, expected,
+        "the postgres transcript must match the specified flow"
     );
-    assert!(
-        postgres.acks.iter().any(|ack| ack == "not-delivered:+1"),
-        "the flow must exercise an ack past the watermark: {:?}",
-        postgres.acks
+    assert_eq!(
+        sqlite, expected,
+        "the sqlite transcript must match the specified flow"
     );
+
+    // The two insert-time-rejection proofs the transcript cannot read:
+    // the batch's first write was rolled back, and it never reached the
+    // feed.
+    assert_eq!(postgres.batches, vec!["ok", "constraint", "backend"]);
     assert!(
         postgres
             .pages
             .iter()
             .flatten()
-            .all(|entry| !entry.starts_with("order-4|")),
-        "the rejected batch's write must not reach the log"
+            .all(|entry| !entry.starts_with("order-5|")),
+        "the insert-time rejection's first write must not reach the log"
     );
 }
