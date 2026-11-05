@@ -574,11 +574,6 @@ async fn a_consumer_drives_sqlite_and_postgres_to_the_same_transcript() {
     )
     .await;
 
-    assert_eq!(
-        postgres, sqlite,
-        "the same consumer flow must observe the same log on both backends"
-    );
-
     // Visible under `--nocapture`, so a gate run records what was
     // compared rather than only that the comparison passed.
     println!(
@@ -590,9 +585,9 @@ async fn a_consumer_drives_sqlite_and_postgres_to_the_same_transcript() {
         postgres.batches,
     );
 
-    // The oracle, then the cross-backend comparison. Order matters:
-    // checking the two against each other first would let a failure in
-    // both read as agreement.
+    // The oracle first. Comparing the two backends to each other before
+    // this would turn a failure they share into agreement; the named
+    // transcript, not the other backend, has to be the standard.
     let expected = expected_transcript();
     assert_eq!(
         postgres, expected,
@@ -601,6 +596,11 @@ async fn a_consumer_drives_sqlite_and_postgres_to_the_same_transcript() {
     assert_eq!(
         sqlite, expected,
         "the sqlite transcript must match the specified flow"
+    );
+
+    assert_eq!(
+        postgres, sqlite,
+        "the same consumer flow must observe the same log on both backends"
     );
 
     // The two insert-time-rejection proofs the transcript cannot read:
