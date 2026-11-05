@@ -158,7 +158,9 @@ their Cargo manifest to use the package declaration above; keeping
 the dependency key `epoch` keeps source imports the same.
 
 See [CHANGELOG.md](CHANGELOG.md) for changes and earlier repository
-history. [LICENSE](LICENSE) contains the Apache-2.0 terms. To contribute,
+history. [LICENSE](LICENSE) contains the Apache-2.0 terms, and
+[NOTICE](NOTICE) carries the copyright line that Apache asks redistributors
+to reproduce. To contribute,
 open a pull request with the relevant `cargo test` feature set,
 `cargo fmt --check`, and `cargo clippy --all-targets --all-features --
 -D warnings` results. CI runs the build checks on pull requests.
