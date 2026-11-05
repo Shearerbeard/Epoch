@@ -15,14 +15,37 @@ Internal documentation serves developers, maintainers, and LLM assistants workin
 ```
 docs/
 ├── README.md                           # This file
+├── adr/                                # Architecture decision records (MADR)
+├── design/                             # Design annexes and HTML flowcharts
+├── research/                           # Redesign research reports
 └── internal/
     ├── documentation-guidelines.md     # How we document (meta!)
+    ├── todo-changelog-workflow.md      # TODO.md and CHANGELOG.md conventions
+    ├── design/                         # Internal design notes
     └── planning/
         ├── epoch-architecture-philosophy.md  # Core design philosophy
         └── coding-style-guide.md             # Coding conventions
 ```
 
 ## Key Documents
+
+### [Architecture Decision Records](adr/README.md)
+
+The index of every design decision, its drivers, the options considered,
+and honest consequences. Statuses run proposed through superseded.
+
+**Check this before changing the trait surface or a backend contract.**
+
+### [Design Annexes](design/README.md)
+
+Self-contained HTML pages from the 2026-08 redesign: the failure atlas,
+type skeletons, runtime flowcharts, producer scenarios, and a draft
+consumer guide. The ADRs cite them.
+
+### [Research Reports](research/README.md)
+
+The redesign's research pass over Fmodel, EvidentDB, and upstream saga
+delivery patterns, with sources.
 
 ### [Architecture & Philosophy](internal/planning/epoch-architecture-philosophy.md)
 
