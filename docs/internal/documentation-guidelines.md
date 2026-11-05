@@ -5,7 +5,7 @@
 
 ## Documentation Philosophy
 
-Inspired by [claude-skills](https://github.com/Shearerbeard/claude-skills), we maintain a clear separation between internal and external documentation.
+Inspired by [agent-skills](https://github.com/Shearerbeard/agent-skills), we maintain a clear separation between internal and external documentation.
 
 ### Two Documentation Layers
 
@@ -334,7 +334,7 @@ Current documentation needs:
 
 - [Rust API Guidelines - Documentation](https://rust-lang.github.io/api-guidelines/documentation.html)
 - [RFC 1574: API Documentation Conventions](https://rust-lang.github.io/rfcs/1574-more-api-documentation-conventions.html)
-- [claude-skills Documentation Philosophy](https://github.com/Shearerbeard/claude-skills)
+- [agent-skills Documentation Philosophy](https://github.com/Shearerbeard/agent-skills)
 
 ### Internal References
 

@@ -258,7 +258,7 @@ pub enum RepositoryVersion<V> {
 
 ## Documentation Philosophy
 
-Following guidelines from [claude-skills](https://github.com/Shearerbeard/claude-skills):
+Following guidelines from [agent-skills](https://github.com/Shearerbeard/agent-skills):
 
 ### Internal vs. External Documentation
 
