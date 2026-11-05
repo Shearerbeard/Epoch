@@ -6,9 +6,10 @@ Plan: `docs/board/plans/2026-11-02-e28-sqlite-streams-backend.md`.
 
 This is the typed-holes Layer 1 design record: the type surface of
 `src/streams/sqlite/` mapped to the rules it encodes and the seams it
-reaches across. The holes it still carries are listed below, and so are
-the risks the surface does not retire. The findings ledger the design
-panel appends lives at the bottom.
+reaches across. The holes the skeleton carried are listed below as a
+record of how the surface was split into fill units - the inventory is
+empty now - and so are the risks the surface does not retire. The
+findings ledger the design panel appends lives at the bottom.
 
 ## What this module is
 
@@ -23,7 +24,10 @@ here as a precedent and is not touched.
 
 It compiles under the existing `sqlite` feature, which already gates
 `tokio-rusqlite` and `serde_json` - the two dependencies this backend
-needs. No dependency and no `Cargo.toml` change comes with it.
+needs. No new dependency comes with it. The one manifest change is that
+the existing `tokio-rusqlite` dependency gains its `trace` feature,
+which the tests use to observe the order two connections ran their
+statements in.
 
 ## The type-to-business-rule map
 
@@ -80,9 +84,11 @@ added.
 
 ## The hole inventory
 
-`grep -rn 'todo!(' src/streams/sqlite*` at this commit. Every hole
-belongs to a named fill unit; a hole that outlives its unit is a
-defect.
+`grep -rn 'todo!(' src/streams/sqlite*` at the skeleton commit
+`113b74f`, where this inventory was taken. Every hole belonged to a
+named fill unit; a hole that outlived its unit was a defect, and none
+did. The current inventory is empty: the last fill unit's commit
+dropped the module's blanket dead-code allow.
 
 | Hole | File | Fill unit |
 |---|---|---|

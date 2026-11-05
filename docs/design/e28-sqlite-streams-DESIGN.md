@@ -166,7 +166,7 @@ SQLite-local test pins the actual behavior and makes it a documented fact. |
 event falls in the cursor's range, so it cannot report the stream's head
 at all. The contract is that a cursor past the tail still observes the head
 and a stream that does not exist observes none, and only the join shape
-reports both from one snapshot. The join shape is used, and the temporary B-tree is the price. | A correctness requirement outranks a sort. The measurement that rejected the shape is in the plan's SQL evidence, and the case that would have caught it is in the conformance set. |
+reports both from one snapshot. The join shape is used, and the temporary B-tree is the price. | A correctness requirement outranks a sort. The shape was rejected by measuring it against the contract, which this note and the card record; the case that pins the difference is `a_slice_past_the_tail_is_empty_at_the_head` in the conformance set. |
 | D11 | `VARCHAR(255)` becomes `TEXT` with an explicit length check. | The check counts characters, as `VARCHAR(255)` does, so the two backends accept and reject the same keys. |
 
 ### D2a - the cancellation phases, stated precisely
