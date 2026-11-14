@@ -1,0 +1,244 @@
+#![allow(dead_code)]
+
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use tokio_rusqlite::Connection;
+
+use epoch::decider::Event;
+use epoch::streams::feed::FeedPosition;
+use epoch::streams::outbox::{CompensationHook, EffectPort, Executor, ParkedNotice, Record};
+use epoch::streams::saga::{CommandGroup, IntentGroup, Reaction, ReactionFold, Runner, Saga};
+use epoch::streams::sqlite::{
+    SqliteBatchBuilder, SqliteDatabase, SqliteEventFeed, SqliteEventStreams, SqliteWriteError,
+};
+use epoch::streams::{EventMetadata, ExpectedVersion, RenderedIntentKey, SagaId};
+
+pub(super) const SOURCE: &str = "orders";
+pub(super) const SOURCE_KEY: &str = "order-1";
+pub(super) const LEDGER: &str = "ledger";
+pub(super) const COMMAND_KEY: &str = "command-1";
+pub(super) const SAGA: &str = "sqlite-saga";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct Source(pub(super) u32);
+
+impl Event for Source {
+    type EntityId = ();
+
+    fn event_type(&self) -> String {
+        "Placed".to_owned()
+    }
+
+    fn get_id(&self) -> Self::EntityId {}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct CommandEvent(pub(super) u32);
+
+impl Event for CommandEvent {
+    type EntityId = ();
+
+    fn event_type(&self) -> String {
+        "Reserved".to_owned()
+    }
+
+    fn get_id(&self) -> Self::EntityId {}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct Effect(pub(super) u32);
+
+impl Event for Effect {
+    type EntityId = ();
+
+    fn event_type(&self) -> String {
+        "Export".to_owned()
+    }
+
+    fn get_id(&self) -> Self::EntityId {}
+}
+
+pub(super) struct TestSaga {
+    id: SagaId,
+    expected: ExpectedVersion,
+}
+
+impl Saga for TestSaga {
+    type Event = Source;
+    type Command = CommandEvent;
+    type Effect = Effect;
+
+    fn id(&self) -> &SagaId {
+        &self.id
+    }
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    fn react(&self, event: &Source) -> Vec<Reaction<CommandEvent, Effect>> {
+        todo!()
+    }
+}
+
+pub(super) struct SqliteFold;
+
+impl ReactionFold<SqliteBatchBuilder> for SqliteFold {
+    type Command = CommandEvent;
+    type Effect = Effect;
+    type Error = SqliteWriteError;
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    fn push_command_group(
+        &self,
+        builder: &mut SqliteBatchBuilder,
+        group: CommandGroup<'_, CommandEvent>,
+    ) -> Result<(), SqliteWriteError> {
+        todo!()
+    }
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    fn push_intent_group(
+        &self,
+        builder: &mut SqliteBatchBuilder,
+        group: IntentGroup<'_, Effect>,
+    ) -> Result<(), SqliteWriteError> {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum PortBehavior {
+    Healthy,
+    Fail,
+    CrashAfterApply,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("external service rejected the request")]
+pub(super) struct PortError;
+
+#[derive(Debug)]
+pub(super) struct SimulatedCrash;
+
+#[derive(Clone)]
+pub(super) struct Port {
+    pub(super) calls: Arc<Mutex<Vec<(RenderedIntentKey, Effect)>>>,
+    pub(super) applied: Arc<Mutex<HashSet<RenderedIntentKey>>>,
+    behavior: PortBehavior,
+}
+
+impl Port {
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    pub(super) fn new(behavior: PortBehavior) -> Self {
+        todo!()
+    }
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    pub(super) fn with_behavior(&self, behavior: PortBehavior) -> Self {
+        todo!()
+    }
+}
+
+impl EffectPort<Effect> for Port {
+    type Error = PortError;
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    async fn perform(&self, intent: &RenderedIntentKey, request: &Effect) -> Result<(), PortError> {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum HookBehavior {
+    Healthy,
+    FailAfterApply,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("hook failed after applying compensation")]
+pub(super) struct HookError;
+
+#[derive(Clone)]
+pub(super) struct Hook {
+    pub(super) calls: Arc<Mutex<Vec<(RenderedIntentKey, u32, String)>>>,
+    pub(super) applied: Arc<Mutex<HashSet<RenderedIntentKey>>>,
+    behavior: HookBehavior,
+}
+
+impl Hook {
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    pub(super) fn new(behavior: HookBehavior) -> Self {
+        todo!()
+    }
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    pub(super) fn with_behavior(&self, behavior: HookBehavior) -> Self {
+        todo!()
+    }
+}
+
+impl CompensationHook<Effect> for Hook {
+    type Error = HookError;
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    async fn on_parked(&self, notice: &ParkedNotice<Effect>) -> Result<(), HookError> {
+        todo!()
+    }
+}
+
+pub(super) struct Rig {
+    connection: Connection,
+    pub(super) db: SqliteDatabase,
+}
+
+type TestRunner = Runner<
+    SqliteDatabase,
+    SqliteEventFeed<Source>,
+    SqliteEventStreams<String, Record<Effect>>,
+    TestSaga,
+    SqliteFold,
+>;
+
+type TestExecutor = Executor<
+    SqliteEventFeed<Record<Effect>>,
+    SqliteEventStreams<String, Record<Effect>>,
+    Port,
+    Hook,
+    Effect,
+>;
+
+impl Rig {
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    pub(super) async fn open(path: &Path) -> Self {
+        todo!()
+    }
+
+    pub(super) async fn close(self) {
+        todo!()
+    }
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    pub(super) fn runner(&self, expected: ExpectedVersion) -> TestRunner {
+        todo!()
+    }
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    pub(super) fn executor(&self, port: Port, hook: Hook, budget: u32) -> TestExecutor {
+        todo!()
+    }
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    pub(super) async fn place(&self, item: u32) -> FeedPosition {
+        todo!()
+    }
+
+    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
+    pub(super) async fn records<E>(&self, category: &str, key: &str) -> Vec<(E, EventMetadata)>
+    where
+        E: Event + Serialize + DeserializeOwned + Send + Sync + std::fmt::Debug,
+    {
+        todo!()
+    }
+}
