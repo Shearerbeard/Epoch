@@ -24,7 +24,9 @@ pub(super) const COMMAND_KEY: &str = "command-1";
 pub(super) const SAGA: &str = "sqlite-saga";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Source(pub(super) u32);
+pub(super) enum Source {
+    Placed { item: u32 },
+}
 
 impl Event for Source {
     type EntityId = ();
@@ -37,7 +39,9 @@ impl Event for Source {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct CommandEvent(pub(super) u32);
+pub(super) enum CommandEvent {
+    Reserved { item: u32 },
+}
 
 impl Event for CommandEvent {
     type EntityId = ();
@@ -50,7 +54,9 @@ impl Event for CommandEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Effect(pub(super) u32);
+pub(super) enum Effect {
+    Export { item: u32 },
+}
 
 impl Event for Effect {
     type EntityId = ();
@@ -130,14 +136,20 @@ pub(super) struct Port {
 }
 
 impl Port {
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     pub(super) fn new(behavior: PortBehavior) -> Self {
-        todo!()
+        Self {
+            calls: Arc::default(),
+            applied: Arc::default(),
+            behavior,
+        }
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     pub(super) fn with_behavior(&self, behavior: PortBehavior) -> Self {
-        todo!()
+        Self {
+            calls: Arc::clone(&self.calls),
+            applied: Arc::clone(&self.applied),
+            behavior,
+        }
     }
 }
 
@@ -168,14 +180,20 @@ pub(super) struct Hook {
 }
 
 impl Hook {
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     pub(super) fn new(behavior: HookBehavior) -> Self {
-        todo!()
+        Self {
+            calls: Arc::default(),
+            applied: Arc::default(),
+            behavior,
+        }
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     pub(super) fn with_behavior(&self, behavior: HookBehavior) -> Self {
-        todo!()
+        Self {
+            calls: Arc::clone(&self.calls),
+            applied: Arc::clone(&self.applied),
+            behavior,
+        }
     }
 }
 
