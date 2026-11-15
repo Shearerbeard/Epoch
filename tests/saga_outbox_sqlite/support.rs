@@ -19,13 +19,15 @@ use epoch::streams::feed::{ConsumerGroup, EventFeed, FeedPosition, PollLimit};
 use epoch::streams::outbox::{
     CompensationHook, EffectPort, Executor, ParkedNotice, Record, OUTBOX_CATEGORY,
 };
-use epoch::streams::saga::{CommandGroup, IntentGroup, Reaction, ReactionFold, Runner, Saga};
+use epoch::streams::saga::{
+    Command, CommandGroup, EffectRequest, IntentGroup, Reaction, ReactionFold, Runner, Saga,
+};
 use epoch::streams::sqlite::{
     SqliteBatchBuilder, SqliteDatabase, SqliteEventFeed, SqliteEventStreams, SqliteWriteError,
 };
 use epoch::streams::{
-    BackoffSchedule, EventBatch, EventMetadata, EventStreams, ExpectedVersion, RenderedIntentKey,
-    RetryBudget, RetryPolicy, SagaId,
+    BackoffSchedule, EventBatch, EventMetadata, EventStreams, ExpectedVersion, RecordedEvent,
+    RenderedIntentKey, RetryBudget, RetryPolicy, SagaId, StreamRef, StreamState,
 };
 
 pub(super) const SOURCE: &str = "orders";
@@ -93,9 +95,17 @@ impl Saga for TestSaga {
         &self.id
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     fn react(&self, event: &Source) -> Vec<Reaction<CommandEvent, Effect>> {
-        todo!()
+        match event {
+            Source::Placed { item } => vec![
+                Reaction::Command(Command::new(
+                    StreamRef::new(LEDGER, &COMMAND_KEY.to_owned()),
+                    self.expected,
+                    CommandEvent::ReserveStock { item: *item },
+                )),
+                Reaction::EffectRequest(EffectRequest::new(Effect::Export { item: *item })),
+            ],
+        }
     }
 }
 
@@ -106,22 +116,52 @@ impl ReactionFold<SqliteBatchBuilder> for SqliteFold {
     type Effect = Effect;
     type Error = SqliteWriteError;
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     fn push_command_group(
         &self,
         builder: &mut SqliteBatchBuilder,
         group: CommandGroup<'_, CommandEvent>,
     ) -> Result<(), SqliteWriteError> {
-        todo!()
+        let records: Vec<RecordedEvent<CommandEvent>> = group
+            .records()
+            .iter()
+            .map(|record| RecordedEvent::keyed(record.payload().clone(), record.metadata().clone()))
+            .collect();
+        let batch =
+            EventBatch::from_records(records).expect("a command group holds at least one record");
+        builder.write(
+            group.stream().category(),
+            &group.stream().key().to_owned(),
+            group.expected(),
+            &batch,
+        )
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     fn push_intent_group(
         &self,
         builder: &mut SqliteBatchBuilder,
         group: IntentGroup<'_, Effect>,
     ) -> Result<(), SqliteWriteError> {
-        todo!()
+        let records: Vec<RecordedEvent<Record<Effect>>> = group
+            .records()
+            .iter()
+            .map(|record| {
+                RecordedEvent::keyed(
+                    Record::Intent {
+                        intent: record.key().clone(),
+                        request: record.payload().clone(),
+                    },
+                    record.metadata().clone(),
+                )
+            })
+            .collect();
+        let batch =
+            EventBatch::from_records(records).expect("an intent group holds at least one record");
+        builder.write(
+            group.stream().category(),
+            &group.stream().key().to_owned(),
+            ExpectedVersion::Any,
+            &batch,
+        )
     }
 }
 
@@ -314,11 +354,23 @@ impl Rig {
             .position()
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     pub(super) async fn records<E>(&self, category: &str, key: &str) -> Vec<(E, EventMetadata)>
     where
         E: Event + Serialize + DeserializeOwned + Send + Sync + std::fmt::Debug,
     {
-        todo!()
+        match self
+            .db
+            .category::<String, E>(category)
+            .load_stream(&key.to_owned())
+            .await
+            .expect("the fixture reads a committed stream")
+        {
+            StreamState::Present(batch) => batch
+                .into_records()
+                .into_iter()
+                .map(|record| record.into_parts())
+                .collect(),
+            StreamState::Missing => Vec::new(),
+        }
     }
 }
