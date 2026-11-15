@@ -1,3 +1,8 @@
+//! Test consumer implementations and file-backed SQLite fixture wiring.
+//! The saga writes `ReserveStock` as a command request; it does not reserve
+//! inventory. Fake ports and hooks retain external deduplication state across
+//! database reopenings so tests can distinguish calls from applied effects.
+
 #![allow(dead_code)]
 
 use std::collections::HashSet;
@@ -40,14 +45,14 @@ impl Event for Source {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum CommandEvent {
-    Reserved { item: u32 },
+    ReserveStock { item: u32 },
 }
 
 impl Event for CommandEvent {
     type EntityId = ();
 
     fn event_type(&self) -> String {
-        "Reserved".to_owned()
+        "ReserveStock".to_owned()
     }
 
     fn get_id(&self) -> Self::EntityId {}
