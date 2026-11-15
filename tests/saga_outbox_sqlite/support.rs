@@ -3,8 +3,6 @@
 //! inventory. Fake ports and hooks retain external deduplication state across
 //! database reopenings so tests can distinguish calls from applied effects.
 
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -207,9 +205,31 @@ impl Port {
 impl EffectPort<Effect> for Port {
     type Error = PortError;
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     async fn perform(&self, intent: &RenderedIntentKey, request: &Effect) -> Result<(), PortError> {
-        todo!()
+        // Every delivery is recorded, applied or not: the tests read this
+        // log to tell redelivery from a silently dropped intent.
+        self.calls
+            .lock()
+            .unwrap()
+            .push((intent.clone(), request.clone()));
+        if matches!(self.behavior, PortBehavior::Fail) {
+            // Rejected before the effect lands, so the applied set stays
+            // empty and the executor's Failed record is the only outcome.
+            return Err(PortError);
+        }
+        {
+            // The applied set is the external system's idempotency memory,
+            // keyed by intent so a redelivery applies nothing new.
+            let mut applied = self.applied.lock().unwrap();
+            applied.insert(intent.clone());
+        }
+        if matches!(self.behavior, PortBehavior::CrashAfterApply) {
+            // The external call landed, the outcome append never runs. The
+            // guard is already dropped: a poisoned applied set would hide
+            // the effect the reopening is supposed to find.
+            std::panic::panic_any(SimulatedCrash);
+        }
+        Ok(())
     }
 }
 
@@ -251,9 +271,25 @@ impl Hook {
 impl CompensationHook<Effect> for Hook {
     type Error = HookError;
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     async fn on_parked(&self, notice: &ParkedNotice<Effect>) -> Result<(), HookError> {
-        todo!()
+        // At-least-once: every park and every park replay lands here, so the
+        // log carries repeats the applied set has to absorb.
+        self.calls.lock().unwrap().push((
+            notice.key().clone(),
+            notice.attempts().get(),
+            notice.error().to_owned(),
+        ));
+        {
+            // Compensation is applied once per key, before any failure below.
+            let mut applied = self.applied.lock().unwrap();
+            applied.insert(notice.key().clone());
+        }
+        if matches!(self.behavior, HookBehavior::FailAfterApply) {
+            // The compensation landed; the rejection keeps the cursor from
+            // acknowledging the parked intent so the hook re-fires.
+            return Err(HookError);
+        }
+        Ok(())
     }
 }
 
