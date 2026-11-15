@@ -8,19 +8,25 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio_rusqlite::Connection;
 
 use epoch::decider::Event;
-use epoch::streams::feed::FeedPosition;
-use epoch::streams::outbox::{CompensationHook, EffectPort, Executor, ParkedNotice, Record};
+use epoch::streams::feed::{ConsumerGroup, EventFeed, FeedPosition, PollLimit};
+use epoch::streams::outbox::{
+    CompensationHook, EffectPort, Executor, ParkedNotice, Record, OUTBOX_CATEGORY,
+};
 use epoch::streams::saga::{CommandGroup, IntentGroup, Reaction, ReactionFold, Runner, Saga};
 use epoch::streams::sqlite::{
     SqliteBatchBuilder, SqliteDatabase, SqliteEventFeed, SqliteEventStreams, SqliteWriteError,
 };
-use epoch::streams::{EventMetadata, ExpectedVersion, RenderedIntentKey, SagaId};
+use epoch::streams::{
+    BackoffSchedule, EventBatch, EventMetadata, EventStreams, ExpectedVersion, RenderedIntentKey,
+    RetryBudget, RetryPolicy, SagaId,
+};
 
 pub(super) const SOURCE: &str = "orders";
 pub(super) const SOURCE_KEY: &str = "order-1";
@@ -233,28 +239,79 @@ type TestExecutor = Executor<
 >;
 
 impl Rig {
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     pub(super) async fn open(path: &Path) -> Self {
-        todo!()
+        let connection = Connection::open(path)
+            .await
+            .expect("the fixture opens its file-backed SQLite database");
+        let db = SqliteDatabase::new(connection.clone());
+        db.migrate()
+            .await
+            .expect("the fixture migrates the root schema");
+        Self { connection, db }
     }
 
     pub(super) async fn close(self) {
-        todo!()
+        let Rig { connection, db } = self;
+        drop(db);
+        connection
+            .close()
+            .await
+            .expect("the fixture's SQLite connection closes cleanly");
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     pub(super) fn runner(&self, expected: ExpectedVersion) -> TestRunner {
-        todo!()
+        Runner::new(
+            TestSaga {
+                id: SagaId::new(SAGA).expect("the fixture saga has a nonempty id"),
+                expected,
+            },
+            self.db.clone(),
+            self.db.feed::<Source>(SOURCE),
+            self.db.category::<String, Record<Effect>>(OUTBOX_CATEGORY),
+            SqliteFold,
+            RetryPolicy::default(),
+        )
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     pub(super) fn executor(&self, port: Port, hook: Hook, budget: u32) -> TestExecutor {
-        todo!()
+        Executor::new(
+            self.db.feed::<Record<Effect>>(OUTBOX_CATEGORY),
+            self.db.category::<String, Record<Effect>>(OUTBOX_CATEGORY),
+            port,
+            hook,
+            SagaId::new(SAGA).expect("the fixture saga has a nonempty id"),
+            RetryPolicy::new(
+                RetryBudget::new(budget).expect("the fixture budget is nonzero"),
+                BackoffSchedule::new(Duration::from_millis(1), Duration::from_millis(2))
+                    .expect("the fixture backoff base does not exceed its cap"),
+            ),
+        )
     }
 
-    #[expect(unused_variables, reason = "todo!() body; filled by E30")]
     pub(super) async fn place(&self, item: u32) -> FeedPosition {
-        todo!()
+        self.db
+            .category::<String, Source>(SOURCE)
+            .append(
+                ExpectedVersion::Any,
+                &SOURCE_KEY.to_owned(),
+                &EventBatch::new(vec![Source::Placed { item }])
+                    .expect("one source event is nonempty"),
+            )
+            .await
+            .expect("the source append succeeds");
+        let entries = self
+            .db
+            .feed::<Source>(SOURCE)
+            .poll(
+                &ConsumerGroup::new("probe").expect("the probe group is nonempty"),
+                PollLimit::new(1000).expect("the probe limit is nonzero"),
+            )
+            .await
+            .expect("the probe poll succeeds");
+        entries
+            .last()
+            .expect("the append just landed in the source feed")
+            .position()
     }
 
     #[expect(unused_variables, reason = "todo!() body; filled by E30")]
