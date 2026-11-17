@@ -1,0 +1,47 @@
+sequenceDiagram
+    autonumber
+    participant A as Application
+    participant R as Saga Runner
+    participant D as Stored streams / SQLite
+    participant F as Feed API / group cursors
+    participant X as Outbox Executor
+    participant P as Fake Stripe port
+
+    Note over A,P: COMMAND = request to do work. EVENT = fact that happened. RECORD = persisted envelope.
+    A->>A: InitCheckout [COMMAND]
+    A->>D: Append CheckoutRequested [DOMAIN EVENT]<br/>checkouts/checkout-42
+
+    R->>F: poll category=checkouts, group=checkout-saga
+    F->>D: Read category records after this group's ack cursor
+    D-->>F: CheckoutRequested + metadata + source stream
+    F-->>R: FeedEntry at position 101 [SAME DOMAIN EVENT]
+    Note over D,F: FeedEntry wraps an existing record with its stream address and feed position.<br/>The feed does not create a second business event.
+
+    R->>R: Saga.react returns ReserveStock + MarkPaymentPending [COMMANDS]<br/>and CreatePaymentIntent [EFFECT REQUEST]
+    R->>R: Mint stable keys. ReactionFold fills batch builder.
+    rect rgb(232, 242, 252)
+        R->>D: AtomicStreams.transact(one batch)
+        D->>D: inventory-commands/shoe: ReserveStock<br/>[COMMAND payload stored as an event-stream RECORD]
+        D->>D: order-commands/order-42: MarkPaymentPending<br/>[COMMAND payload stored as an event-stream RECORD]
+        D->>D: saga-outbox/checkout-saga: Record.Intent(key, CreatePaymentIntent)<br/>[OUTBOX RECORD carrying an EFFECT REQUEST]
+        D-->>R: All three writes committed
+    end
+    R->>F: ack source position 101 [PROGRESS, not a business event]
+    Note over R,X: Independent consumers: the outbox is readable as soon as the batch commits.<br/>Source acknowledgement is not a prerequisite for executing the effect.
+
+    X->>F: poll category=saga-outbox, group=checkout-saga
+    F->>D: Read outbox records after its separate ack cursor
+    D-->>F: Record.Intent + metadata + outbox stream
+    F-->>X: FeedEntry at position 104 [SAME INTENT RECORD]
+    X->>D: Load stored retry / parked outcomes
+    D-->>X: No failed attempts or standing park in this happy path
+    X->>P: perform(key, CreatePaymentIntent) [EXTERNAL REQUEST]<br/>Key represents the Stripe Idempotency-Key header
+    P-->>X: Port returns Ok after fake PaymentIntent creation<br/>status=requires_payment_method. Payment not completed.
+    X->>D: Append Record.Done(key) [TECHNICAL OUTCOME EVENT]<br/>saga-outbox/checkout-saga
+    X->>F: ack intent position 104
+    X->>F: Later poll delivers Record.Done at position 110
+    F-->>X: FeedEntry wrapping Done [SAME OUTCOME RECORD]
+    X->>F: ack position 110. No external call for Done.
+
+    Note over A,D: Application command handlers may consume ReserveStock / MarkPaymentPending<br/>and append StockReserved / OrderAwaitingPayment [DOMAIN EVENTS].<br/>Those handlers are not run automatically by the Saga Runner.
+    Note over A,P: Persisting a COMMAND makes it a stored event record in Epoch's storage vocabulary.<br/>It remains a business COMMAND: ReserveStock is not evidence that stock was reserved.<br/>Done records port completion, not PaymentSucceeded.
