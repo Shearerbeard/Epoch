@@ -21,6 +21,11 @@
   `SqliteDatabase` handle is the root an application holds:
   `category`, `feed`, and `migrate` hand out per-category stores,
   feeds, and the schema over its one shared connection.
+- A `test_drive` example binary: a local dev harness for test-driving
+  event journal backends. It seeds a deterministic event set into a
+  chosen backend (in-memory or SQLite) and prints stream, event, and
+  reified-state views, so identical seeds can be diffed
+  backend-to-backend. Not a shipped API.
 
 ### Changed
 
