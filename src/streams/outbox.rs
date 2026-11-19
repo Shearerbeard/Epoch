@@ -1,6 +1,7 @@
 //! Execute effect intents from the saga outbox with ordered,
-//! at-least-once delivery. Ports and compensation hooks must dedupe
-//! by intent key after a crash and replay.
+//! at-least-once delivery. A replay settles from a stored `Done`
+//! without performing again; a crash before that append replays the
+//! intent, so ports and compensation hooks must dedupe by intent key.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -205,10 +206,12 @@ impl<Feed, Store, Port, Hook, Effect> Executor<Feed, Store, Port, Hook, Effect> 
     }
 }
 
-/// One intent's durable retry state on the outbox stream: what the
+/// One intent's durable replay state on the outbox stream: what the
 /// executor's decisions derive from, surviving its crashes.
 #[derive(Default)]
 struct DurableState {
+    /// A success already persisted for this key outranks the rest.
+    done: bool,
     failed: u32,
     last_error: Option<String>,
     parked: Option<(NonZeroU32, String)>,
@@ -266,8 +269,10 @@ where
         })
     }
 
-    /// On replay, settle a standing park before calling the port again.
-    /// A failed attempt within the retry budget holds the cursor.
+    /// On replay, a stored success acknowledges before any port call or
+    /// failure-budget handling, and a standing park settles before the
+    /// port is called again. A failed attempt within the retry budget
+    /// holds the cursor.
     async fn work_intent(
         &self,
         position: FeedPosition,
@@ -276,6 +281,12 @@ where
     ) -> Result<Option<RenderedIntentKey>, ExecutorError<Hook::Error, Feed::Error, Store::Error>>
     {
         let state = self.durable_state(&intent).await?;
+        if state.done {
+            // The success already stands in the stream: acknowledging
+            // moves the cursor without another port call or append.
+            self.feed.ack(&self.group, position).await?;
+            return Ok(None);
+        }
         if let Some((attempts, error)) = state.parked {
             self.settle_park(position, &intent, request, attempts, error)
                 .await?;
@@ -333,7 +344,8 @@ where
         }
     }
 
-    /// Rebuild one intent's retry state from the stored outcome records.
+    /// Rebuild one intent's replay state from the stored outcome
+    /// records: a durable success, the failure count, a standing park.
     async fn durable_state(
         &self,
         intent: &RenderedIntentKey,
@@ -360,10 +372,13 @@ where
                 } if &parked == intent => {
                     state.parked = Some((attempts, error));
                 }
-                // Other keys' outcomes never count toward this
-                // intent's budget.
-                Record::Failed { .. } | Record::Parked { .. } => {}
-                Record::Intent { .. } | Record::Done { .. } => {}
+                Record::Done { intent: done } if &done == intent => {
+                    state.done = true;
+                }
+                // Outcomes for other keys never count toward this
+                // intent.
+                Record::Failed { .. } | Record::Parked { .. } | Record::Done { .. } => {}
+                Record::Intent { .. } => {}
             }
         }
         Ok(state)
@@ -438,7 +453,8 @@ pub enum ExecutorStep {
     /// The poll delivered nothing; the cursor did not move.
     Idle,
     /// Work completed and the cursor advanced to here - performed,
-    /// parked, and skipped entries included.
+    /// parked, acknowledged from a stored `Done`, and skipped entries
+    /// included.
     Advanced {
         /// The position the group's cursor now stands at.
         acked_to: FeedPosition,
@@ -471,7 +487,7 @@ where
     /// The outbox feed rejected the ack.
     #[error(transparent)]
     Ack(#[from] AckError<FeedE>),
-    /// The failure-count read failed.
+    /// The replay-state read failed.
     #[error(transparent)]
     Read(StoreE),
     /// An outcome append failed. The append error's own variants stay
