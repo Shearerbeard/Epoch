@@ -209,9 +209,9 @@ what the shared suites do not reach.
 
 | Member | Covered by |
 |---|---|
-| `load_stream` | the shared OCC races and the shared envelope case; local `a_missing_stream_loads_missing_and_slices_empty` |
-| `load_stream_from` | the shared envelope case (with `None`); local `a_slice_from_a_cursor_is_inclusive`, `a_slice_past_the_tail_is_empty_at_the_head`, `a_missing_stream_loads_missing_and_slices_empty` |
-| `load_category` | local `a_category_read_returns_the_typed_id` |
+| `load_stream` | the shared OCC races and the shared envelope case; shared `a_slice_reads_from_the_cursor_to_the_head` (missing) |
+| `load_stream_from` | the shared envelope case (with `None`); shared `a_slice_reads_from_the_cursor_to_the_head` |
+| `load_category` | shared `a_category_read_round_trips_ids_in_append_order` |
 | `append` | the shared OCC races, the shared flash sale, the shared envelope case; local `independent_actors_conflict_deterministically`, `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`, `a_cancelled_append_still_commits`, `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound`, `a_child_of_the_root_handle_times_out_on_the_root_bound`, `the_envelope_written_is_the_envelope_stored` |
 
 ### `AtomicStreams`

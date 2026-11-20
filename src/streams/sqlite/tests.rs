@@ -19,8 +19,10 @@ use crate::streams::feed::{
     AckError, ConsumerGroup, DeliveredWatermark, EventFeed, FeedPosition, PollLimit,
 };
 use crate::streams::spec::{
-    a_keyed_append_loads_back_with_its_envelope, flash_sale_sells_exactly_the_stock,
-    single_event_occ_race_on_empty_stream, single_event_occ_race_on_seeded_stream, under_deadline,
+    a_category_read_round_trips_ids_in_append_order, a_keyed_append_loads_back_with_its_envelope,
+    a_slice_read_during_a_rival_append_stays_one_view, a_slice_reads_from_the_cursor_to_the_head,
+    flash_sale_sells_exactly_the_stock, single_event_occ_race_on_empty_stream,
+    single_event_occ_race_on_seeded_stream, under_deadline,
 };
 use crate::streams::{
     AppendError, AtomicStreams, EventBatch, EventMetadata, EventStreams, ExpectedVersion,
@@ -82,6 +84,17 @@ impl Event for Counted {
     }
 
     fn get_id(&self) -> Self::EntityId {}
+}
+
+/// A migrated store over a private in-memory database, carrying the
+/// payload-counting fixture so the shared read cases can tell one
+/// record from another.
+async fn counted_store() -> SqliteEventStreams<String, Counted> {
+    let store = SqliteEventStreams::<String, Counted>::open_in_memory("read-spec")
+        .await
+        .expect("memory connection");
+    store.migrate().await.expect("schema migrates");
+    store
 }
 
 /// An event whose serialization fails, so the builder's encoding error
@@ -258,6 +271,40 @@ async fn sqlite_a_keyed_append_loads_back_with_its_envelope() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sqlite_a_slice_reads_from_the_cursor_to_the_head() {
+    let store = counted_store().await;
+    under_deadline(a_slice_reads_from_the_cursor_to_the_head(
+        store,
+        str::to_owned,
+        Counted,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_a_category_read_round_trips_ids_in_append_order() {
+    let store = counted_store().await;
+    under_deadline(a_category_read_round_trips_ids_in_append_order(
+        store,
+        str::to_owned,
+        Counted,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_a_slice_read_during_a_rival_append_stays_one_view() {
+    let store = counted_store().await;
+    under_deadline(a_slice_read_during_a_rival_append_stays_one_view(
+        store.clone(),
+        store,
+        str::to_owned,
+        Counted,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sqlite_poll_redelivers_until_acked() {
     let (writer, feed) = writer_and_feed().await;
     poll_redelivers_until_acked(writer, feed, str::to_owned, || SomethingHappened).await;
@@ -287,131 +334,44 @@ async fn sqlite_delivery_carries_the_envelope() {
     delivery_carries_the_envelope(writer, feed, str::to_owned, || SomethingHappened).await;
 }
 
-/// A slice from a cursor is inclusive of the cursor's own position,
-/// and observes the stream's head - not the cursor - as its position.
-/// The shared suite only ever calls `load_stream_from` with `None`, so
-/// an implementation that ignored the cursor entirely would pass every
-/// shared case.
+/// The three shared read cases over a file-backed database, run with
+/// the reader and the rival as separately opened connections rather
+/// than clones of one actor.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_slice_from_a_cursor_is_inclusive() {
-    let store = SqliteEventStreams::<String, Counted>::open_in_memory("slice")
-        .await
-        .expect("memory connection");
-    store.migrate().await.expect("schema migrates");
-    let key = unique_key("slice");
-    store
-        .append(
-            ExpectedVersion::NoStream,
-            &key,
-            &EventBatch::new(vec![Counted(1), Counted(2), Counted(3)])
-                .expect("three events are nonempty"),
-        )
-        .await
-        .expect("append succeeds");
+async fn file_backed_reads_conform_over_independent_actors() {
+    under_deadline(async {
+        let file = temp_database();
+        let path = file.path().to_str().expect("utf8 path").to_owned();
 
-    let cursor = StreamSequence::new(2).expect("2 is a position");
-    let slice = store
-        .load_stream_from(&key, Some(cursor))
-        .await
-        .expect("slice load succeeds");
-    assert_eq!(
-        slice.records().len(),
-        2,
-        "the cursor's own position is included"
-    );
-    let events: Vec<&Counted> = slice
-        .records()
-        .iter()
-        .map(|record| record.event())
-        .collect();
-    assert_eq!(
-        events,
-        vec![&Counted(2), &Counted(3)],
-        "the slice holds exactly the suffix from the cursor"
-    );
-    assert_eq!(
-        slice.at(),
-        StreamVersion::Exact(StreamSequence::new(3).expect("3 is a position")),
-        "the slice observes the stream's head, not the cursor"
-    );
-}
+        // Separately opened actors on one database file and one
+        // category, so the race case runs over two connections rather
+        // than one shared actor's queue.
+        let shared = format!("read-file-{}", rusty_ulid::generate_ulid_string());
+        let store = SqliteEventStreams::<String, Counted>::open(&path, &shared)
+            .await
+            .expect("open the reader's actor");
+        let rival = SqliteEventStreams::<String, Counted>::open(&path, &shared)
+            .await
+            .expect("open the rival's actor");
+        store.migrate().await.expect("schema migrates");
+        rival.migrate().await.expect("schema migrates");
 
-/// A cursor past the tail reads nothing and still reports the stream's
-/// head: an empty slice at an exact position is valid.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_slice_past_the_tail_is_empty_at_the_head() {
-    let store = store().await;
-    let key = unique_key("past-tail");
-    store
-        .append(
-            ExpectedVersion::NoStream,
-            &key,
-            &EventBatch::new(vec![SomethingHappened; 2]).expect("two events are nonempty"),
-        )
-        .await
-        .expect("append succeeds");
+        a_slice_reads_from_the_cursor_to_the_head(store.clone(), str::to_owned, Counted).await;
+        a_slice_read_during_a_rival_append_stays_one_view(store, rival, str::to_owned, Counted)
+            .await;
 
-    let past = StreamSequence::new(9).expect("9 is a position");
-    let slice = store
-        .load_stream_from(&key, Some(past))
-        .await
-        .expect("slice load succeeds");
-    assert!(slice.records().is_empty(), "nothing sits past the tail");
-    assert_eq!(
-        slice.at(),
-        StreamVersion::Exact(StreamSequence::new(2).expect("2 is a position")),
-        "a cursor past the tail still observes the stream's head"
-    );
-}
-
-/// A missing stream is two different answers by two different methods:
-/// the full load says `Missing` and never errors, while the slice is
-/// empty and observes `NoStream`.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_missing_stream_loads_missing_and_slices_empty() {
-    let store = store().await;
-    let key = unique_key("never-written");
-
-    assert_eq!(
-        store.load_stream(&key).await.expect("load succeeds"),
-        StreamState::Missing,
-        "a never-written stream loads Missing, never an error"
-    );
-
-    let slice = store
-        .load_stream_from(&key, None)
-        .await
-        .expect("slice load succeeds");
-    assert!(
-        slice.records().is_empty(),
-        "a slice over a missing stream carries nothing"
-    );
-    assert_eq!(
-        slice.at(),
-        StreamVersion::NoStream,
-        "a missing stream is observed as NoStream"
-    );
-}
-
-/// The round trip the shared suite never makes: a category read parses
-/// the stored key back into the typed id (ADR 0004's two-way
-/// contract).
-#[tokio::test(flavor = "multi_thread")]
-async fn a_category_read_returns_the_typed_id() {
-    let store = store().await;
-    let key = unique_key("round-trip");
-    store
-        .append(ExpectedVersion::NoStream, &key, &one_event())
-        .await
-        .expect("append succeeds");
-
-    let category = store.load_category().await.expect("category read succeeds");
-    assert_eq!(category.len(), 1);
-    assert_eq!(
-        category[0].id, key,
-        "the stored key parses back into the typed id"
-    );
-    assert_eq!(category[0].event, SomethingHappened);
+        // The category case reads the whole category, and the two cases
+        // above have written into the shared one, so it runs over a
+        // fresh category on the same file.
+        let fresh = format!("read-category-{}", rusty_ulid::generate_ulid_string());
+        let category_store = SqliteEventStreams::<String, Counted>::open(&path, &fresh)
+            .await
+            .expect("open the category actor");
+        category_store.migrate().await.expect("schema migrates");
+        a_category_read_round_trips_ids_in_append_order(category_store, str::to_owned, Counted)
+            .await;
+    })
+    .await;
 }
 
 /// The envelope a keyed append stores is the envelope the loaded

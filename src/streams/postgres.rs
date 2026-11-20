@@ -452,8 +452,11 @@ mod tests {
 
     use super::*;
     use crate::streams::spec::{
-        flash_sale_sells_exactly_the_stock, single_event_occ_race_on_empty_stream,
-        single_event_occ_race_on_seeded_stream, under_deadline,
+        a_category_read_round_trips_ids_in_append_order,
+        a_slice_read_during_a_rival_append_stays_one_view,
+        a_slice_reads_from_the_cursor_to_the_head, flash_sale_sells_exactly_the_stock,
+        single_event_occ_race_on_empty_stream, single_event_occ_race_on_seeded_stream,
+        under_deadline,
     };
     use crate::streams::{EventMetadata, RecordedEvent};
 
@@ -470,9 +473,24 @@ mod tests {
         fn get_id(&self) -> Self::EntityId {}
     }
 
+    /// An event carrying a payload, so the shared read-path cases can
+    /// tell one stored event from another.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct Counted(u32);
+
+    impl Event for Counted {
+        type EntityId = ();
+
+        fn event_type(&self) -> String {
+            "Counted".to_owned()
+        }
+
+        fn get_id(&self) -> Self::EntityId {}
+    }
+
     /// A migrated store over the compose postgres. Spec stream ids carry
     /// ULID nonces, so runs never collide and storage is never cleared.
-    async fn store(category: &str) -> PgEventStreams<String, SomethingHappened> {
+    async fn store<E>(category: &str) -> PgEventStreams<String, E> {
         // These tests migrate schema and write events into whatever
         // database they are pointed at, so there is no safe default to
         // fall back on: an unset variable must stop the run rather than
@@ -588,6 +606,43 @@ mod tests {
             store,
             str::to_owned,
             || SomethingHappened,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_slice_reads_from_the_cursor_to_the_head() {
+        let store = store("spec-slice").await;
+        under_deadline(a_slice_reads_from_the_cursor_to_the_head(
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    /// A fresh category per run, per the shared case's whole-category
+    /// read: the compose database is never cleared between runs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_category_read_round_trips_ids_in_append_order() {
+        let category = format!("spec-category-{}", rusty_ulid::generate_ulid_string());
+        let store = store(&category).await;
+        under_deadline(a_category_read_round_trips_ids_in_append_order(
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_slice_read_during_a_rival_append_stays_one_view() {
+        let store = store("spec-race").await;
+        under_deadline(a_slice_read_during_a_rival_append_stays_one_view(
+            store.clone(),
+            store,
+            str::to_owned,
+            Counted,
         ))
         .await;
     }
