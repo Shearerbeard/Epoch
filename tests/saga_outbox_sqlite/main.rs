@@ -54,6 +54,25 @@ fn intent(position: FeedPosition, item: u32) -> (Record<Effect>, EventMetadata) 
     )
 }
 
+fn failed(position: FeedPosition) -> (Record<Effect>, EventMetadata) {
+    (
+        Record::Failed {
+            intent: key(position, 1),
+            error: PortError.to_string(),
+        },
+        EventMetadata::new(),
+    )
+}
+
+fn done(position: FeedPosition) -> (Record<Effect>, EventMetadata) {
+    (
+        Record::Done {
+            intent: key(position, 1),
+        },
+        EventMetadata::new(),
+    )
+}
+
 fn replay_batch(rig: &Rig, position: FeedPosition, expected: ExpectedVersion) -> SqliteBatch {
     let mut builder = rig.db.batch();
     builder
@@ -366,6 +385,190 @@ async fn perform_crash_reopens_and_redelivers_once_effect() {
             ExecutorStep::Idle
         );
         assert_eq!(port.calls.lock().unwrap().len(), 2);
+        rig.close().await;
+    })
+    .await;
+}
+
+/// The port succeeded and `Done` persisted, but the interruption landed
+/// before the acknowledgement: the outbox holds the intent and its
+/// `Done` while the group still owes the intent. The `Done` is staged
+/// through the store because every crash seam the fixture can inject
+/// lands before the outcome append, not between that append and the
+/// ack. Replaying against a port that fails if called must acknowledge
+/// from the durable success alone: no port call, no compensation, no
+/// new outcome records.
+#[tokio::test]
+async fn success_before_ack_replays_without_port_or_hook() {
+    under_deadline(async {
+        let dir = tempfile::tempdir().expect("temporary database directory");
+        let path = dir.path().join("saga.db");
+        let rig = Rig::open(&path).await;
+        let position = rig.place(7).await;
+        rig.runner(ExpectedVersion::Any)
+            .step(limit())
+            .await
+            .unwrap();
+        rig.db
+            .category::<String, Record<Effect>>(OUTBOX_CATEGORY)
+            .append(
+                ExpectedVersion::Any,
+                &SAGA.to_owned(),
+                &EventBatch::new(vec![done(position).0]).expect("one outcome is nonempty"),
+            )
+            .await
+            .expect("the staged success commits");
+        let expected = vec![intent(position, 7), done(position)];
+        rig.close().await;
+
+        let rig = Rig::open(&path).await;
+        assert_eq!(
+            rig.records::<Record<Effect>>(OUTBOX_CATEGORY, SAGA).await,
+            expected
+        );
+        let feed = rig.db.feed::<Record<Effect>>(OUTBOX_CATEGORY);
+        let entries = feed.poll(&group(), limit()).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].record().event(), &intent(position, 7).0);
+        let done_position = entries[1].position();
+        drop(feed);
+
+        let port = Port::new(PortBehavior::Fail);
+        let hook = Hook::new(HookBehavior::Healthy);
+        let executor = rig.executor(port.clone(), hook.clone(), 2);
+        assert_eq!(
+            executor.step(limit()).await.unwrap(),
+            ExecutorStep::Advanced {
+                acked_to: done_position
+            }
+        );
+        assert!(
+            port.calls.lock().unwrap().is_empty(),
+            "a stored Done must spare the port"
+        );
+        assert!(
+            hook.calls.lock().unwrap().is_empty(),
+            "a stored Done must spare the compensation hook"
+        );
+        assert_eq!(
+            rig.records::<Record<Effect>>(OUTBOX_CATEGORY, SAGA).await,
+            expected,
+            "replay must append no new outcome records"
+        );
+        assert_eq!(executor.step(limit()).await.unwrap(), ExecutorStep::Idle);
+        drop(executor);
+        rig.close().await;
+
+        let rig = Rig::open(&path).await;
+        assert_eq!(
+            rig.executor(port.clone(), hook.clone(), 2)
+                .step(limit())
+                .await
+                .unwrap(),
+            ExecutorStep::Idle
+        );
+        assert!(port.calls.lock().unwrap().is_empty());
+        assert!(hook.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            rig.records::<Record<Effect>>(OUTBOX_CATEGORY, SAGA).await,
+            expected
+        );
+        rig.close().await;
+    })
+    .await;
+}
+
+/// Earlier attempts failed durably, then one succeeded, and the
+/// interruption again landed before the acknowledgement. The replaying
+/// executor runs the tighter budget the attempts never saw, so the
+/// stored failure count already sits at the park threshold:
+/// failure-budget logic alone would compensate. Durable success must
+/// outrank the budget - acknowledge with no port call, no compensation,
+/// and no new outcome records.
+#[tokio::test]
+async fn success_before_ack_beats_the_failure_budget() {
+    under_deadline(async {
+        let dir = tempfile::tempdir().expect("temporary database directory");
+        let path = dir.path().join("saga.db");
+        let rig = Rig::open(&path).await;
+        let position = rig.place(7).await;
+        rig.runner(ExpectedVersion::Any)
+            .step(limit())
+            .await
+            .unwrap();
+        let port = Port::new(PortBehavior::Fail);
+        let hook = Hook::new(HookBehavior::Healthy);
+        let executor = rig.executor(port.clone(), hook.clone(), 3);
+        assert_eq!(
+            executor.step(limit()).await.unwrap(),
+            ExecutorStep::Holding {
+                intent: key(position, 1)
+            }
+        );
+        assert_eq!(
+            executor.step(limit()).await.unwrap(),
+            ExecutorStep::Holding {
+                intent: key(position, 1)
+            }
+        );
+        assert_eq!(
+            rig.records::<Record<Effect>>(OUTBOX_CATEGORY, SAGA).await,
+            vec![intent(position, 7), failed(position), failed(position)]
+        );
+        drop(executor);
+        rig.db
+            .category::<String, Record<Effect>>(OUTBOX_CATEGORY)
+            .append(
+                ExpectedVersion::Any,
+                &SAGA.to_owned(),
+                &EventBatch::new(vec![done(position).0]).expect("one outcome is nonempty"),
+            )
+            .await
+            .expect("the staged success commits");
+        let expected = vec![
+            intent(position, 7),
+            failed(position),
+            failed(position),
+            done(position),
+        ];
+        rig.close().await;
+
+        let rig = Rig::open(&path).await;
+        assert_eq!(
+            rig.records::<Record<Effect>>(OUTBOX_CATEGORY, SAGA).await,
+            expected
+        );
+        let feed = rig.db.feed::<Record<Effect>>(OUTBOX_CATEGORY);
+        let entries = feed.poll(&group(), limit()).await.unwrap();
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].record().event(), &intent(position, 7).0);
+        let done_position = entries[3].position();
+        drop(feed);
+
+        let port = Port::new(PortBehavior::Fail);
+        let hook = Hook::new(HookBehavior::Healthy);
+        let executor = rig.executor(port.clone(), hook.clone(), 2);
+        assert_eq!(
+            executor.step(limit()).await.unwrap(),
+            ExecutorStep::Advanced {
+                acked_to: done_position
+            }
+        );
+        assert!(
+            port.calls.lock().unwrap().is_empty(),
+            "a stored Done must spare the port even at the park threshold"
+        );
+        assert!(
+            hook.calls.lock().unwrap().is_empty(),
+            "durable success must outrank the failure budget's compensation"
+        );
+        assert_eq!(
+            rig.records::<Record<Effect>>(OUTBOX_CATEGORY, SAGA).await,
+            expected,
+            "replay must append no new outcome records"
+        );
+        assert_eq!(executor.step(limit()).await.unwrap(), ExecutorStep::Idle);
+        drop(executor);
         rig.close().await;
     })
     .await;

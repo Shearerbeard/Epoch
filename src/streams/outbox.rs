@@ -1,6 +1,8 @@
 //! Execute effect intents from the saga outbox with ordered,
-//! at-least-once delivery. Ports and compensation hooks must dedupe
-//! by intent key after a crash and replay.
+//! at-least-once delivery. A replay skips any effect whose `Done`
+//! record is already stored. Before that record is appended, a
+//! crash can redeliver the intent, so ports and compensation hooks
+//! must dedupe by intent key.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -205,13 +207,26 @@ impl<Feed, Store, Port, Hook, Effect> Executor<Feed, Store, Port, Hook, Effect> 
     }
 }
 
-/// One intent's durable retry state on the outbox stream: what the
-/// executor's decisions derive from, surviving its crashes.
-#[derive(Default)]
-struct DurableState {
-    failed: u32,
-    last_error: Option<String>,
-    parked: Option<(NonZeroU32, String)>,
+/// One intent's durable replay state on the outbox stream: what the
+/// executor's decisions derive from, surviving its crashes. The
+/// variants are mutually exclusive, and a folded `Done` stays
+/// terminal over later matching outcomes.
+enum DurableState {
+    /// No outcome record for this intent has been found.
+    Fresh,
+    /// At least one failed attempt for this intent; the count keeps
+    /// its latest diagnostic text. Whether the current budget admits
+    /// another attempt is a match-time decision, not a variant fact.
+    Attempted {
+        failed: NonZeroU32,
+        last_error: String,
+    },
+    /// This intent parked earlier; replay settles compensation rather
+    /// than performing the effect.
+    Parked { attempts: NonZeroU32, error: String },
+    /// This intent's success is already persisted; replay
+    /// acknowledges without performing or compensating.
+    Done,
 }
 
 impl<Feed, Store, Port, Hook, Effect> Executor<Feed, Store, Port, Hook, Effect>
@@ -266,8 +281,10 @@ where
         })
     }
 
-    /// On replay, settle a standing park before calling the port again.
-    /// A failed attempt within the retry budget holds the cursor.
+    /// On replay, a stored success acknowledges before any port call or
+    /// failure-budget handling, and a standing park settles before the
+    /// port is called again. A failed attempt within the retry budget
+    /// holds the cursor.
     async fn work_intent(
         &self,
         position: FeedPosition,
@@ -276,22 +293,28 @@ where
     ) -> Result<Option<RenderedIntentKey>, ExecutorError<Hook::Error, Feed::Error, Store::Error>>
     {
         let state = self.durable_state(&intent).await?;
-        if let Some((attempts, error)) = state.parked {
-            self.settle_park(position, &intent, request, attempts, error)
-                .await?;
-            return Ok(None);
-        }
-        if state.failed >= self.policy.budget().get() {
-            let attempts = NonZeroU32::new(state.failed)
-                .expect("the budget is nonzero and the count reached it");
-            let error = state.last_error.expect(
-                "the count reached the budget by counting this key's Failed records, \
-                 each of which set the last failure",
-            );
-            self.park(position, &intent, request, attempts, error)
-                .await?;
-            return Ok(None);
-        }
+        let failures = match state {
+            DurableState::Done => {
+                // The success already stands in the stream: acknowledging
+                // moves the cursor without another port call or append.
+                self.feed.ack(&self.group, position).await?;
+                return Ok(None);
+            }
+            DurableState::Parked { attempts, error } => {
+                self.settle_park(position, &intent, request, attempts, error)
+                    .await?;
+                return Ok(None);
+            }
+            DurableState::Attempted { failed, last_error } => {
+                if failed.get() >= self.policy.budget().get() {
+                    self.park(position, &intent, request, failed, last_error)
+                        .await?;
+                    return Ok(None);
+                }
+                failed.get()
+            }
+            DurableState::Fresh => 0,
+        };
 
         match self.port.perform(&intent, &request).await {
             Ok(()) => {
@@ -303,12 +326,13 @@ where
                 Ok(None)
             }
             Err(port_err) => {
+                let error = port_err.to_string();
                 self.append_outcome(Record::Failed {
                     intent: intent.clone(),
-                    error: port_err.to_string(),
+                    error: error.clone(),
                 })
                 .await?;
-                let attempts = state.failed + 1;
+                let attempts = failures + 1;
                 if attempts < self.policy.budget().get() {
                     // The window holds: the failing entry stays
                     // unacked and redelivers after the backoff, order
@@ -317,7 +341,7 @@ where
                         .policy
                         .schedule()
                         .delays()
-                        .nth(state.failed as usize)
+                        .nth(failures as usize)
                         .expect("the delay stream is unbounded");
                     tokio::time::sleep(delay).await;
                     return Ok(Some(intent));
@@ -325,7 +349,6 @@ where
 
                 let attempts = NonZeroU32::new(attempts)
                     .expect("the budget is nonzero and the count reached it");
-                let error = port_err.to_string();
                 self.park(position, &intent, request, attempts, error)
                     .await?;
                 Ok(None)
@@ -333,7 +356,8 @@ where
         }
     }
 
-    /// Rebuild one intent's retry state from the stored outcome records.
+    /// Rebuild one intent's replay state from the stored outcome
+    /// records: a durable success, the failure count, a standing park.
     async fn durable_state(
         &self,
         intent: &RenderedIntentKey,
@@ -343,28 +367,49 @@ where
             Ok(StreamState::Missing) => Vec::new(),
             Err(error) => return Err(ExecutorError::Read(error)),
         };
-        let mut state = DurableState::default();
+        let mut state = DurableState::Fresh;
         for record in stored {
-            match record.into_parts().0 {
-                Record::Failed {
-                    intent: failed,
-                    error,
-                } if &failed == intent => {
-                    state.failed += 1;
-                    state.last_error = Some(error);
-                }
-                Record::Parked {
-                    intent: parked,
-                    attempts,
-                    error,
-                } if &parked == intent => {
-                    state.parked = Some((attempts, error));
-                }
-                // Other keys' outcomes never count toward this
-                // intent's budget.
-                Record::Failed { .. } | Record::Parked { .. } => {}
-                Record::Intent { .. } | Record::Done { .. } => {}
-            }
+            state = match (state, record.into_parts().0) {
+                (state @ DurableState::Done, _) => state,
+                (_, Record::Done { intent: done }) if &done == intent => DurableState::Done,
+                (
+                    _,
+                    Record::Parked {
+                        intent: parked,
+                        attempts,
+                        error,
+                    },
+                ) if &parked == intent => DurableState::Parked { attempts, error },
+                (state @ DurableState::Parked { .. }, _) => state,
+                (
+                    DurableState::Attempted { failed: count, .. },
+                    Record::Failed {
+                        intent: failed,
+                        error,
+                    },
+                ) if &failed == intent => DurableState::Attempted {
+                    failed: count
+                        .checked_add(1)
+                        .expect("failed-attempt count exceeds u32"),
+                    last_error: error,
+                },
+                (
+                    _,
+                    Record::Failed {
+                        intent: failed,
+                        error,
+                    },
+                ) if &failed == intent => DurableState::Attempted {
+                    failed: NonZeroU32::MIN,
+                    last_error: error,
+                },
+                // Outcomes for other keys never count toward this
+                // intent.
+                (state, Record::Failed { .. }) => state,
+                (state, Record::Parked { .. }) => state,
+                (state, Record::Done { .. }) => state,
+                (state, Record::Intent { .. }) => state,
+            };
         }
         Ok(state)
     }
@@ -438,7 +483,8 @@ pub enum ExecutorStep {
     /// The poll delivered nothing; the cursor did not move.
     Idle,
     /// Work completed and the cursor advanced to here - performed,
-    /// parked, and skipped entries included.
+    /// parked, acknowledged from a stored `Done`, and skipped entries
+    /// included.
     Advanced {
         /// The position the group's cursor now stands at.
         acked_to: FeedPosition,
@@ -471,7 +517,7 @@ where
     /// The outbox feed rejected the ack.
     #[error(transparent)]
     Ack(#[from] AckError<FeedE>),
-    /// The failure-count read failed.
+    /// The replay-state read failed.
     #[error(transparent)]
     Read(StoreE),
     /// An outcome append failed. The append error's own variants stay
