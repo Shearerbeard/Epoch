@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::streams::feed::{ConsumerGroup, EventFeed};
 use crate::streams::outbox::{ExecutorError, ExecutorStep, Record};
-use crate::streams::{EventMetadata, RenderedIntentKey};
+use crate::streams::{EventBatch, EventMetadata, EventStreams, ExpectedVersion, RenderedIntentKey};
 
 use super::support::{
     intent_envelope, limit, rendered, stream_len, wait_until, Fx, Hook, Port, PortErr, Rig, SOURCE,
@@ -466,6 +466,185 @@ async fn a_crash_before_the_park_lands_parks_on_the_replay() {
     );
     assert_eq!(
         executor.step(limit(10)).await.expect("third step"),
+        ExecutorStep::Idle
+    );
+}
+
+/// Two failures were stored under a wider budget; the restart runs a
+/// tighter one, so the durable count already sits past it. The replay
+/// parks with the stored count and the latest diagnostic, never
+/// calling the port.
+#[tokio::test]
+async fn a_tighter_restart_budget_parks_from_the_durable_count() {
+    let rig = Rig::new();
+    let key = rendered("saga-20", SOURCE, "o-1", 1, 0);
+    let first_error = "port failure: first";
+    let latest_error = "port failure: second";
+    rig.seed_intent("saga-20", &key, Fx::Export { item: 95 })
+        .await;
+    rig.seed_failed("saga-20", &key, first_error).await;
+    rig.seed_failed("saga-20", &key, latest_error).await;
+    let failed_position = rig.outbox_tip().await;
+
+    let port = Port::default();
+    let hook = Hook::default();
+    let executor = rig.executor("saga-20", port.clone(), hook.clone(), 1);
+
+    let step = executor.step(limit(10)).await.expect("the replay parks");
+    assert_eq!(
+        step,
+        ExecutorStep::Advanced {
+            acked_to: failed_position
+        },
+        "the tightened budget parks from the stored count, not a new attempt"
+    );
+    assert!(
+        port.calls.lock().unwrap().is_empty(),
+        "the stored count already passes the tighter budget: no perform"
+    );
+    assert_eq!(
+        &*hook.fires.lock().unwrap(),
+        &[(key.clone(), 2, latest_error.to_owned())],
+        "the park carries the durable count and the latest diagnostic"
+    );
+    assert_eq!(
+        rig.outbox_records("saga-20").await,
+        vec![
+            (
+                Record::Intent {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    request: Fx::Export { item: 95 },
+                },
+                intent_envelope(&key)
+            ),
+            (
+                Record::Failed {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    error: first_error.to_owned(),
+                },
+                EventMetadata::new()
+            ),
+            (
+                Record::Failed {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    error: latest_error.to_owned(),
+                },
+                EventMetadata::new()
+            ),
+            (
+                Record::Parked {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    attempts: NonZeroU32::new(2).expect("2 is nonzero"),
+                    error: latest_error.to_owned(),
+                },
+                EventMetadata::new()
+            ),
+        ],
+        "one park with the durable count; no duplicated outcome"
+    );
+
+    // The parked record itself arrives on the next poll: an audit
+    // fact, not a second trigger.
+    let parked_position = rig.outbox_tip().await;
+    let step = executor
+        .step(limit(10))
+        .await
+        .expect("the second step succeeds");
+    assert_eq!(
+        step,
+        ExecutorStep::Advanced {
+            acked_to: parked_position
+        }
+    );
+    assert_eq!(hook.fires.lock().unwrap().len(), 1);
+    assert_eq!(
+        executor.step(limit(10)).await.expect("third step"),
+        ExecutorStep::Idle
+    );
+}
+
+/// A pre-repair history: the effect succeeded and `Done` was stored,
+/// but the crash landed before the acknowledgement, and the old
+/// executor replayed the already-done intent into a failure and a
+/// park. The stored `Done` stays terminal over those later outcomes:
+/// the replay acknowledges with no port call, no compensation, and
+/// no appended record.
+#[tokio::test]
+async fn a_stored_done_stays_terminal_over_later_outcomes() {
+    let rig = Rig::new();
+    let key = rendered("saga-21", SOURCE, "o-1", 1, 0);
+    let late_error = "port failure: replay";
+    rig.seed_intent("saga-21", &key, Fx::Export { item: 96 })
+        .await;
+    // The outcome a successful perform would have appended, staged
+    // before the group's acknowledgement.
+    let done = EventBatch::new(vec![Record::Done {
+        intent: RenderedIntentKey::from_rendered(key.clone()),
+    }])
+    .expect("one outcome is nonempty");
+    rig.outbox
+        .append(ExpectedVersion::Any, &"saga-21".to_owned(), &done)
+        .await
+        .expect("the staged success commits");
+    rig.seed_failed("saga-21", &key, late_error).await;
+    rig.seed_parked("saga-21", &key, 1, late_error).await;
+    let tail = rig.outbox_tip().await;
+
+    let port = Port::default();
+    port.fail_for.lock().unwrap().insert(key.clone(), 5);
+    let hook = Hook::default();
+    let executor = rig.executor("saga-21", port.clone(), hook.clone(), 1);
+
+    let step = executor.step(limit(10)).await.expect("the replay acks");
+    assert_eq!(
+        step,
+        ExecutorStep::Advanced { acked_to: tail },
+        "the durable success settles the whole history in one pass"
+    );
+    assert!(
+        port.calls.lock().unwrap().is_empty(),
+        "a stored Done spares the port even with a failing one supplied"
+    );
+    assert!(
+        hook.fires.lock().unwrap().is_empty(),
+        "a stored Done spares the compensation hook over the later park"
+    );
+    assert_eq!(
+        rig.outbox_records("saga-21").await,
+        vec![
+            (
+                Record::Intent {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    request: Fx::Export { item: 96 },
+                },
+                intent_envelope(&key)
+            ),
+            (
+                Record::Done {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                },
+                EventMetadata::new()
+            ),
+            (
+                Record::Failed {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    error: late_error.to_owned(),
+                },
+                EventMetadata::new()
+            ),
+            (
+                Record::Parked {
+                    intent: RenderedIntentKey::from_rendered(key.clone()),
+                    attempts: NonZeroU32::new(1).expect("1 is nonzero"),
+                    error: late_error.to_owned(),
+                },
+                EventMetadata::new()
+            ),
+        ],
+        "nothing is appended: the later outcomes never override the success"
+    );
+    assert_eq!(
+        executor.step(limit(10)).await.expect("second step"),
         ExecutorStep::Idle
     );
 }
