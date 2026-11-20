@@ -306,6 +306,226 @@ pub async fn a_keyed_append_loads_back_with_its_envelope<S, E>(
     );
 }
 
+/// Checks inclusive tail reads, missing streams and past-tail cursors.
+/// A cursor above `i64::MAX` exercises clamped binds at a small head;
+/// this case does not test the filter against a stored `i64::MAX` row.
+pub async fn a_slice_reads_from_the_cursor_to_the_head<S, E>(
+    store: S,
+    make_id: impl Fn(&str) -> S::Id,
+    make_event: impl Fn(u32) -> E,
+) where
+    S: EventStreams<E>,
+    E: Event + PartialEq + Send + Sync + Debug,
+{
+    let id = make_id(&unique_stream_id("cursor-slice", 0));
+    let batch = EventBatch::from_records(
+        (1..=3)
+            .map(|slot| {
+                let mut envelope = EventMetadata::new();
+                envelope.insert("slot", slot.to_string());
+                RecordedEvent::keyed(make_event(slot), envelope)
+            })
+            .collect(),
+    )
+    .expect("three records are nonempty");
+    store
+        .append(ExpectedVersion::NoStream, &id, &batch)
+        .await
+        .expect("seed append succeeds");
+
+    let whole = batch.records();
+    let reads: [(Option<u64>, &[RecordedEvent<E>]); 5] = [
+        (None, whole),
+        (Some(1), whole),
+        (Some(2), &whole[1..]),
+        (Some(4), &[]),
+        (Some(i64::MAX as u64 + 1), &[]),
+    ];
+    for (cursor, expected) in reads {
+        let from = cursor
+            .map(StreamSequence::new)
+            .transpose()
+            .expect("a cursor is a 1-based position");
+        let slice = store
+            .load_stream_from(&id, from)
+            .await
+            .expect("slice load succeeds");
+        assert_eq!(
+            (slice.at(), slice.records()),
+            (head_at(3), expected),
+            "the slice holds exactly the cursor's events, observed at the head (cursor {cursor:?})"
+        );
+    }
+
+    let missing = make_id(&unique_stream_id("cursor-missing", 0));
+    assert_eq!(
+        store.load_stream(&missing).await.expect("load succeeds"),
+        StreamState::Missing,
+        "a never-written stream loads Missing, never an error"
+    );
+    let slice = store
+        .load_stream_from(&missing, None)
+        .await
+        .expect("slice load succeeds");
+    assert!(
+        slice.records().is_empty(),
+        "a slice over a missing stream carries nothing"
+    );
+    assert_eq!(
+        slice.at(),
+        StreamVersion::NoStream,
+        "a missing stream is observed as NoStream"
+    );
+}
+
+/// Checks returned ids and events in interleaved append order.
+/// The supplied category must contain no other events.
+pub async fn a_category_read_round_trips_ids_in_append_order<S, E>(
+    store: S,
+    make_id: impl Fn(&str) -> S::Id,
+    make_event: impl Fn(u32) -> E,
+) where
+    S: EventStreams<E>,
+    S::Id: PartialEq + Debug,
+    E: Event + PartialEq + Send + Sync + Debug,
+{
+    let first = make_id(&unique_stream_id("category-first", 0));
+    let second = make_id(&unique_stream_id("category-second", 0));
+
+    let one = StreamSequence::new(1).expect("1 is a position");
+    let appends = [
+        (&first, ExpectedVersion::NoStream, make_event(1), 1_u64),
+        (&second, ExpectedVersion::NoStream, make_event(2), 1),
+        (&first, ExpectedVersion::Exact(one), make_event(3), 2),
+    ];
+    for (stream, expectation, event, lands_at) in appends {
+        let landed = store
+            .append(expectation, stream, &one_event_batch(event))
+            .await
+            .expect("the append succeeds");
+        assert_eq!(
+            landed.get(),
+            lands_at,
+            "the append lands at sequence {lands_at}"
+        );
+    }
+
+    let category = store.load_category().await.expect("category read succeeds");
+    let expected = [
+        (&first, make_event(1)),
+        (&second, make_event(2)),
+        (&first, make_event(3)),
+    ];
+    assert_eq!(
+        category.len(),
+        expected.len(),
+        "every appended event is returned exactly once"
+    );
+    for (index, (returned, (id, event))) in category.iter().zip(expected).enumerate() {
+        assert_eq!(returned.id, *id, "returned id {index} is the appended id");
+        assert_eq!(
+            returned.event, event,
+            "returned event {index} is the appended event"
+        );
+    }
+}
+
+/// Checks that slice records and head agree during a rival append.
+/// The barrier only coordinates task starts. A split-read regression is
+/// caught when the rival commits between the read's two statements.
+pub async fn a_slice_read_during_a_rival_append_stays_one_view<S, E>(
+    store: S,
+    rival: S,
+    make_id: impl Fn(&str) -> S::Id,
+    make_event: impl Fn(u32) -> E + Clone + Send + Sync + 'static,
+) where
+    S: EventStreams<E> + Clone + Send + Sync + 'static,
+    S::Id: Clone + Send + Sync + 'static,
+    E: Event + PartialEq + Send + Sync + Debug + 'static,
+{
+    for iteration in 0..RACE_ITERATIONS {
+        let id = make_id(&unique_stream_id("read-under-write", iteration));
+        let seeded = store
+            .append(
+                ExpectedVersion::NoStream,
+                &id,
+                &EventBatch::new(vec![make_event(1), make_event(2)])
+                    .expect("two events are nonempty"),
+            )
+            .await
+            .expect("seed append succeeds");
+        assert_eq!(seeded.get(), 2, "the seed lands at sequence 2");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let cursor = StreamSequence::new(2).expect("2 is a position");
+        let reader = {
+            let store = store.clone();
+            let id = id.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store.load_stream_from(&id, Some(cursor)).await
+            })
+        };
+        let writer = {
+            let rival = rival.clone();
+            let id = id.clone();
+            let barrier = Arc::clone(&barrier);
+            let make_event = make_event.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                rival
+                    .append(
+                        ExpectedVersion::Exact(cursor),
+                        &id,
+                        &one_event_batch(make_event(3)),
+                    )
+                    .await
+            })
+        };
+
+        let slice = reader
+            .await
+            .expect("reader task must not panic")
+            .expect("slice load succeeds");
+        let appended = writer
+            .await
+            .expect("writer task must not panic")
+            .expect("the rival's append succeeds");
+        assert_eq!(appended.get(), 3, "the rival lands at sequence 3");
+
+        let seed_tail = vec![RecordedEvent::new(make_event(2))];
+        let raced_tail = vec![
+            RecordedEvent::new(make_event(2)),
+            RecordedEvent::new(make_event(3)),
+        ];
+        match (slice.at(), slice.records()) {
+            (at, records) if records == seed_tail.as_slice() => {
+                assert_eq!(at, head_at(2), "the seed tail is observed at the seed head");
+            }
+            (at, records) if records == raced_tail.as_slice() => {
+                assert_eq!(
+                    at,
+                    head_at(3),
+                    "the rival's tail is observed at the rival's head"
+                );
+            }
+            (at, records) => {
+                panic!("the slice's head and records disagree: {at:?} over {records:?}")
+            }
+        }
+
+        assert_eq!(
+            store.load_stream(&id).await.expect("load succeeds"),
+            StreamState::Present(
+                EventBatch::new(vec![make_event(1), make_event(2), make_event(3)])
+                    .expect("three events are nonempty"),
+            ),
+            "the stream finally holds the seed and the rival's event"
+        );
+    }
+}
+
 fn unique_stream_id(configuration: &str, iteration: usize) -> String {
     format!(
         "spec-{configuration}-{}-{iteration}",
@@ -317,6 +537,10 @@ fn one_event_batch<E>(event: E) -> EventBatch<E> {
     // A single-event batch is trivially nonempty, so the empty-batch
     // error is unreachable.
     EventBatch::new(vec![event]).expect("a single event is nonempty")
+}
+
+fn head_at(position: u64) -> StreamVersion {
+    StreamVersion::Exact(StreamSequence::new(position).expect("a head is a 1-based position"))
 }
 
 /// Load a stream that must be present and report its observed position.
@@ -417,6 +641,55 @@ mod tests {
             store,
             str::to_owned,
             || SomethingHappened,
+        ))
+        .await;
+    }
+
+    /// A payload-carrying event, so read paths can tell which append
+    /// produced which record.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Counted(u32);
+
+    impl Event for Counted {
+        type EntityId = ();
+
+        fn event_type(&self) -> String {
+            "Counted".to_owned()
+        }
+
+        fn get_id(&self) -> Self::EntityId {}
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn in_memory_a_slice_reads_from_the_cursor_to_the_head() {
+        let store = InMemoryEventStreams::<Counted>::new();
+        under_deadline(a_slice_reads_from_the_cursor_to_the_head(
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn in_memory_a_category_read_round_trips_ids_in_append_order() {
+        let store = InMemoryEventStreams::<Counted>::new();
+        under_deadline(a_category_read_round_trips_ids_in_append_order(
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn in_memory_a_slice_read_during_a_rival_append_stays_one_view() {
+        let store = InMemoryEventStreams::<Counted>::new();
+        under_deadline(a_slice_read_during_a_rival_append_stays_one_view(
+            store.clone(),
+            store,
+            str::to_owned,
+            Counted,
         ))
         .await;
     }
