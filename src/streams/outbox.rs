@@ -207,25 +207,18 @@ impl<Feed, Store, Port, Hook, Effect> Executor<Feed, Store, Port, Hook, Effect> 
     }
 }
 
-/// One intent's durable replay state on the outbox stream: what the
-/// executor's decisions derive from, surviving its crashes. The
-/// variants are mutually exclusive, and a folded `Done` stays
-/// terminal over later matching outcomes.
+/// One intent's durable replay state. `Done` is terminal over later
+/// matching outcomes; a restart's retry budget applies to `Attempted`.
 enum DurableState {
-    /// No outcome record for this intent has been found.
     Fresh,
-    /// At least one failed attempt for this intent; the count keeps
-    /// its latest diagnostic text. Whether the current budget admits
-    /// another attempt is a match-time decision, not a variant fact.
     Attempted {
         failed: NonZeroU32,
         last_error: String,
     },
-    /// This intent parked earlier; replay settles compensation rather
-    /// than performing the effect.
-    Parked { attempts: NonZeroU32, error: String },
-    /// This intent's success is already persisted; replay
-    /// acknowledges without performing or compensating.
+    Parked {
+        attempts: NonZeroU32,
+        error: String,
+    },
     Done,
 }
 
@@ -295,8 +288,6 @@ where
         let state = self.durable_state(&intent).await?;
         let failures = match state {
             DurableState::Done => {
-                // The success already stands in the stream: acknowledging
-                // moves the cursor without another port call or append.
                 self.feed.ack(&self.group, position).await?;
                 return Ok(None);
             }
@@ -356,8 +347,7 @@ where
         }
     }
 
-    /// Rebuild one intent's replay state from the stored outcome
-    /// records: a durable success, the failure count, a standing park.
+    /// Rebuild one intent's replay state from its stored outcomes.
     async fn durable_state(
         &self,
         intent: &RenderedIntentKey,
