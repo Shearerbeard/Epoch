@@ -339,6 +339,37 @@ where
         Ok(StreamSlice::new(records, at).expect("nonempty records imply an Exact observation"))
     }
 
+    async fn load_stream_page(
+        &self,
+        id: &Self::Id,
+        range: std::ops::RangeInclusive<StreamSequence>,
+        limit: usize,
+    ) -> Result<StreamSlice<E>, Self::Error> {
+        let root = self.root.lock().expect("event store lock poisoned");
+        let history = stream_records(&root, &self.category, &id.stream_key());
+
+        let at = version_of(history.len() as u64);
+        // 1-based inclusive positions become 0-based indexes clamped
+        // onto the tail: a reversed range or a bound past the head
+        // lands on an empty span, so neither needs a case of its own,
+        // and a zero limit reads the same empty page.
+        let start = (range.start().get() - 1).min(history.len() as u64);
+        let end = range.end().get().min(history.len() as u64);
+        let records = if limit == 0 || start >= end {
+            Vec::new()
+        } else {
+            history[start as usize..end as usize]
+                .iter()
+                .take(limit)
+                .cloned()
+                .collect()
+        };
+
+        // Nonempty records only come from a nonempty history, whose
+        // observation is `Exact`.
+        Ok(StreamSlice::new(records, at).expect("nonempty records imply an Exact observation"))
+    }
+
     async fn load_category(
         &self,
     ) -> Result<

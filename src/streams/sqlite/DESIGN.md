@@ -211,6 +211,7 @@ what the shared suites do not reach.
 |---|---|
 | `load_stream` | the shared OCC races and the shared envelope case; shared `a_slice_reads_from_the_cursor_to_the_head` (missing) |
 | `load_stream_from` | the shared envelope case (with `None`); shared `a_slice_reads_from_the_cursor_to_the_head` |
+| `load_stream_page` | shared `a_page_reads_exactly_the_requested_bounds`, `a_consumer_pages_a_backlog_to_a_captured_endpoint`, `a_page_read_during_a_rival_append_stays_one_view`; local `a_page_selects_before_decoding` (selection before decoding, both exclusion kinds, zero-limit non-decoding) |
 | `load_category` | shared `a_category_read_round_trips_ids_in_append_order` |
 | `append` | the shared OCC races, the shared flash sale, the shared envelope case; local `independent_actors_conflict_deterministically`, `a_contender_waits_for_the_write_lock_and_sees_the_committed_head`, `a_cancelled_append_still_commits`, `a_wedged_writer_is_a_retryable_append_timeout`, `a_zero_bound_times_out_reporting_the_floor`, `each_handle_times_out_on_its_own_bound`, `a_child_of_the_root_handle_times_out_on_the_root_bound`, `the_envelope_written_is_the_envelope_stored` |
 

@@ -433,6 +433,31 @@ where
         from: Option<StreamSequence>,
     ) -> Result<StreamSlice<E>, Self::Error>;
 
+    /// Load one page of a stream's history inside an inclusive
+    /// position range: the stored records from `range.start()` through
+    /// `range.end()`, oldest first, at most `limit` of them, with the
+    /// stream's observed position. The range is the replay boundary a
+    /// consumer owns; the limit is that consumer's page size, so a
+    /// range far larger than the limit pages toward the range's end
+    /// rather than returning the range whole.
+    ///
+    /// The records and `at()` derive from one snapshot, and `at()` is
+    /// the observed head of the whole stream, never the last returned
+    /// position: a consumer checkpoints a page at its requested start
+    /// plus its returned count, never at `at()`. A zero limit, a
+    /// reversed range, a range beyond the head, and a missing stream
+    /// all read an empty page while still observing the head, so the
+    /// only failure modes are the backend's own. A bound past what the
+    /// backend can store keeps its arithmetic meaning: an upper bound
+    /// above every storable position includes all of them, and a
+    /// lower bound above them selects none.
+    async fn load_stream_page(
+        &self,
+        id: &Self::Id,
+        range: std::ops::RangeInclusive<StreamSequence>,
+        limit: usize,
+    ) -> Result<StreamSlice<E>, Self::Error>;
+
     /// Load every event in this repository's category, oldest first,
     /// each carrying its typed stream id.
     async fn load_category(
