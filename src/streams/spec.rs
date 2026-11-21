@@ -715,15 +715,19 @@ pub async fn a_consumer_pages_a_backlog_to_a_captured_endpoint<S, E>(
             "each later page holds the backlog's next stretch, never the rival's event"
         );
         replayed += count;
-        // Endpoint completion is checked before the increment; a dense
-        // page cannot overflow past the endpoint it serves.
-        let next = next_start
-            .checked_add(count as u64)
-            .expect("a dense page cannot overflow past its endpoint");
-        if next > endpoint {
+        // The page's dense positions run from its requested start
+        // through one less than its returned count, and a page
+        // bounded by the endpoint cannot return a position beyond
+        // it - so completion is checked on that stretch, before any
+        // next-start arithmetic, and the largest sequence cannot
+        // overflow the check.
+        let through = next_start
+            .checked_add(count as u64 - 1)
+            .expect("a page bounded by the endpoint cannot overflow past it");
+        if through >= endpoint {
             break;
         }
-        next_start = next;
+        next_start = through + 1;
     }
 
     assert_eq!(
