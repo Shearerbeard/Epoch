@@ -655,13 +655,14 @@ pub async fn a_consumer_pages_a_backlog_to_a_captured_endpoint<S, E>(
         .await
         .expect("page load succeeds");
     let endpoint = match first.at() {
+        // The replay endpoint is the observed head, capped by the
+        // requested upper bound.
         StreamVersion::Exact(head) => head.get().min(REQUESTED_UPPER),
         StreamVersion::NoStream => panic!("the seeded stream must be present"),
     };
     assert_eq!(
-        first.at(),
-        head_at(BACKLOG),
-        "the first page observes the backlog's head"
+        endpoint, BACKLOG,
+        "the first page's observation fixes the endpoint at the backlog's head"
     );
     let first_count = first.records().len();
     assert_eq!(
@@ -674,11 +675,10 @@ pub async fn a_consumer_pages_a_backlog_to_a_captured_endpoint<S, E>(
 
     // The rival lands inside the originally requested range, beyond the
     // captured endpoint, before the consumer's later pages run.
-    let beyond_slot = u32::try_from(BACKLOG + 1).expect("a slot fits the event payload");
     let mut beyond_envelope = EventMetadata::new();
     beyond_envelope.insert("slot", (BACKLOG + 1).to_string());
     let beyond_batch = EventBatch::from_records(vec![RecordedEvent::keyed(
-        make_event(beyond_slot),
+        make_event(u32::try_from(BACKLOG + 1).expect("a slot fits the event payload")),
         beyond_envelope,
     )])
     .expect("one record is nonempty");
@@ -834,6 +834,109 @@ pub async fn a_page_read_during_a_rival_append_stays_one_view<S, E>(
             }
         }
     }
+}
+
+/// Checks that a strict event type pages without decoding what its
+/// bounds and its count exclude: the rows a page never selects cannot
+/// fail the read, while a selected undecodable row still fails it. A
+/// zero limit observes the head without decoding anything, and every
+/// page still reports the observed head. The strict reader's event
+/// type must fail to decode the loose writer's payload - that
+/// relationship is the wiring's to provide. Only the SQL backends
+/// wire this case: the in-memory backend stores typed events and has
+/// no decode step, so an undecodable row cannot exist there.
+pub async fn a_page_selects_before_decoding<S, L, E, F>(
+    strict: S,
+    loose: L,
+    make_id: impl Fn(&str) -> S::Id,
+    make_object: impl Fn(&str) -> E,
+    make_unit: impl Fn() -> F,
+    is_decode_failure: impl Fn(&S::Error) -> bool,
+) where
+    S: EventStreams<E>,
+    L: EventStreams<F, Id = S::Id>,
+    E: Event + PartialEq + Send + Sync + Debug,
+    F: Event + Send + Sync + Debug,
+{
+    let id = make_id(&unique_stream_id("page-decode", 0));
+    // A three-event stream whose middle row cannot decode as the
+    // strict reader's event type.
+    strict
+        .append(
+            ExpectedVersion::NoStream,
+            &id,
+            &one_event_batch(make_object("one")),
+        )
+        .await
+        .expect("sequence 1 lands");
+    loose
+        .append(
+            ExpectedVersion::Exact(seq(1)),
+            &id,
+            &one_event_batch(make_unit()),
+        )
+        .await
+        .expect("sequence 2 lands");
+    strict
+        .append(
+            ExpectedVersion::Exact(seq(2)),
+            &id,
+            &one_event_batch(make_object("three")),
+        )
+        .await
+        .expect("sequence 3 lands");
+
+    // The upper bound excludes the undecodable middle row.
+    let page = strict
+        .load_stream_page(&id, seq(1)..=seq(1), 5)
+        .await
+        .expect("the upper bound excludes the undecodable row");
+    assert_eq!(
+        page.records(),
+        vec![RecordedEvent::new(make_object("one"))],
+        "the page holds the row the bound admits"
+    );
+    assert_eq!(page.at(), head_at(3), "the head is observed");
+
+    // The lower bound excludes it too.
+    let page = strict
+        .load_stream_page(&id, seq(3)..=seq(3), 5)
+        .await
+        .expect("the lower bound excludes the undecodable row");
+    assert_eq!(
+        page.records(),
+        vec![RecordedEvent::new(make_object("three"))],
+        "the page holds the row the bound admits"
+    );
+
+    // The count limit excludes it: only the first row is selected.
+    let page = strict
+        .load_stream_page(&id, seq(1)..=seq(3), 1)
+        .await
+        .expect("the count limit excludes the undecodable row");
+    assert_eq!(
+        page.records(),
+        vec![RecordedEvent::new(make_object("one"))],
+        "the page holds the first row the limit admits"
+    );
+
+    // A selected undecodable row still fails the read.
+    let outcome = strict
+        .load_stream_page(&id, seq(2)..=seq(2), 5)
+        .await
+        .expect_err("a selected undecodable row fails the read");
+    assert!(
+        is_decode_failure(&outcome),
+        "the failure is the decode failure, got {outcome:?}"
+    );
+
+    // A zero limit observes the head without decoding anything.
+    let page = strict
+        .load_stream_page(&id, seq(1)..=seq(3), 0)
+        .await
+        .expect("a zero limit decodes nothing");
+    assert!(page.records().is_empty(), "no row was selected to decode");
+    assert_eq!(page.at(), head_at(3), "the head is still observed");
 }
 
 fn unique_stream_id(configuration: &str, iteration: usize) -> String {

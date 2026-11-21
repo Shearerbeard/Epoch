@@ -751,9 +751,8 @@ mod tests {
     }
 
     /// A strict event type pages without decoding what its bounds and
-    /// its count exclude: the rows a page never selects cannot fail the
-    /// read, while a selected undecodable row still fails it. A zero
-    /// limit observes the head without decoding anything.
+    /// its count exclude, through the shared case over two typed views
+    /// of one category: the strict reader and the loose writer.
     #[tokio::test(flavor = "multi_thread")]
     async fn postgres_a_page_selects_before_decoding() {
         #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -775,95 +774,17 @@ mod tests {
         let strict = store::<NeedsAnObject>(&category).await;
         let loose = store::<SomethingHappened>(&category).await;
 
-        // A three-event stream whose middle row cannot decode as the
-        // strict reader's event type.
-        let key = format!("stream-{}", rusty_ulid::generate_ulid_string());
-        let object = |name: &str| {
-            EventBatch::new(vec![NeedsAnObject {
+        under_deadline(crate::streams::spec::a_page_selects_before_decoding(
+            strict,
+            loose,
+            str::to_owned,
+            |name| NeedsAnObject {
                 name: name.to_owned(),
-            }])
-            .expect("one event is nonempty")
-        };
-        let seq = |position: u64| StreamSequence::new(position).expect("a bound is a position");
-        strict
-            .append(ExpectedVersion::NoStream, &key, &object("one"))
-            .await
-            .expect("sequence 1 lands");
-        loose
-            .append(
-                ExpectedVersion::Exact(seq(1)),
-                &key,
-                &EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty"),
-            )
-            .await
-            .expect("sequence 2 lands");
-        strict
-            .append(ExpectedVersion::Exact(seq(2)), &key, &object("three"))
-            .await
-            .expect("sequence 3 lands");
-
-        // The upper bound excludes the undecodable middle row.
-        let page = strict
-            .load_stream_page(&key, seq(1)..=seq(1), 5)
-            .await
-            .expect("the upper bound excludes the undecodable row");
-        assert_eq!(
-            page.records(),
-            vec![RecordedEvent::new(NeedsAnObject {
-                name: "one".to_owned()
-            })],
-            "the page holds the row the bound admits"
-        );
-        assert_eq!(
-            page.at(),
-            StreamVersion::Exact(seq(3)),
-            "the head is observed"
-        );
-
-        // The lower bound excludes it too.
-        let page = strict
-            .load_stream_page(&key, seq(3)..=seq(3), 5)
-            .await
-            .expect("the lower bound excludes the undecodable row");
-        assert_eq!(
-            page.records(),
-            vec![RecordedEvent::new(NeedsAnObject {
-                name: "three".to_owned()
-            })],
-            "the page holds the row the bound admits"
-        );
-
-        // The count limit excludes it: only the first row is selected.
-        let page = strict
-            .load_stream_page(&key, seq(1)..=seq(3), 1)
-            .await
-            .expect("the count limit excludes the undecodable row");
-        assert_eq!(
-            page.records(),
-            vec![RecordedEvent::new(NeedsAnObject {
-                name: "one".to_owned()
-            })],
-            "the page holds the first row the limit admits"
-        );
-
-        // A selected undecodable row still fails the read.
-        let outcome = strict.load_stream_page(&key, seq(2)..=seq(2), 5).await;
-        assert!(
-            matches!(outcome, Err(PgStreamsError::Serialization(_))),
-            "a selected undecodable row is a serialization error, got {outcome:?}"
-        );
-
-        // A zero limit observes the head without decoding anything.
-        let page = strict
-            .load_stream_page(&key, seq(1)..=seq(3), 0)
-            .await
-            .expect("a zero limit decodes nothing");
-        assert!(page.records().is_empty(), "no row was selected to decode");
-        assert_eq!(
-            page.at(),
-            StreamVersion::Exact(seq(3)),
-            "the head is still observed"
-        );
+            },
+            || SomethingHappened,
+            |error| matches!(error, PgStreamsError::Serialization(_)),
+        ))
+        .await;
     }
 
     /// Run `attempt` against a migrated store whose funnel is wedged:

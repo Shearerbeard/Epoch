@@ -22,9 +22,9 @@ use crate::streams::spec::{
     a_category_read_round_trips_ids_in_append_order,
     a_consumer_pages_a_backlog_to_a_captured_endpoint, a_keyed_append_loads_back_with_its_envelope,
     a_page_read_during_a_rival_append_stays_one_view, a_page_reads_exactly_the_requested_bounds,
-    a_slice_read_during_a_rival_append_stays_one_view, a_slice_reads_from_the_cursor_to_the_head,
-    flash_sale_sells_exactly_the_stock, single_event_occ_race_on_empty_stream,
-    single_event_occ_race_on_seeded_stream, under_deadline,
+    a_page_selects_before_decoding, a_slice_read_during_a_rival_append_stays_one_view,
+    a_slice_reads_from_the_cursor_to_the_head, flash_sale_sells_exactly_the_stock,
+    single_event_occ_race_on_empty_stream, single_event_occ_race_on_seeded_stream, under_deadline,
 };
 use crate::streams::{
     AppendError, AtomicStreams, EventBatch, EventMetadata, EventStreams, ExpectedVersion,
@@ -129,11 +129,6 @@ fn one_event() -> EventBatch<SomethingHappened> {
 
 fn unique_key(prefix: &str) -> String {
     format!("{prefix}-{}", rusty_ulid::generate_ulid_string())
-}
-
-/// A page bound: 1-based, so zero cannot be written through it.
-fn seq(position: u64) -> StreamSequence {
-    StreamSequence::new(position).expect("a page bound is a 1-based position")
 }
 
 /// A temporary database file, for the fixtures that need two
@@ -969,12 +964,10 @@ async fn a_stored_payload_that_does_not_decode_is_a_serialization_error() {
 }
 
 /// A strict event type pages without decoding what its bounds and its
-/// count exclude: the rows a page never selects cannot fail the read,
-/// while a selected undecodable row still fails it. A zero limit
-/// observes the head without decoding anything, and every page still
-/// reports the observed head.
+/// count exclude, through the shared case over two typed views of one
+/// category: the strict reader and the loose writer.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_page_selects_before_decoding() {
+async fn sqlite_a_page_selects_before_decoding() {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct NeedsAnObject {
         name: String,
@@ -1001,90 +994,17 @@ async fn a_page_selects_before_decoding() {
         .await
         .expect("open the loose writer");
 
-    // A three-event stream whose middle row cannot decode as the
-    // strict reader's event type.
-    let key = unique_key("mixed");
-    let object = |name: &str| {
-        EventBatch::new(vec![NeedsAnObject {
+    under_deadline(a_page_selects_before_decoding(
+        strict,
+        loose,
+        str::to_owned,
+        |name| NeedsAnObject {
             name: name.to_owned(),
-        }])
-        .expect("one event is nonempty")
-    };
-    strict
-        .append(ExpectedVersion::NoStream, &key, &object("one"))
-        .await
-        .expect("sequence 1 lands");
-    loose
-        .append(ExpectedVersion::Exact(seq(1)), &key, &one_event())
-        .await
-        .expect("sequence 2 lands");
-    strict
-        .append(ExpectedVersion::Exact(seq(2)), &key, &object("three"))
-        .await
-        .expect("sequence 3 lands");
-
-    // The upper bound excludes the undecodable middle row.
-    let page = strict
-        .load_stream_page(&key, seq(1)..=seq(1), 5)
-        .await
-        .expect("the upper bound excludes the undecodable row");
-    assert_eq!(
-        page.records(),
-        vec![RecordedEvent::new(NeedsAnObject {
-            name: "one".to_owned()
-        })],
-        "the page holds the row the bound admits"
-    );
-    assert_eq!(
-        page.at(),
-        StreamVersion::Exact(seq(3)),
-        "the head is observed"
-    );
-
-    // The lower bound excludes it too.
-    let page = strict
-        .load_stream_page(&key, seq(3)..=seq(3), 5)
-        .await
-        .expect("the lower bound excludes the undecodable row");
-    assert_eq!(
-        page.records(),
-        vec![RecordedEvent::new(NeedsAnObject {
-            name: "three".to_owned()
-        })],
-        "the page holds the row the bound admits"
-    );
-
-    // The count limit excludes it: only the first row is selected.
-    let page = strict
-        .load_stream_page(&key, seq(1)..=seq(3), 1)
-        .await
-        .expect("the count limit excludes the undecodable row");
-    assert_eq!(
-        page.records(),
-        vec![RecordedEvent::new(NeedsAnObject {
-            name: "one".to_owned()
-        })],
-        "the page holds the first row the limit admits"
-    );
-
-    // A selected undecodable row still fails the read.
-    let outcome = strict.load_stream_page(&key, seq(2)..=seq(2), 5).await;
-    assert!(
-        matches!(outcome, Err(SqliteStreamsError::Serialization(_))),
-        "a selected undecodable row is a serialization error, got {outcome:?}"
-    );
-
-    // A zero limit observes the head without decoding anything.
-    let page = strict
-        .load_stream_page(&key, seq(1)..=seq(3), 0)
-        .await
-        .expect("a zero limit decodes nothing");
-    assert!(page.records().is_empty(), "no row was selected to decode");
-    assert_eq!(
-        page.at(),
-        StreamVersion::Exact(seq(3)),
-        "the head is still observed"
-    );
+        },
+        || SomethingHappened,
+        |error| matches!(error, SqliteStreamsError::Serialization(_)),
+    ))
+    .await;
 }
 
 /// A stored key the typed id cannot parse back is an invalid key, not
