@@ -526,11 +526,10 @@ pub async fn a_slice_read_during_a_rival_append_stays_one_view<S, E>(
     }
 }
 
-/// Checks bounded page reads: exact endpoints, truncation by count and
-/// by upper bound, and the empty pages a zero limit, a reversed
-/// range, a past-head bound and a missing stream read. Unsigned bounds
-/// past `i64::MAX` keep their arithmetic meaning, and every page still
-/// observes the head while carrying the envelopes its appends stored.
+/// Checks range/count truncation, empty pages, unsigned bounds, and
+/// metadata preservation. The small-head case cannot exercise a clamped
+/// lower bind against a stored `i64::MAX` row; SQL fixtures cover that
+/// collision separately.
 pub async fn a_page_reads_exactly_the_requested_bounds<S, E>(
     store: S,
     make_id: impl Fn(&str) -> S::Id,
@@ -558,24 +557,14 @@ pub async fn a_page_reads_exactly_the_requested_bounds<S, E>(
     let whole = batch.records();
     let reads: [ExpectedPage<'_, E>; 10] = [
         (seq(1)..=seq(5), 5, whole),
-        // A count smaller than the range pages toward the range's end.
         (seq(1)..=seq(5), 3, &whole[..3]),
-        // An upper bound smaller than the stored history truncates it.
         (seq(1)..=seq(3), 5, &whole[..3]),
-        // Exact endpoints hold their single event.
         (seq(2)..=seq(2), 5, &whole[1..2]),
-        // A zero limit observes the head without selecting a page.
         (seq(1)..=seq(5), 0, &[]),
-        // A reversed range reads an empty page.
         (seq(4)..=seq(2), 5, &[]),
-        // A bound past the head reads an empty page.
         (seq(6)..=seq(9), 5, &[]),
-        // An upper bound and a count past what any backend can store
-        // still read the whole stream.
         (seq(1)..=seq(u64::MAX), usize::MAX, whole),
-        // An open-ended range pages by count alone.
         (seq(1)..=seq(u64::MAX), 2, &whole[..2]),
-        // A lower bound past every storable position selects none.
         (seq(i64::MAX as u64 + 1)..=seq(u64::MAX), 5, &[]),
     ];
     for (index, (range, limit, expected)) in reads.into_iter().enumerate() {
@@ -655,8 +644,7 @@ pub async fn a_consumer_pages_a_backlog_to_a_captured_endpoint<S, E>(
         .await
         .expect("page load succeeds");
     let endpoint = match first.at() {
-        // The replay endpoint is the observed head, capped by the
-        // requested upper bound.
+        // Cap the observed head at the requested upper bound.
         StreamVersion::Exact(head) => head.get().min(REQUESTED_UPPER),
         StreamVersion::NoStream => panic!("the seeded stream must be present"),
     };
@@ -664,12 +652,12 @@ pub async fn a_consumer_pages_a_backlog_to_a_captured_endpoint<S, E>(
         endpoint, BACKLOG,
         "the first page's observation fixes the endpoint at the backlog's head"
     );
-    let first_count = first.records().len();
     assert_eq!(
         first.records(),
-        &backlog[..first_count],
-        "the first page holds the backlog's opening stretch, envelopes included"
+        &backlog[..PAGE_SIZE],
+        "the first page holds exactly the opening page, envelopes included"
     );
+    let first_count = first.records().len();
     let mut replayed = first_count;
     let mut next_start = 1 + first_count as u64;
 
@@ -715,12 +703,8 @@ pub async fn a_consumer_pages_a_backlog_to_a_captured_endpoint<S, E>(
             "each later page holds the backlog's next stretch, never the rival's event"
         );
         replayed += count;
-        // The page's dense positions run from its requested start
-        // through one less than its returned count, and a page
-        // bounded by the endpoint cannot return a position beyond
-        // it - so completion is checked on that stretch, before any
-        // next-start arithmetic, and the largest sequence cannot
-        // overflow the check.
+        // Check completion on the dense page's own last position,
+        // before advancing, so an endpoint at u64::MAX cannot overflow.
         let through = next_start
             .checked_add(count as u64 - 1)
             .expect("a page bounded by the endpoint cannot overflow past it");
@@ -749,10 +733,9 @@ pub async fn a_consumer_pages_a_backlog_to_a_captured_endpoint<S, E>(
     );
 }
 
-/// Checks that a page's records and head agree during a rival append:
-/// an open-ended range under a page limit reads either the seed's tail
-/// at the seed's head or the rival's tail at the rival's head, never a
-/// mix of the two views.
+/// Checks that a page's records and head agree during a rival append.
+/// The barrier coordinates task starts, not an interleaving: a split-view
+/// regression fails when the rival commits between internal read steps.
 pub async fn a_page_read_during_a_rival_append_stays_one_view<S, E>(
     store: S,
     rival: S,
@@ -836,15 +819,10 @@ pub async fn a_page_read_during_a_rival_append_stays_one_view<S, E>(
     }
 }
 
-/// Checks that a strict event type pages without decoding what its
-/// bounds and its count exclude: the rows a page never selects cannot
-/// fail the read, while a selected undecodable row still fails it. A
-/// zero limit observes the head without decoding anything, and every
-/// page still reports the observed head. The strict reader's event
-/// type must fail to decode the loose writer's payload - that
-/// relationship is the wiring's to provide. Only the SQL backends
-/// wire this case: the in-memory backend stores typed events and has
-/// no decode step, so an undecodable row cannot exist there.
+/// Checks that bounds and count exclude undecodable rows, while a
+/// selected one still fails. The wiring makes the loose writer's payload
+/// invalid for the strict reader. Only SQL backends have a decode step;
+/// typed in-memory storage cannot represent this fixture.
 pub async fn a_page_selects_before_decoding<S, L, E, F>(
     strict: S,
     loose: L,
@@ -886,7 +864,6 @@ pub async fn a_page_selects_before_decoding<S, L, E, F>(
         .await
         .expect("sequence 3 lands");
 
-    // The upper bound excludes the undecodable middle row.
     let page = strict
         .load_stream_page(&id, seq(1)..=seq(1), 5)
         .await
@@ -898,7 +875,6 @@ pub async fn a_page_selects_before_decoding<S, L, E, F>(
     );
     assert_eq!(page.at(), head_at(3), "the head is observed");
 
-    // The lower bound excludes it too.
     let page = strict
         .load_stream_page(&id, seq(3)..=seq(3), 5)
         .await
@@ -909,7 +885,6 @@ pub async fn a_page_selects_before_decoding<S, L, E, F>(
         "the page holds the row the bound admits"
     );
 
-    // The count limit excludes it: only the first row is selected.
     let page = strict
         .load_stream_page(&id, seq(1)..=seq(3), 1)
         .await
@@ -920,7 +895,6 @@ pub async fn a_page_selects_before_decoding<S, L, E, F>(
         "the page holds the first row the limit admits"
     );
 
-    // A selected undecodable row still fails the read.
     let outcome = strict
         .load_stream_page(&id, seq(2)..=seq(2), 5)
         .await
@@ -930,7 +904,6 @@ pub async fn a_page_selects_before_decoding<S, L, E, F>(
         "the failure is the decode failure, got {outcome:?}"
     );
 
-    // A zero limit observes the head without decoding anything.
     let page = strict
         .load_stream_page(&id, seq(1)..=seq(3), 0)
         .await
@@ -956,13 +929,10 @@ fn head_at(position: u64) -> StreamVersion {
     StreamVersion::Exact(StreamSequence::new(position).expect("a head is a 1-based position"))
 }
 
-/// A page bound: 1-based, so zero cannot be written through it.
 fn seq(position: u64) -> StreamSequence {
     StreamSequence::new(position).expect("a page bound is a 1-based position")
 }
 
-/// One expected page in the bounds case: the requested range, the page
-/// limit, and the records the page must return.
 type ExpectedPage<'a, E> = (
     std::ops::RangeInclusive<StreamSequence>,
     usize,

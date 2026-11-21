@@ -1007,6 +1007,71 @@ async fn sqlite_a_page_selects_before_decoding() {
     .await;
 }
 
+/// Clamped SQL binds cannot distinguish `i64::MAX` from one past it.
+/// A raw fixture places a valid appended event on that boundary, so
+/// the backend's unsigned recheck must exclude the second page.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_discriminates_the_i64_max_boundary() {
+    let file = temp_database();
+    let path = file.path().to_str().expect("utf8 path").to_owned();
+    let store = SqliteEventStreams::<String, SomethingHappened>::open(&path, "storable-bound")
+        .await
+        .expect("open");
+    store.migrate().await.expect("schema migrates");
+    let key = unique_key("boundary");
+    store
+        .append(ExpectedVersion::NoStream, &key, &one_event())
+        .await
+        .expect("append succeeds");
+
+    let moved_key = key.clone();
+    let connection = Connection::open(&path).await.expect("a raw connection");
+    connection
+        .call(move |conn| {
+            conn.execute(
+                "UPDATE stream_events SET sequence = ?1 \
+                 WHERE category = 'storable-bound' AND stream_key = ?2",
+                rusqlite::params![i64::MAX, moved_key],
+            )
+        })
+        .await
+        .expect("the raw update succeeds");
+
+    let last_storable = StreamSequence::new(i64::MAX as u64).expect("i64::MAX is a position");
+    let first_unstorable =
+        StreamSequence::new(i64::MAX as u64 + 1).expect("one past i64::MAX is a position");
+    let every_position = StreamSequence::new(u64::MAX).expect("u64::MAX is a position");
+
+    let reaching = store
+        .load_stream_page(&key, last_storable..=every_position, 10)
+        .await
+        .expect("page load succeeds");
+    assert_eq!(
+        reaching.at(),
+        StreamVersion::Exact(last_storable),
+        "the head sits on the last storable position"
+    );
+    assert_eq!(
+        reaching.records(),
+        one_event().records(),
+        "the page whose bounds reach the last storable position returns the event there"
+    );
+
+    let past = store
+        .load_stream_page(&key, first_unstorable..=every_position, 10)
+        .await
+        .expect("page load succeeds");
+    assert_eq!(
+        past.at(),
+        StreamVersion::Exact(last_storable),
+        "an empty page still observes the head"
+    );
+    assert!(
+        past.records().is_empty(),
+        "a page starting past every storable position returns nothing"
+    );
+}
+
 /// A stored key the typed id cannot parse back is an invalid key, not
 /// a backend fault (ADR 0004's two-way contract).
 #[tokio::test(flavor = "multi_thread")]

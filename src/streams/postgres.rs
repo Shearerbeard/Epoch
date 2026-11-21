@@ -750,6 +750,70 @@ mod tests {
         .await;
     }
 
+    /// Clamped SQL binds cannot distinguish `i64::MAX` from one past
+    /// it. A raw fixture places a valid appended event on that boundary,
+    /// so the backend's unsigned recheck must exclude the second page.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_page_discriminates_the_i64_max_boundary() {
+        under_deadline(async {
+            let category = format!("spec-page-boundary-{}", rusty_ulid::generate_ulid_string());
+            let store = store::<SomethingHappened>(&category).await;
+            let key = format!("stream-{}", rusty_ulid::generate_ulid_string());
+            let batch = EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty");
+            store
+                .append(ExpectedVersion::NoStream, &key, &batch)
+                .await
+                .expect("seed append succeeds");
+
+            let conn = store.pool.get().await.expect("fixture connection");
+            let pinned_rows = conn
+                .execute(
+                    "UPDATE stream_events SET sequence = $1 \
+                     WHERE category = $2 AND stream_key = $3",
+                    &[&i64::MAX, &category, &key],
+                )
+                .await
+                .expect("pin the seeded row's sequence to the ceiling");
+            assert_eq!(pinned_rows, 1, "the one seeded row is the pinned row");
+
+            let ceiling = StreamSequence::new(i64::MAX as u64)
+                .expect("the storable ceiling is a 1-based position");
+            let one_past = StreamSequence::new(i64::MAX as u64 + 1)
+                .expect("one past the ceiling is still a 1-based position");
+            let upper = StreamSequence::new(u64::MAX).expect("u64::MAX is a 1-based position");
+
+            let from_ceiling = store
+                .load_stream_page(&key, ceiling..=upper, 1)
+                .await
+                .expect("page load succeeds");
+            assert_eq!(
+                from_ceiling.records(),
+                batch.records(),
+                "a page starting at the ceiling delivers the pinned event"
+            );
+            assert_eq!(
+                from_ceiling.at(),
+                StreamVersion::Exact(ceiling),
+                "a page starting at the ceiling observes the ceiling as the head"
+            );
+
+            let from_one_past = store
+                .load_stream_page(&key, one_past..=upper, 1)
+                .await
+                .expect("page load succeeds");
+            assert!(
+                from_one_past.records().is_empty(),
+                "a page starting past the ceiling reads nothing"
+            );
+            assert_eq!(
+                from_one_past.at(),
+                StreamVersion::Exact(ceiling),
+                "an empty page still observes the ceiling as the head"
+            );
+        })
+        .await;
+    }
+
     /// A strict event type pages without decoding what its bounds and
     /// its count exclude, through the shared case over two typed views
     /// of one category: the strict reader and the loose writer.
