@@ -4,9 +4,10 @@ Epoch is a Rust event-sourcing library built around deciders and event
 repositories. The crates.io package is `epoch-journal`; its Rust import
 is `epoch`.
 
-This `0.2.0-alpha.1` preview adds versioned event streams, atomic
-batches, a feed, a saga runner, and an outbox executor. The API may
-change before the stable 0.2.0 release. The published 0.1.x line
+This `0.2.0-beta.1` beta adds versioned event streams, atomic
+batches, a feed, a saga runner, an outbox executor, and a SQLite
+backend to the earlier repository surface. The API may still change
+before the stable 0.2.0 release. The published 0.1.x line
 does not include these stream and saga APIs.
 
 ## Start here
@@ -15,7 +16,7 @@ Select the prerelease explicitly:
 
 ```toml
 [dependencies]
-epoch = { package = "epoch-journal", version = "=0.2.0-alpha.1", default-features = false }
+epoch = { package = "epoch-journal", version = "=0.2.0-beta.1", default-features = false }
 ```
 
 The `Decider` and `Evolver` traits need no database or async runtime.
@@ -107,7 +108,7 @@ private database) and migrated with `SqliteEventRepository::migrate`.
 For an in-memory preview without external services:
 
 ```toml
-epoch = { package = "epoch-journal", version = "=0.2.0-alpha.1", default-features = false, features = ["in_memory"] }
+epoch = { package = "epoch-journal", version = "=0.2.0-beta.1", default-features = false, features = ["in_memory"] }
 ```
 
 For the PostgreSQL stream backend, select `postgres` instead. Call
@@ -118,7 +119,7 @@ using the store; opening a store does not create the schema. A
 root owns and hand out stores and feeds from it (`category`, `feed`)
 after `migrate`. The
 package requires Rust 1.88 or later.
-The [architecture decisions](https://github.com/Shearerbeard/Epoch/tree/v0.2.0-alpha.1/docs/adr)
+The [architecture decisions](https://github.com/Shearerbeard/Epoch/tree/v0.2.0-beta.1/docs/adr)
 explain the batch, cursor, and outbox contracts.
 
 ## Build and test from a clone

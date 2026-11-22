@@ -1,6 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0-beta.1] - 2026-11-21
+
+Beta release for the SQLite journal experiment. The beta API can
+still change before the stable 0.2.0 release.
 
 ### Added
 
@@ -40,6 +43,26 @@
   1-based in storage. Existing databases keep the previous table until
   recreated; the previous shape allowed two distinct repositories
   (`a-b`/`c` and `a`/`b-c`) to collide on one stream.
+
+### Fixed
+
+- The outbox executor honors a stored `Done` record before retrying an
+  effect or applying the restart failure budget, so a restart after the
+  effect succeeded but before acknowledgement replays without
+  re-performing the effect or firing the hook again.
+
+### Known limits
+
+- A caller must run `SqliteEventStreams::migrate` before using the
+  SQLite stream store, and `PgEventStreams::migrate` for PostgreSQL.
+  The PostgreSQL writer assumes no pre-funnel writers during a
+  mixed-version deployment.
+- This beta carries no new power-loss or process-death certification,
+  and no broad cancellation proof. A feed may redeliver after a crash;
+  effect ports and compensation hooks must dedupe by intent key.
+- The EventStoreDB and RedisJSON backends remain on the earlier
+  repository API. Neither implements the new batch, feed, or
+  page-read interfaces.
 
 ## [0.2.0-alpha.1] - 2026-10-03
 
@@ -100,7 +123,8 @@ version. It was not a crates.io release of `epoch-journal`. That
 code line introduced deciders, repository abstractions, and
 optimistic concurrency. Git history holds its detailed changes.
 
-[Unreleased]: https://github.com/Shearerbeard/Epoch/compare/v0.2.0-alpha.1...HEAD
+[Unreleased]: https://github.com/Shearerbeard/Epoch/compare/v0.2.0-beta.1...HEAD
+[0.2.0-beta.1]: https://github.com/Shearerbeard/Epoch/compare/v0.2.0-alpha.1...v0.2.0-beta.1
 [0.2.0-alpha.1]: https://github.com/Shearerbeard/Epoch/compare/v0.1.1...v0.2.0-alpha.1
 [0.1.1]: https://github.com/Shearerbeard/Epoch/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Shearerbeard/Epoch/releases/tag/v0.1.0
