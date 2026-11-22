@@ -356,6 +356,71 @@ where
         )
     }
 
+    async fn load_stream_page(
+        &self,
+        id: &Self::Id,
+        range: std::ops::RangeInclusive<StreamSequence>,
+        limit: usize,
+    ) -> Result<StreamSlice<E>, Self::Error> {
+        let key = id.stream_key();
+        // The decisive comparison is in `u64` on the range's lower
+        // bound: a lower bound past every storable position binds as
+        // `i64::MAX` and still selects nothing, while an upper bound
+        // past them includes every storable position, so only the
+        // lower bound needs the recheck.
+        let start = range.start().get();
+        let end = range.end().get();
+        let lower_bound = i64::try_from(start).unwrap_or(i64::MAX);
+        let upper_bound = i64::try_from(end).unwrap_or(i64::MAX);
+        // A count too large to bind clamps rather than wrapping
+        // negative.
+        let page_bound = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        // One statement, so the head and the page derive from one
+        // snapshot: a rival append committing mid-read cannot produce
+        // a page whose records disagree with its observation. The page
+        // is a bounded subquery, so every empty page still reports the
+        // head, and only the selected rows cross the wire for decoding.
+        let conn = self.pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT s.head, p.sequence, p.event_data, p.event_metadata \
+                   FROM (SELECT COALESCE(MAX(sequence), 0) AS head \
+                           FROM stream_events \
+                          WHERE category = $1 AND stream_key = $2) s \
+                   LEFT JOIN (SELECT sequence, event_data, event_metadata \
+                                FROM stream_events \
+                               WHERE category = $1 AND stream_key = $2 \
+                                 AND sequence BETWEEN $3 AND $4 \
+                               ORDER BY sequence ASC \
+                               LIMIT $5) p ON TRUE \
+                 ORDER BY p.sequence ASC",
+                &[
+                    &self.category,
+                    &key,
+                    &lower_bound,
+                    &upper_bound,
+                    &page_bound,
+                ],
+            )
+            .await?;
+
+        let head: i64 = rows
+            .first()
+            .expect("the outer join always reports the head")
+            .get("head");
+        let in_range = rows.iter().filter(|row| {
+            row.get::<_, Option<i64>>("sequence")
+                .is_some_and(|sequence| stored_position(sequence) >= start)
+        });
+
+        // Rows only exist for a stream whose observation is `Exact`.
+        Ok(
+            StreamSlice::new(decode_records(in_range)?, version_of(stored_position(head)))
+                .expect("in-range rows imply an Exact observation"),
+        )
+    }
+
     async fn load_category(
         &self,
     ) -> Result<
@@ -453,6 +518,9 @@ mod tests {
     use super::*;
     use crate::streams::spec::{
         a_category_read_round_trips_ids_in_append_order,
+        a_consumer_pages_a_backlog_to_a_captured_endpoint,
+        a_page_read_during_a_rival_append_stays_one_view,
+        a_page_reads_exactly_the_requested_bounds,
         a_slice_read_during_a_rival_append_stays_one_view,
         a_slice_reads_from_the_cursor_to_the_head, flash_sale_sells_exactly_the_stock,
         single_event_occ_race_on_empty_stream, single_event_occ_race_on_seeded_stream,
@@ -643,6 +711,142 @@ mod tests {
             store,
             str::to_owned,
             Counted,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_page_reads_exactly_the_requested_bounds() {
+        let store = store("spec-page-bounds").await;
+        under_deadline(a_page_reads_exactly_the_requested_bounds(
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_consumer_pages_a_backlog_to_a_captured_endpoint() {
+        let store = store("spec-page-consumer").await;
+        under_deadline(a_consumer_pages_a_backlog_to_a_captured_endpoint(
+            store.clone(),
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_page_read_during_a_rival_append_stays_one_view() {
+        let store = store("spec-page-race").await;
+        under_deadline(a_page_read_during_a_rival_append_stays_one_view(
+            store.clone(),
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    /// Clamped SQL binds cannot distinguish `i64::MAX` from one past
+    /// it. A raw fixture places a valid appended event on that boundary,
+    /// so the backend's unsigned recheck must exclude the second page.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_page_discriminates_the_i64_max_boundary() {
+        under_deadline(async {
+            let category = format!("spec-page-boundary-{}", rusty_ulid::generate_ulid_string());
+            let store = store::<SomethingHappened>(&category).await;
+            let key = format!("stream-{}", rusty_ulid::generate_ulid_string());
+            let batch = EventBatch::new(vec![SomethingHappened]).expect("one event is nonempty");
+            store
+                .append(ExpectedVersion::NoStream, &key, &batch)
+                .await
+                .expect("seed append succeeds");
+
+            let conn = store.pool.get().await.expect("fixture connection");
+            let pinned_rows = conn
+                .execute(
+                    "UPDATE stream_events SET sequence = $1 \
+                     WHERE category = $2 AND stream_key = $3",
+                    &[&i64::MAX, &category, &key],
+                )
+                .await
+                .expect("pin the seeded row's sequence to the ceiling");
+            assert_eq!(pinned_rows, 1, "the one seeded row is the pinned row");
+
+            let ceiling = StreamSequence::new(i64::MAX as u64)
+                .expect("the storable ceiling is a 1-based position");
+            let one_past = StreamSequence::new(i64::MAX as u64 + 1)
+                .expect("one past the ceiling is still a 1-based position");
+            let upper = StreamSequence::new(u64::MAX).expect("u64::MAX is a 1-based position");
+
+            let from_ceiling = store
+                .load_stream_page(&key, ceiling..=upper, 1)
+                .await
+                .expect("page load succeeds");
+            assert_eq!(
+                from_ceiling.records(),
+                batch.records(),
+                "a page starting at the ceiling delivers the pinned event"
+            );
+            assert_eq!(
+                from_ceiling.at(),
+                StreamVersion::Exact(ceiling),
+                "a page starting at the ceiling observes the ceiling as the head"
+            );
+
+            let from_one_past = store
+                .load_stream_page(&key, one_past..=upper, 1)
+                .await
+                .expect("page load succeeds");
+            assert!(
+                from_one_past.records().is_empty(),
+                "a page starting past the ceiling reads nothing"
+            );
+            assert_eq!(
+                from_one_past.at(),
+                StreamVersion::Exact(ceiling),
+                "an empty page still observes the ceiling as the head"
+            );
+        })
+        .await;
+    }
+
+    /// A strict event type pages without decoding what its bounds and
+    /// its count exclude, through the shared case over two typed views
+    /// of one category: the strict reader and the loose writer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_a_page_selects_before_decoding() {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+        struct NeedsAnObject {
+            name: String,
+        }
+
+        impl Event for NeedsAnObject {
+            type EntityId = ();
+
+            fn event_type(&self) -> String {
+                "NeedsAnObject".to_owned()
+            }
+
+            fn get_id(&self) -> Self::EntityId {}
+        }
+
+        let category = format!("spec-page-decode-{}", rusty_ulid::generate_ulid_string());
+        let strict = store::<NeedsAnObject>(&category).await;
+        let loose = store::<SomethingHappened>(&category).await;
+
+        under_deadline(crate::streams::spec::a_page_selects_before_decoding(
+            strict,
+            loose,
+            str::to_owned,
+            |name| NeedsAnObject {
+                name: name.to_owned(),
+            },
+            || SomethingHappened,
+            |error| matches!(error, PgStreamsError::Serialization(_)),
         ))
         .await;
     }

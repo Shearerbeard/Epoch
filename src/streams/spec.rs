@@ -526,6 +526,392 @@ pub async fn a_slice_read_during_a_rival_append_stays_one_view<S, E>(
     }
 }
 
+/// Checks range/count truncation, empty pages, unsigned bounds, and
+/// metadata preservation. The small-head case cannot exercise a clamped
+/// lower bind against a stored `i64::MAX` row; SQL fixtures cover that
+/// collision separately.
+pub async fn a_page_reads_exactly_the_requested_bounds<S, E>(
+    store: S,
+    make_id: impl Fn(&str) -> S::Id,
+    make_event: impl Fn(u32) -> E,
+) where
+    S: EventStreams<E>,
+    E: Event + PartialEq + Send + Sync + Debug,
+{
+    let id = make_id(&unique_stream_id("page-bounds", 0));
+    let batch = EventBatch::from_records(
+        (1..=5)
+            .map(|slot| {
+                let mut envelope = EventMetadata::new();
+                envelope.insert("slot", slot.to_string());
+                RecordedEvent::keyed(make_event(slot), envelope)
+            })
+            .collect(),
+    )
+    .expect("five records are nonempty");
+    store
+        .append(ExpectedVersion::NoStream, &id, &batch)
+        .await
+        .expect("seed append succeeds");
+
+    let whole = batch.records();
+    let reads: [ExpectedPage<'_, E>; 10] = [
+        (seq(1)..=seq(5), 5, whole),
+        (seq(1)..=seq(5), 3, &whole[..3]),
+        (seq(1)..=seq(3), 5, &whole[..3]),
+        (seq(2)..=seq(2), 5, &whole[1..2]),
+        (seq(1)..=seq(5), 0, &[]),
+        (seq(4)..=seq(2), 5, &[]),
+        (seq(6)..=seq(9), 5, &[]),
+        (seq(1)..=seq(u64::MAX), usize::MAX, whole),
+        (seq(1)..=seq(u64::MAX), 2, &whole[..2]),
+        (seq(i64::MAX as u64 + 1)..=seq(u64::MAX), 5, &[]),
+    ];
+    for (index, (range, limit, expected)) in reads.into_iter().enumerate() {
+        let page = store
+            .load_stream_page(&id, range, limit)
+            .await
+            .expect("page load succeeds");
+        assert_eq!(
+            (page.at(), page.records()),
+            (head_at(5), expected),
+            "page {index} holds exactly its bounds' events, observed at the head"
+        );
+    }
+
+    let missing = make_id(&unique_stream_id("page-missing", 0));
+    let page = store
+        .load_stream_page(&missing, seq(1)..=seq(5), 5)
+        .await
+        .expect("page load succeeds");
+    assert!(
+        page.records().is_empty(),
+        "a page over a missing stream carries nothing"
+    );
+    assert_eq!(
+        page.at(),
+        StreamVersion::NoStream,
+        "a missing stream is observed as NoStream"
+    );
+}
+
+/// Checks consumer-shaped paging: a lagging projection pages a dense
+/// backlog, carrying its requested upper bound on the first page and
+/// the endpoint captured from that page's observation on every later
+/// one. A rival append landing inside the originally requested range
+/// but beyond the captured endpoint does not extend the replay: the
+/// later pages observe the moved head yet return no event past the
+/// endpoint. The dense-stream assumption is exercised as written - the
+/// next page starts at the prior page's requested start plus its
+/// returned count, never at the observed head.
+pub async fn a_consumer_pages_a_backlog_to_a_captured_endpoint<S, E>(
+    store: S,
+    rival: S,
+    make_id: impl Fn(&str) -> S::Id,
+    make_event: impl Fn(u32) -> E,
+) where
+    S: EventStreams<E>,
+    E: Event + PartialEq + Send + Sync + Debug,
+{
+    const REQUESTED_UPPER: u64 = 10;
+    const PAGE_SIZE: usize = 3;
+    const BACKLOG: u64 = 7;
+
+    let id = make_id(&unique_stream_id("page-consumer", 0));
+    let batch = EventBatch::from_records(
+        (1..=BACKLOG)
+            .map(|slot| {
+                let mut envelope = EventMetadata::new();
+                envelope.insert("slot", slot.to_string());
+                RecordedEvent::keyed(
+                    make_event(u32::try_from(slot).expect("a slot fits the event payload")),
+                    envelope,
+                )
+            })
+            .collect(),
+    )
+    .expect("the backlog is nonempty");
+    store
+        .append(ExpectedVersion::NoStream, &id, &batch)
+        .await
+        .expect("seed append succeeds");
+    let backlog = batch.records();
+
+    // The first page carries the requested upper bound, and its
+    // observation fixes the replay endpoint.
+    let first = store
+        .load_stream_page(&id, seq(1)..=seq(REQUESTED_UPPER), PAGE_SIZE)
+        .await
+        .expect("page load succeeds");
+    let endpoint = match first.at() {
+        // Cap the observed head at the requested upper bound.
+        StreamVersion::Exact(head) => head.get().min(REQUESTED_UPPER),
+        StreamVersion::NoStream => panic!("the seeded stream must be present"),
+    };
+    assert_eq!(
+        endpoint, BACKLOG,
+        "the first page's observation fixes the endpoint at the backlog's head"
+    );
+    assert_eq!(
+        first.records(),
+        &backlog[..PAGE_SIZE],
+        "the first page holds exactly the opening page, envelopes included"
+    );
+    let first_count = first.records().len();
+    let mut replayed = first_count;
+    let mut next_start = 1 + first_count as u64;
+
+    // The rival lands inside the originally requested range, beyond the
+    // captured endpoint, before the consumer's later pages run.
+    let mut beyond_envelope = EventMetadata::new();
+    beyond_envelope.insert("slot", (BACKLOG + 1).to_string());
+    let beyond_batch = EventBatch::from_records(vec![RecordedEvent::keyed(
+        make_event(u32::try_from(BACKLOG + 1).expect("a slot fits the event payload")),
+        beyond_envelope,
+    )])
+    .expect("one record is nonempty");
+    let beyond = rival
+        .append(ExpectedVersion::Exact(seq(BACKLOG)), &id, &beyond_batch)
+        .await
+        .expect("the rival's append succeeds");
+    assert_eq!(
+        beyond.get(),
+        BACKLOG + 1,
+        "the rival lands beyond the captured endpoint"
+    );
+
+    // Later pages carry the captured endpoint, so the head's move
+    // cannot ride a page into the replay.
+    loop {
+        let page = store
+            .load_stream_page(&id, seq(next_start)..=seq(endpoint), PAGE_SIZE)
+            .await
+            .expect("page load succeeds");
+        assert_eq!(
+            page.at(),
+            head_at(BACKLOG + 1),
+            "every later page observes the moved head"
+        );
+        let count = page.records().len();
+        if count == 0 {
+            // An empty page ends catch-up.
+            break;
+        }
+        assert_eq!(
+            page.records(),
+            &backlog[replayed..replayed + count],
+            "each later page holds the backlog's next stretch, never the rival's event"
+        );
+        replayed += count;
+        // Check completion on the dense page's own last position,
+        // before advancing, so an endpoint at u64::MAX cannot overflow.
+        let through = next_start
+            .checked_add(count as u64 - 1)
+            .expect("a page bounded by the endpoint cannot overflow past it");
+        if through >= endpoint {
+            break;
+        }
+        next_start = through + 1;
+    }
+
+    assert_eq!(
+        replayed,
+        backlog.len(),
+        "the pages replayed the backlog exactly once, in order, with envelopes"
+    );
+
+    // The rival's event is stored and reachable by its own page: the
+    // captured endpoint excluded it, not a missing append.
+    let tail = store
+        .load_stream_page(&id, seq(BACKLOG + 1)..=seq(BACKLOG + 1), PAGE_SIZE)
+        .await
+        .expect("page load succeeds");
+    assert_eq!(
+        tail.records(),
+        beyond_batch.records(),
+        "the rival's event pages on its own, beyond the endpoint"
+    );
+}
+
+/// Checks that a page's records and head agree during a rival append.
+/// The barrier coordinates task starts, not an interleaving: a split-view
+/// regression fails when the rival commits between internal read steps.
+pub async fn a_page_read_during_a_rival_append_stays_one_view<S, E>(
+    store: S,
+    rival: S,
+    make_id: impl Fn(&str) -> S::Id,
+    make_event: impl Fn(u32) -> E + Clone + Send + Sync + 'static,
+) where
+    S: EventStreams<E> + Clone + Send + Sync + 'static,
+    S::Id: Clone + Send + Sync + 'static,
+    E: Event + PartialEq + Send + Sync + Debug + 'static,
+{
+    for iteration in 0..RACE_ITERATIONS {
+        let id = make_id(&unique_stream_id("page-race", iteration));
+        let seeded = store
+            .append(
+                ExpectedVersion::NoStream,
+                &id,
+                &EventBatch::new(vec![make_event(1), make_event(2)])
+                    .expect("two events are nonempty"),
+            )
+            .await
+            .expect("seed append succeeds");
+        assert_eq!(seeded.get(), 2, "the seed lands at sequence 2");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let reader = {
+            let store = store.clone();
+            let id = id.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store.load_stream_page(&id, seq(2)..=seq(u64::MAX), 5).await
+            })
+        };
+        let writer = {
+            let rival = rival.clone();
+            let id = id.clone();
+            let barrier = Arc::clone(&barrier);
+            let make_event = make_event.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                rival
+                    .append(
+                        ExpectedVersion::Exact(seq(2)),
+                        &id,
+                        &one_event_batch(make_event(3)),
+                    )
+                    .await
+            })
+        };
+
+        let page = reader
+            .await
+            .expect("reader task must not panic")
+            .expect("page load succeeds");
+        let appended = writer
+            .await
+            .expect("writer task must not panic")
+            .expect("the rival's append succeeds");
+        assert_eq!(appended.get(), 3, "the rival lands at sequence 3");
+
+        let seed_tail = vec![RecordedEvent::new(make_event(2))];
+        let raced_tail = vec![
+            RecordedEvent::new(make_event(2)),
+            RecordedEvent::new(make_event(3)),
+        ];
+        match (page.at(), page.records()) {
+            (at, records) if records == seed_tail.as_slice() => {
+                assert_eq!(at, head_at(2), "the seed tail is observed at the seed head");
+            }
+            (at, records) if records == raced_tail.as_slice() => {
+                assert_eq!(
+                    at,
+                    head_at(3),
+                    "the rival's tail is observed at the rival's head"
+                );
+            }
+            (at, records) => {
+                panic!("the page's head and records disagree: {at:?} over {records:?}")
+            }
+        }
+    }
+}
+
+/// Checks that bounds and count exclude undecodable rows, while a
+/// selected one still fails. The wiring makes the loose writer's payload
+/// invalid for the strict reader. Only SQL backends have a decode step;
+/// typed in-memory storage cannot represent this fixture.
+pub async fn a_page_selects_before_decoding<S, L, E, F>(
+    strict: S,
+    loose: L,
+    make_id: impl Fn(&str) -> S::Id,
+    make_object: impl Fn(&str) -> E,
+    make_unit: impl Fn() -> F,
+    is_decode_failure: impl Fn(&S::Error) -> bool,
+) where
+    S: EventStreams<E>,
+    L: EventStreams<F, Id = S::Id>,
+    E: Event + PartialEq + Send + Sync + Debug,
+    F: Event + Send + Sync + Debug,
+{
+    let id = make_id(&unique_stream_id("page-decode", 0));
+    // A three-event stream whose middle row cannot decode as the
+    // strict reader's event type.
+    strict
+        .append(
+            ExpectedVersion::NoStream,
+            &id,
+            &one_event_batch(make_object("one")),
+        )
+        .await
+        .expect("sequence 1 lands");
+    loose
+        .append(
+            ExpectedVersion::Exact(seq(1)),
+            &id,
+            &one_event_batch(make_unit()),
+        )
+        .await
+        .expect("sequence 2 lands");
+    strict
+        .append(
+            ExpectedVersion::Exact(seq(2)),
+            &id,
+            &one_event_batch(make_object("three")),
+        )
+        .await
+        .expect("sequence 3 lands");
+
+    let page = strict
+        .load_stream_page(&id, seq(1)..=seq(1), 5)
+        .await
+        .expect("the upper bound excludes the undecodable row");
+    assert_eq!(
+        page.records(),
+        vec![RecordedEvent::new(make_object("one"))],
+        "the page holds the row the bound admits"
+    );
+    assert_eq!(page.at(), head_at(3), "the head is observed");
+
+    let page = strict
+        .load_stream_page(&id, seq(3)..=seq(3), 5)
+        .await
+        .expect("the lower bound excludes the undecodable row");
+    assert_eq!(
+        page.records(),
+        vec![RecordedEvent::new(make_object("three"))],
+        "the page holds the row the bound admits"
+    );
+
+    let page = strict
+        .load_stream_page(&id, seq(1)..=seq(3), 1)
+        .await
+        .expect("the count limit excludes the undecodable row");
+    assert_eq!(
+        page.records(),
+        vec![RecordedEvent::new(make_object("one"))],
+        "the page holds the first row the limit admits"
+    );
+
+    let outcome = strict
+        .load_stream_page(&id, seq(2)..=seq(2), 5)
+        .await
+        .expect_err("a selected undecodable row fails the read");
+    assert!(
+        is_decode_failure(&outcome),
+        "the failure is the decode failure, got {outcome:?}"
+    );
+
+    let page = strict
+        .load_stream_page(&id, seq(1)..=seq(3), 0)
+        .await
+        .expect("a zero limit decodes nothing");
+    assert!(page.records().is_empty(), "no row was selected to decode");
+    assert_eq!(page.at(), head_at(3), "the head is still observed");
+}
+
 fn unique_stream_id(configuration: &str, iteration: usize) -> String {
     format!(
         "spec-{configuration}-{}-{iteration}",
@@ -542,6 +928,16 @@ fn one_event_batch<E>(event: E) -> EventBatch<E> {
 fn head_at(position: u64) -> StreamVersion {
     StreamVersion::Exact(StreamSequence::new(position).expect("a head is a 1-based position"))
 }
+
+fn seq(position: u64) -> StreamSequence {
+    StreamSequence::new(position).expect("a page bound is a 1-based position")
+}
+
+type ExpectedPage<'a, E> = (
+    std::ops::RangeInclusive<StreamSequence>,
+    usize,
+    &'a [RecordedEvent<E>],
+);
 
 /// Load a stream that must be present and report its observed position.
 async fn observed_sequence<S, E>(store: &S, id: &S::Id) -> StreamSequence
@@ -686,6 +1082,41 @@ mod tests {
     async fn in_memory_a_slice_read_during_a_rival_append_stays_one_view() {
         let store = InMemoryEventStreams::<Counted>::new();
         under_deadline(a_slice_read_during_a_rival_append_stays_one_view(
+            store.clone(),
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn in_memory_a_page_reads_exactly_the_requested_bounds() {
+        let store = InMemoryEventStreams::<Counted>::new();
+        under_deadline(a_page_reads_exactly_the_requested_bounds(
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn in_memory_a_consumer_pages_a_backlog_to_a_captured_endpoint() {
+        let store = InMemoryEventStreams::<Counted>::new();
+        under_deadline(a_consumer_pages_a_backlog_to_a_captured_endpoint(
+            store.clone(),
+            store,
+            str::to_owned,
+            Counted,
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn in_memory_a_page_read_during_a_rival_append_stays_one_view() {
+        let store = InMemoryEventStreams::<Counted>::new();
+        under_deadline(a_page_read_during_a_rival_append_stays_one_view(
             store.clone(),
             store,
             str::to_owned,

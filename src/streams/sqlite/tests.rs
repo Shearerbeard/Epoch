@@ -19,10 +19,12 @@ use crate::streams::feed::{
     AckError, ConsumerGroup, DeliveredWatermark, EventFeed, FeedPosition, PollLimit,
 };
 use crate::streams::spec::{
-    a_category_read_round_trips_ids_in_append_order, a_keyed_append_loads_back_with_its_envelope,
-    a_slice_read_during_a_rival_append_stays_one_view, a_slice_reads_from_the_cursor_to_the_head,
-    flash_sale_sells_exactly_the_stock, single_event_occ_race_on_empty_stream,
-    single_event_occ_race_on_seeded_stream, under_deadline,
+    a_category_read_round_trips_ids_in_append_order,
+    a_consumer_pages_a_backlog_to_a_captured_endpoint, a_keyed_append_loads_back_with_its_envelope,
+    a_page_read_during_a_rival_append_stays_one_view, a_page_reads_exactly_the_requested_bounds,
+    a_page_selects_before_decoding, a_slice_read_during_a_rival_append_stays_one_view,
+    a_slice_reads_from_the_cursor_to_the_head, flash_sale_sells_exactly_the_stock,
+    single_event_occ_race_on_empty_stream, single_event_occ_race_on_seeded_stream, under_deadline,
 };
 use crate::streams::{
     AppendError, AtomicStreams, EventBatch, EventMetadata, EventStreams, ExpectedVersion,
@@ -305,6 +307,41 @@ async fn sqlite_a_slice_read_during_a_rival_append_stays_one_view() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sqlite_a_page_reads_exactly_the_requested_bounds() {
+    let store = counted_store().await;
+    under_deadline(a_page_reads_exactly_the_requested_bounds(
+        store,
+        str::to_owned,
+        Counted,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_a_consumer_pages_a_backlog_to_a_captured_endpoint() {
+    let store = counted_store().await;
+    under_deadline(a_consumer_pages_a_backlog_to_a_captured_endpoint(
+        store.clone(),
+        store,
+        str::to_owned,
+        Counted,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_a_page_read_during_a_rival_append_stays_one_view() {
+    let store = counted_store().await;
+    under_deadline(a_page_read_during_a_rival_append_stays_one_view(
+        store.clone(),
+        store,
+        str::to_owned,
+        Counted,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sqlite_poll_redelivers_until_acked() {
     let (writer, feed) = writer_and_feed().await;
     poll_redelivers_until_acked(writer, feed, str::to_owned, || SomethingHappened).await;
@@ -334,7 +371,7 @@ async fn sqlite_delivery_carries_the_envelope() {
     delivery_carries_the_envelope(writer, feed, str::to_owned, || SomethingHappened).await;
 }
 
-/// The three shared read cases over a file-backed database, run with
+/// The shared read cases over a file-backed database, run with
 /// the reader and the rival as separately opened connections rather
 /// than clones of one actor.
 #[tokio::test(flavor = "multi_thread")]
@@ -344,7 +381,7 @@ async fn file_backed_reads_conform_over_independent_actors() {
         let path = file.path().to_str().expect("utf8 path").to_owned();
 
         // Separately opened actors on one database file and one
-        // category, so the race case runs over two connections rather
+        // category, so the race cases run over two connections rather
         // than one shared actor's queue.
         let shared = format!("read-file-{}", rusty_ulid::generate_ulid_string());
         let store = SqliteEventStreams::<String, Counted>::open(&path, &shared)
@@ -357,10 +394,30 @@ async fn file_backed_reads_conform_over_independent_actors() {
         rival.migrate().await.expect("schema migrates");
 
         a_slice_reads_from_the_cursor_to_the_head(store.clone(), str::to_owned, Counted).await;
-        a_slice_read_during_a_rival_append_stays_one_view(store, rival, str::to_owned, Counted)
-            .await;
+        a_slice_read_during_a_rival_append_stays_one_view(
+            store.clone(),
+            rival.clone(),
+            str::to_owned,
+            Counted,
+        )
+        .await;
+        a_page_reads_exactly_the_requested_bounds(store.clone(), str::to_owned, Counted).await;
+        a_page_read_during_a_rival_append_stays_one_view(
+            store.clone(),
+            rival,
+            str::to_owned,
+            Counted,
+        )
+        .await;
+        a_consumer_pages_a_backlog_to_a_captured_endpoint(
+            store.clone(),
+            store,
+            str::to_owned,
+            Counted,
+        )
+        .await;
 
-        // The category case reads the whole category, and the two cases
+        // The category case reads the whole category, and the cases
         // above have written into the shared one, so it runs over a
         // fresh category on the same file.
         let fresh = format!("read-category-{}", rusty_ulid::generate_ulid_string());
@@ -903,6 +960,115 @@ async fn a_stored_payload_that_does_not_decode_is_a_serialization_error() {
     assert!(
         matches!(outcome, Err(SqliteStreamsError::Serialization(_))),
         "a payload that does not decode is a serialization error, got {outcome:?}"
+    );
+}
+
+/// A strict event type pages without decoding what its bounds and its
+/// count exclude, through the shared case over two typed views of one
+/// category: the strict reader and the loose writer.
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_a_page_selects_before_decoding() {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct NeedsAnObject {
+        name: String,
+    }
+
+    impl Event for NeedsAnObject {
+        type EntityId = ();
+
+        fn event_type(&self) -> String {
+            "NeedsAnObject".to_owned()
+        }
+
+        fn get_id(&self) -> Self::EntityId {}
+    }
+
+    let file = temp_database();
+    let path = file.path().to_str().expect("utf8 path").to_owned();
+    let category = "page-decode";
+    let strict = SqliteEventStreams::<String, NeedsAnObject>::open(&path, category)
+        .await
+        .expect("open the strict reader");
+    strict.migrate().await.expect("schema migrates");
+    let loose = SqliteEventStreams::<String, SomethingHappened>::open(&path, category)
+        .await
+        .expect("open the loose writer");
+
+    under_deadline(a_page_selects_before_decoding(
+        strict,
+        loose,
+        str::to_owned,
+        |name| NeedsAnObject {
+            name: name.to_owned(),
+        },
+        || SomethingHappened,
+        |error| matches!(error, SqliteStreamsError::Serialization(_)),
+    ))
+    .await;
+}
+
+/// Clamped SQL binds cannot distinguish `i64::MAX` from one past it.
+/// A raw fixture places a valid appended event on that boundary, so
+/// the backend's unsigned recheck must exclude the second page.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_discriminates_the_i64_max_boundary() {
+    let file = temp_database();
+    let path = file.path().to_str().expect("utf8 path").to_owned();
+    let store = SqliteEventStreams::<String, SomethingHappened>::open(&path, "storable-bound")
+        .await
+        .expect("open");
+    store.migrate().await.expect("schema migrates");
+    let key = unique_key("boundary");
+    store
+        .append(ExpectedVersion::NoStream, &key, &one_event())
+        .await
+        .expect("append succeeds");
+
+    let moved_key = key.clone();
+    let connection = Connection::open(&path).await.expect("a raw connection");
+    connection
+        .call(move |conn| {
+            conn.execute(
+                "UPDATE stream_events SET sequence = ?1 \
+                 WHERE category = 'storable-bound' AND stream_key = ?2",
+                rusqlite::params![i64::MAX, moved_key],
+            )
+        })
+        .await
+        .expect("the raw update succeeds");
+
+    let last_storable = StreamSequence::new(i64::MAX as u64).expect("i64::MAX is a position");
+    let first_unstorable =
+        StreamSequence::new(i64::MAX as u64 + 1).expect("one past i64::MAX is a position");
+    let every_position = StreamSequence::new(u64::MAX).expect("u64::MAX is a position");
+
+    let reaching = store
+        .load_stream_page(&key, last_storable..=every_position, 10)
+        .await
+        .expect("page load succeeds");
+    assert_eq!(
+        reaching.at(),
+        StreamVersion::Exact(last_storable),
+        "the head sits on the last storable position"
+    );
+    assert_eq!(
+        reaching.records(),
+        one_event().records(),
+        "the page whose bounds reach the last storable position returns the event there"
+    );
+
+    let past = store
+        .load_stream_page(&key, first_unstorable..=every_position, 10)
+        .await
+        .expect("page load succeeds");
+    assert_eq!(
+        past.at(),
+        StreamVersion::Exact(last_storable),
+        "an empty page still observes the head"
+    );
+    assert!(
+        past.records().is_empty(),
+        "a page starting past every storable position returns nothing"
     );
 }
 

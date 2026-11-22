@@ -433,6 +433,25 @@ where
         from: Option<StreamSequence>,
     ) -> Result<StreamSlice<E>, Self::Error>;
 
+    /// Load records inside an inclusive position range, oldest first,
+    /// at most `limit` of them, with the stream's observed head. The
+    /// records and `at()` derive from one snapshot; `at()` is the head
+    /// of the whole stream, not the last returned position or a page
+    /// checkpoint.
+    ///
+    /// A zero limit, a reversed range, a range beyond the head, and a
+    /// missing stream all read an empty page while still observing the
+    /// head. An upper bound above every storable position includes all
+    /// of them; a lower bound above them selects none. SQL backends
+    /// select the page before returning payloads for decoding; this
+    /// does not bound their internal query-plan work.
+    async fn load_stream_page(
+        &self,
+        id: &Self::Id,
+        range: std::ops::RangeInclusive<StreamSequence>,
+        limit: usize,
+    ) -> Result<StreamSlice<E>, Self::Error>;
+
     /// Load every event in this repository's category, oldest first,
     /// each carrying its typed stream id.
     async fn load_category(

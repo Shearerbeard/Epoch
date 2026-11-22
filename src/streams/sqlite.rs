@@ -387,6 +387,88 @@ where
         )
     }
 
+    async fn load_stream_page(
+        &self,
+        id: &Self::Id,
+        range: std::ops::RangeInclusive<StreamSequence>,
+        limit: usize,
+    ) -> Result<StreamSlice<E>, Self::Error> {
+        let key = id.stream_key();
+        let category = self.category.clone();
+        // The decisive comparison is in `u64` on the range's lower
+        // bound; the i64 binds carry the bounds only as far as SQLite
+        // can store them. A lower bound past every storable position
+        // binds as `i64::MAX` and still selects nothing, while an
+        // upper bound past them binds the same way and includes every
+        // storable position, so only the lower bound needs the recheck.
+        let start = range.start().get();
+        let end = range.end().get();
+        let lower_bound = i64::try_from(start).unwrap_or(i64::MAX);
+        let upper_bound = i64::try_from(end).unwrap_or(i64::MAX);
+        // A count too large to bind clamps to the largest storable
+        // bound rather than wrapping negative: `LIMIT` reads a
+        // negative count as unlimited.
+        let page_bound = i64::try_from(limit).unwrap_or(i64::MAX);
+        let connection = self.connection.clone();
+        let outcome = connection
+            .call(move |conn| {
+                // One statement, so the head and the page derive from
+                // one snapshot. The page is a bounded subquery: its
+                // LIMIT never drops the outer join's head row, so every
+                // empty page still reports the observed head, and only
+                // the selected rows reach the driver for decoding.
+                let mut statement = conn.prepare(
+                    "SELECT s.head, p.sequence, p.event_data, p.event_metadata \
+                       FROM (SELECT COALESCE(MAX(sequence), 0) AS head \
+                               FROM stream_events \
+                              WHERE category = ?1 AND stream_key = ?2) s \
+                       LEFT JOIN (SELECT sequence, event_data, event_metadata \
+                                    FROM stream_events \
+                                   WHERE category = ?1 AND stream_key = ?2 \
+                                     AND sequence BETWEEN ?3 AND ?4 \
+                                   ORDER BY sequence ASC \
+                                   LIMIT ?5) p ON TRUE \
+                      ORDER BY p.sequence ASC",
+                )?;
+                let rows = statement
+                    .query_map(
+                        rusqlite::params![category, key, lower_bound, upper_bound, page_bound],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, Option<i64>>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                            ))
+                        },
+                    )?
+                    .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+                let head = rows.first().map_or(0, |row| row.0);
+                // The SQL's `?3`/`?4` binds filter the ordinary range;
+                // the `u64` comparison below is decisive only where
+                // the lower bind clamped, and a clamped upper bind
+                // widening the page is exactly the contract's
+                // "includes all storable positions" case.
+                let in_range = rows
+                    .into_iter()
+                    .filter_map(|(_, sequence, payload, envelope)| {
+                        let sequence = sequence?;
+                        (stored_position(sequence) >= start).then_some((
+                            payload.expect("an in-range row carries its payload"),
+                            envelope.expect("an in-range row carries its envelope"),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                Ok::<_, SqliteStreamsError>((head, in_range))
+            })
+            .await;
+        let (head, rows) = actor_outcome(outcome)?;
+        Ok(
+            StreamSlice::new(decode_records(rows)?, version_of(stored_position(head)))
+                .expect("in-range rows imply an Exact observation"),
+        )
+    }
+
     async fn load_category(
         &self,
     ) -> Result<

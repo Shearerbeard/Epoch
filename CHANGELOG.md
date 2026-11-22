@@ -21,6 +21,15 @@
   `SqliteDatabase` handle is the root an application holds:
   `category`, `feed`, and `migrate` hand out per-category stores,
   feeds, and the schema over its one shared connection.
+- Bounded page reads on the streams surface: `EventStreams::load_stream_page`
+  returns the stored records inside an inclusive position range,
+  oldest first, at most a caller-supplied count, with the stream's
+  observed position. The range bounds which history a replay owns and
+  the count bounds each fetch; both SQL backends apply the range and
+  the count inside the query, so rows outside the page are never
+  decoded and an empty page still reports the observed head. Existing
+  callers are unaffected; external `EventStreams` implementors must
+  add the method.
 
 ### Changed
 
