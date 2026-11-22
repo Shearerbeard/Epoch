@@ -50,6 +50,10 @@ still change before the stable 0.2.0 release.
   effect or applying the restart failure budget, so a restart after the
   effect succeeded but before acknowledgement replays without
   re-performing the effect or firing the hook again.
+- Constrain `rusty_ulid` below 2.0.2, which declares a Rust 1.95 floor,
+  so fresh unlocked consumers resolve a Rust 1.88-compatible version.
+  The same latent spec ships in `0.2.0-alpha.1`; its lockfile pins a
+  compatible version, and registry consumers resolve their own.
 
 ### Known limits
 

@@ -26,7 +26,8 @@ sqlite = ["dep:tokio-rusqlite", "dep:serde_json"]
 async-trait = "0.1.53"
 eventstore = { version = "4.0.0", optional = true }
 redis-om = { version = "0.1.0", features = ["json"], optional = true}
-rusty_ulid = "2.0.0"
+# 2.0.2 declares a Rust 1.95 floor, above the declared 1.88.
+rusty_ulid = { version = ">=2.0.0, <2.0.2" }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = { version = "1.0.81", optional = true }
 thiserror = "1.0"
