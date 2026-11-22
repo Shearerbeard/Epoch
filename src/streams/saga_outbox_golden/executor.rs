@@ -8,7 +8,8 @@ use crate::streams::outbox::{ExecutorError, ExecutorStep, Record};
 use crate::streams::{EventBatch, EventMetadata, EventStreams, ExpectedVersion, RenderedIntentKey};
 
 use super::support::{
-    intent_envelope, limit, rendered, stream_len, wait_until, Fx, Hook, Port, PortErr, Rig, SOURCE,
+    intent_envelope, limit, rendered, stream_len, wait_until, Fx, Hook, MemExecutor, Port, PortErr,
+    Rig, SOURCE,
 };
 
 /// The executor performs an intent through the port - keyed, not
@@ -376,6 +377,68 @@ async fn a_rejecting_hook_leaves_the_park_standing_and_refires() {
     assert_eq!(port.calls.lock().unwrap().len(), 1);
 }
 
+/// The expected whole-frame history after a replay parks an intent:
+/// the intent, one `Failed` row per stored diagnostic in order, and
+/// the `Parked` record carrying the durable count - the stored
+/// failure rows - and the latest diagnostic.
+fn parked_history(key: &str, request: Fx, failures: &[&str]) -> Vec<(Record<Fx>, EventMetadata)> {
+    let mut expected = vec![(
+        Record::Intent {
+            intent: RenderedIntentKey::from_rendered(key.to_owned()),
+            request,
+        },
+        intent_envelope(key),
+    )];
+    for &error in failures {
+        expected.push((
+            Record::Failed {
+                intent: RenderedIntentKey::from_rendered(key.to_owned()),
+                error: error.to_owned(),
+            },
+            EventMetadata::new(),
+        ));
+    }
+    let attempts = NonZeroU32::new(failures.len() as u32)
+        .expect("a parked history holds at least one failure");
+    let latest = failures
+        .last()
+        .copied()
+        .expect("a parked history holds at least one failure");
+    expected.push((
+        Record::Parked {
+            intent: RenderedIntentKey::from_rendered(key.to_owned()),
+            attempts,
+            error: latest.to_owned(),
+        },
+        EventMetadata::new(),
+    ));
+    expected
+}
+
+/// The parked record arrives on the next poll: an audit fact, not a
+/// second trigger. The step skips and acks past it, the hook stays at
+/// its one park-time fire, and the poll after that is idle.
+async fn parked_record_settles(rig: &Rig, executor: &MemExecutor, hook: &Hook) {
+    let parked_position = rig.outbox_tip().await;
+    assert_eq!(
+        executor
+            .step(limit(10))
+            .await
+            .expect("the parked record skips"),
+        ExecutorStep::Advanced {
+            acked_to: parked_position
+        }
+    );
+    assert_eq!(hook.fires.lock().unwrap().len(), 1);
+    assert_eq!(
+        executor
+            .step(limit(10))
+            .await
+            .expect("the stream is settled"),
+        ExecutorStep::Idle
+    );
+}
+
 /// The crash between the last `Failed` and the `Parked` append,
 /// replayed: the durable count is at the budget with no park on
 /// record, so the replay parks NOW - `Parked` with the durable count
@@ -404,9 +467,6 @@ async fn a_crash_before_the_park_lands_parks_on_the_replay() {
         },
         "the park lands; the page's own entries ack through, the parked record arrives next poll"
     );
-    let parked_position = rig.outbox_tip().await;
-    assert!(parked_position.get() > failed_position.get());
-
     assert_eq!(
         &*hook.fires.lock().unwrap(),
         &[(key.clone(), 2, failed_error.to_owned())],
@@ -418,56 +478,10 @@ async fn a_crash_before_the_park_lands_parks_on_the_replay() {
     );
     assert_eq!(
         rig.outbox_records("saga-15").await,
-        vec![
-            (
-                Record::Intent {
-                    intent: RenderedIntentKey::from_rendered(key.clone()),
-                    request: Fx::Export { item: 85 },
-                },
-                intent_envelope(&key)
-            ),
-            (
-                Record::Failed {
-                    intent: RenderedIntentKey::from_rendered(key.clone()),
-                    error: failed_error.to_owned(),
-                },
-                EventMetadata::new()
-            ),
-            (
-                Record::Failed {
-                    intent: RenderedIntentKey::from_rendered(key.clone()),
-                    error: failed_error.to_owned(),
-                },
-                EventMetadata::new()
-            ),
-            (
-                Record::Parked {
-                    intent: RenderedIntentKey::from_rendered(key.clone()),
-                    attempts: NonZeroU32::new(2).expect("2 is nonzero"),
-                    error: failed_error.to_owned(),
-                },
-                EventMetadata::new()
-            ),
-        ]
+        parked_history(&key, Fx::Export { item: 85 }, &[failed_error, failed_error]),
+        "the park lands after the stored failures, carrying their count and diagnostic"
     );
-    assert_eq!(
-        executor
-            .step(limit(10))
-            .await
-            .expect("the parked record skips"),
-        ExecutorStep::Advanced {
-            acked_to: parked_position
-        }
-    );
-    assert_eq!(
-        hook.fires.lock().unwrap().len(),
-        1,
-        "an audit fact, not a trigger"
-    );
-    assert_eq!(
-        executor.step(limit(10)).await.expect("third step"),
-        ExecutorStep::Idle
-    );
+    parked_record_settles(&rig, &executor, &hook).await;
 }
 
 /// Two failures were stored under a wider budget; the restart runs a
@@ -509,58 +523,10 @@ async fn a_tighter_restart_budget_parks_from_the_durable_count() {
     );
     assert_eq!(
         rig.outbox_records("saga-20").await,
-        vec![
-            (
-                Record::Intent {
-                    intent: RenderedIntentKey::from_rendered(key.clone()),
-                    request: Fx::Export { item: 95 },
-                },
-                intent_envelope(&key)
-            ),
-            (
-                Record::Failed {
-                    intent: RenderedIntentKey::from_rendered(key.clone()),
-                    error: first_error.to_owned(),
-                },
-                EventMetadata::new()
-            ),
-            (
-                Record::Failed {
-                    intent: RenderedIntentKey::from_rendered(key.clone()),
-                    error: latest_error.to_owned(),
-                },
-                EventMetadata::new()
-            ),
-            (
-                Record::Parked {
-                    intent: RenderedIntentKey::from_rendered(key.clone()),
-                    attempts: NonZeroU32::new(2).expect("2 is nonzero"),
-                    error: latest_error.to_owned(),
-                },
-                EventMetadata::new()
-            ),
-        ],
+        parked_history(&key, Fx::Export { item: 95 }, &[first_error, latest_error]),
         "one park with the durable count; no duplicated outcome"
     );
-
-    // The parked record itself arrives on the next poll: an audit
-    // fact, not a second trigger.
-    let parked_position = rig.outbox_tip().await;
-    let step = executor
-        .step(limit(10))
-        .await
-        .expect("the second step succeeds");
-    assert_eq!(
-        step,
-        ExecutorStep::Advanced {
-            acked_to: parked_position
-        }
-    );
-    assert_eq!(hook.fires.lock().unwrap().len(), 1);
-    assert_eq!(
-        executor.step(limit(10)).await.expect("third step"),
-        ExecutorStep::Idle
-    );
+    parked_record_settles(&rig, &executor, &hook).await;
 }
 
 /// A pre-repair history: the effect succeeded and `Done` was stored,
@@ -595,9 +561,8 @@ async fn a_stored_done_stays_terminal_over_later_outcomes() {
     let hook = Hook::default();
     let executor = rig.executor("saga-21", port.clone(), hook.clone(), 1);
 
-    let step = executor.step(limit(10)).await.expect("the replay acks");
     assert_eq!(
-        step,
+        executor.step(limit(10)).await.expect("the replay acks"),
         ExecutorStep::Advanced { acked_to: tail },
         "the durable success settles the whole history in one pass"
     );
