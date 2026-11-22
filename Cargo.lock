@@ -461,7 +461,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "epoch-journal"
-version = "0.2.0-alpha.1"
+version = "0.2.0-beta.1"
 dependencies = [
  "actix-rt",
  "assert_matches",
